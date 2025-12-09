@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package task;
+
+
+// 适配器类型枚举（使用 UNSPECIFIED 作为默认值以支持向前兼容）
+enum AdapterType {
+  ADAPTER_UNSPECIFIED = 0;
+  CURL_CFFI = 1;
+  HTTPX = 2;
+  REQUESTS = 3;
+  PLAYWRIGHT = 4;
+  // 可扩展其他适配器
+}
+
+// HTTP 方法枚举
+enum HttpMethod {
+  METHOD_UNSPECIFIED = 0;
+  GET = 1;
+  POST = 2;
+  PUT = 3;
+  DELETE = 4;
+  PATCH = 5;
+  HEAD = 6;
+  OPTIONS = 7;
+}
+
+// 代理信息消息（分离字段以便灵活配置）
+message ProxyInfo {
+  string scheme = 1;  // e.g., "http", "https", "socks5"
+  string host = 2;
+  int32 port = 3;
+  string username = 4;
+  string password = 5;
+  string ext = 6; // 隧道代理： C{自定义通道名}:T{存活时间}:A{国家编码}
+}
+
+// 表单数据子消息（用于 oneof 中的 map）
+message FormData {
+  map<string, string> data = 1;  // 表单字段
+}
+
+// 请求任务消息
+message ReqTask {
+  string uuid = 1;  // 唯一标识符
+  AdapterType adapter = 2;  // 下载适配器
+  string url = 3;  // 请求 URL
+  HttpMethod method = 4;  // 请求方法
+  map<string, string> headers = 5;  // 请求头（键值对）
+  map<string, string> params = 6;  // 查询参数（键值对）
+  oneof body {// 请求体（互斥类型以优化大小）
+    bytes raw = 7;  // 二进制体
+    string text = 8;  // 文本体（e.g., JSON）
+    FormData form_data = 9;   // 表单数据
+  }
+  int32 timeout_seconds = 11;  // 超时时间（秒）
+  ProxyInfo proxy = 12;  // 代理信息
+  int32 max_retries = 13;  // 重试次数
+  int32 retry_backoff_seconds = 14;  // 重试间隔（秒，支持指数退避扩展）
+  map<string, string> extensions = 15;  // 扩展信息（e.g., "ja3_fingerprint": "value"）
+  string automation_script = 16;  // 自动化脚本（对于 Puppeteer 等，长脚本需注意大小）
+  map<string, string> cookies = 17;  // Cookie 映射，用于 Session 传递
+  bool verify_ssl = 18;  // 是否验证 SSL（默认 true）
+  int32 max_redirects = 19;  // 最大重定向次数
+  string user_agent = 20;  // 用户代理字符串（可选覆盖默认）
+  string encoding = 21;  // 响应编码（e.g., "utf-8"）
+  repeated string allowed_status_codes = 22;  // 重试白名单，如 ["200", "404"]
+}
+
+// 响应消息
+message TaskResp {
+  string request_uuid = 1;
+  AdapterType adapter = 2;  // 下载适配器
+  ReqTask original_request = 3;  // 原始请求信息
+  string effective_url = 4;  // 实际 URL
+  int32 status_code = 5;  // 响应状态码
+  map<string, string> response_headers = 6;  // 响应头
+  bytes content = 7;
+  string error_message = 8;  // 错误信息（如果失败）
+  int64 response_time_ms = 9;  // 响应时间（毫秒）
+}
+
+// 服务定义
+service TaskService {
+  rpc Send(ReqTask) returns (TaskResp) {}
+}
