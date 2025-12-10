@@ -1,12 +1,16 @@
 # -*- coding:utf-8 -*-
 
 """
+日志工厂类
+
 @time: 2025-12-10
 @author: Hades
 @file: logger.py
 """
+
 import logging
 import sys
+
 from logging.handlers import RotatingFileHandler
 
 

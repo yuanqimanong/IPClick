@@ -1,10 +1,15 @@
 # -*- coding:utf-8 -*-
 
 """
+Config 加载器
+加载顺序：指定路径配置 > Home目录配置 > 包内默认配置
+环境变量：覆盖服务端 IP 和 PORT 配置
+
 @time: 2025-12-10
 @author: Hades
 @file: loader.py
 """
+
 import os
 import tomllib
 from pathlib import Path

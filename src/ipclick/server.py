@@ -16,36 +16,11 @@ from typing import Optional
 
 import grpc
 
-
-def _setup_imports():
-    """设置导入路径，解决相对导入问题"""
-    import sys
-    from pathlib import Path
-
-    # 获取当前文件的目录
-    current_dir = Path(__file__).parent
-    # 获取项目根目录（src的父目录）
-    project_root = current_dir.parent.parent
-    # 添加src目录到Python路径
-    src_dir = project_root / "src"
-
-    if str(src_dir) not in sys.path:
-        sys.path.insert(0, str(src_dir))
-
-
-# 在导入其他模块之前设置路径
-_setup_imports()
-
-try:
-    from ipclick.dto.proto import task_pb2_grpc
-    from ipclick.config_loader import load_config
-    from ipclick.services import TaskService
-    from ipclick.utils.logger import LoggerFactory
-    from ipclick.adapters import get_adapter_info, get_default_adapter
-except ImportError as e:
-    print(f"Import error: {e}")
-    print("Please run the server using: python -m ipclick.server")
-    sys.exit(1)
+from ipclick.adapters import get_adapter_info, get_default_adapter
+from ipclick.config_loader import load_config
+from ipclick.dto.proto import task_pb2_grpc
+from ipclick.services import TaskService
+from ipclick.utils.logger import LoggerFactory
 
 
 class IPClickServer:
@@ -68,10 +43,9 @@ class IPClickServer:
         # 配置日志
         LoggerFactory.setup_logging(self.config)
         self.logger = logging.getLogger(__name__)
-
         self.logger.info("IPClickServer initialized")
 
-    def start(self, port: Optional[int] = None, host: Optional[str] = None) -> None:
+    def start(self, host: Optional[str] = None, port: Optional[int] = None) -> None:
         """
         启动服务器
 
@@ -79,23 +53,23 @@ class IPClickServer:
             port: 服务端口（覆盖配置）
             host: 绑定地址（覆盖配置）
         """
-        server_config = self.config.get('server', {})
+        server_config = self.config.get('SERVER', {})
 
         # 参数优先级：函数参数 > 配置文件 > 默认值
-        server_port = port or server_config.get('port', 9527)
         server_host = host or server_config.get('host', '0.0.0.0')
+        server_port = port or server_config.get('port', 9527)
         max_workers = server_config.get('max_workers', 10)
 
         # 创建gRPC服务器
         self.server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=max_workers),
             options=[
-                ('grpc.keepalive_time_ms', 30000),
-                ('grpc. keepalive_timeout_ms', 5000),
+                ('grpc.keepalive_time_ms', 60000),
+                ('grpc. keepalive_timeout_ms', 30000),
                 ('grpc.keepalive_permit_without_calls', True),
-                ('grpc.http2.max_pings_without_data', 0),
+                ('grpc.http2.max_pings_without_data', 2),
                 ('grpc.http2.min_time_between_pings_ms', 10000),
-                ('grpc.http2.min_ping_interval_without_data_ms', 300000)
+                ('grpc.http2.min_ping_interval_without_data_ms', 120000)
             ]
         )
 
@@ -135,8 +109,7 @@ class IPClickServer:
     def _log_startup_info(self):
         """记录启动信息"""
         try:
-            from ipclick.adapters import get_adapter_info, get_default_adapter
-
+            #TODO
             # 记录适配器信息
             adapter_info = get_adapter_info()
             default = get_default_adapter()
@@ -211,19 +184,19 @@ class IPClickServer:
 
 
 def serve(config_path: Optional[str] = None,
-          port: Optional[int] = None,
-          host: Optional[str] = None):
+          host: Optional[str] = None,
+          port: Optional[int] = None):
     """
     启动IPClick服务器的便捷函数
 
     Args:
-        config_path: 配置文件路径
-        port:  服务端口
+        config_path: 自定义配置文件路径
         host: 绑定地址
+        port:  服务端口
     """
     try:
         server = IPClickServer(config_path)
-        server.start(port=port, host=host)
+        server.start(host=host, port=port)
     except KeyboardInterrupt:
         pass  # 正常退出
     except Exception as e:
