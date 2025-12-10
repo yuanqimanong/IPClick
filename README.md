@@ -163,7 +163,7 @@ pip install -e .[all]
 ipclick init
 
 # 指定配置文件路径
-ipclick init --config /path/to/config.yaml
+ipclick init --configs /path/to/configs.yaml
 
 # 强制覆盖已存在的配置文件
 ipclick init --force
@@ -185,7 +185,7 @@ ipclick start --api-only
 ipclick start --web-only
 
 # 指定配置文件
-ipclick start --config /path/to/config.yaml
+ipclick start --configs /path/to/configs.yaml
 
 # 指定日志级别
 ipclick start --log-level DEBUG
@@ -237,16 +237,16 @@ ipclick plugin disable plugin_name
 
 ```bash
 # 查看所有配置
-ipclick config get
+ipclick configs get
 
 # 查看特定配置项
-ipclick config get storage.type
+ipclick configs get storage.type
 
 # 设置配置项
-ipclick config set storage.type redis
+ipclick configs set storage.type redis
 
 # 重置配置
-ipclick config reset --force
+ipclick configs reset --force
 ```
 
 ### 其他命令
@@ -272,7 +272,7 @@ python -m ipclick --help
 python -m ipclick --scheduler-only
 
 # 指定配置文件
-python -m ipclick --config config.yaml
+python -m ipclick --configs configs.yaml
 ```
 
 ### 配置
@@ -489,9 +489,10 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 async def main():
     # 导入IPClick
-    from ipclick.config import Config
+    from ipclick.configs import Config
     from ipclick.core.storage_manager import storage_manager
 
     # 检查配置文件是否存在
@@ -568,6 +569,7 @@ async def main():
     # 关闭存储
     storage_manager.close_all()
 
+
 # 运行主函数
 asyncio.run(main())
 ```
@@ -642,13 +644,14 @@ class MyFetcher(BaseFetcher):
 ```python
 from ipclick.core.storage import BaseStorage
 from ipclick.core.models import Proxy
-from ipclick.config import Config
+from ipclick.configs import Config
 import json
 import os
 import random
 from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
 
 class MyStorage(BaseStorage):
     """自定义存储后端 - 使用JSON文件存储代理"""
@@ -839,9 +842,10 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 async def main():
     # 导入IPClick
-    from ipclick.config import Config
+    from ipclick.configs import Config
     from ipclick.core.storage_manager import storage_manager
 
     # 获取存储实例
@@ -866,6 +870,7 @@ async def main():
 
     # 关闭存储
     storage_manager.close_all()
+
 
 # 运行主函数
 asyncio.run(main())
