@@ -13,8 +13,8 @@ from pathlib import Path
 
 import click
 
-from ..config_loader import load_config
-from ..server import serve
+from ipclick import load_config
+from ipclick.server import serve
 
 
 @click.group()

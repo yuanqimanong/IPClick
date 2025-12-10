@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from random import randint
 from typing import Optional, Dict, Any, Literal
 
-from ..dto.response import Response
+from ipclick.dto import Response
 
 HttpMethod = Literal[
     "GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "TRACE", "PATCH", "QUERY"

@@ -10,8 +10,8 @@
 
 from typing import Dict, Type
 
-from .base import Downloader
-from ..dto.response import Response
+from ipclick import Downloader
+from ipclick.dto import Response
 
 # 适配器注册表
 _ADAPTERS: Dict[str, Type[Downloader]] = {}

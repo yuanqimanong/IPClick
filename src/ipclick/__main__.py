@@ -5,8 +5,7 @@
 @author: Hades
 @file: __main__.py
 """
-
-from .cli.main import main
+from ipclick.cli import main
 
 if __name__ == '__main__':
     main()

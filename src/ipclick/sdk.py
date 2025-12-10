@@ -10,9 +10,8 @@ from typing import Optional, Dict, Any, Union
 
 import grpc
 
-from .config_loader import load_config
-from .dto.models import DownloadTask, DownloadResponse, HttpMethod
-from .dto.proto import task_pb2_grpc
+from ipclick import load_config, DownloadTask, DownloadResponse, HttpMethod
+from ipclick.dto.proto import task_pb2_grpc
 
 
 class Downloader:

@@ -10,6 +10,10 @@ curl_cffi下载器适配器 - 默认推荐的HTTP客户端
 from copy import deepcopy
 from typing import Optional, Dict, Any
 
+from ipclick import Downloader, HttpMethod
+from ipclick.adapters.base import retry
+from ipclick.dto import Response
+
 try:
     import curl_cffi.requests
     from curl_cffi.requests.impersonate import DEFAULT_CHROME
@@ -25,9 +29,6 @@ try:
     FAKE_UA_AVAILABLE = True
 except ImportError:
     FAKE_UA_AVAILABLE = False
-
-from .base import Downloader, HttpMethod, retry
-from ..dto.response import Response
 
 
 class CurlCffiAdapter(Downloader):

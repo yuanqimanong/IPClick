@@ -7,6 +7,7 @@
 @author: Hades
 @file: __init__.py
 """
-from .response import Response
+
+from ipclick.dto.response import Response
 
 __all__ = ['Response']

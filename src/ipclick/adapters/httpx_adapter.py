@@ -9,6 +9,10 @@ httpx下载器适配器 - 备选HTTP客户端
 """
 from typing import Optional, Dict, Any
 
+from ipclick import Downloader, HttpMethod
+from ipclick.adapters.base import retry
+from ipclick.dto import Response
+
 try:
     import httpx
 
@@ -22,9 +26,6 @@ try:
     FAKE_UA_AVAILABLE = True
 except ImportError:
     FAKE_UA_AVAILABLE = False
-
-from .base import Downloader, HttpMethod, retry
-from ..dto.response import Response
 
 
 class HttpxAdapter(Downloader):

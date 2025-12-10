@@ -12,9 +12,9 @@ import time
 import traceback
 from typing import Optional, Dict, Any
 
-from ..adapters import create_adapter, get_default_adapter, get_adapter_info
-from ..dto.proto import task_pb2, task_pb2_grpc
-from ..dto.response import Response
+from ipclick.adapters import get_default_adapter, get_adapter_info, create_adapter
+from ipclick.dto import Response
+from ipclick.dto.proto import task_pb2_grpc, task_pb2
 
 
 class TaskService(task_pb2_grpc.TaskServiceServicer):

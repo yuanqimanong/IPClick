@@ -7,6 +7,6 @@
 @author: Hades
 @file: __init__.py
 """
-from .task_service import TaskService
+from ipclick.services.task_service import TaskService
 
 __all__ = ['TaskService']

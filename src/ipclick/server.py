@@ -7,6 +7,7 @@ gRPC服务器启动和管理
 @author: Hades
 @file: __init__.py
 """
+
 import logging
 import signal
 import sys
@@ -15,10 +16,36 @@ from typing import Optional
 
 import grpc
 
-from ipclick import load_config
-from ipclick.dto.proto import task_pb2_grpc
-from ipclick.services import TaskService
-from ipclick.utils.logger import LoggerFactory
+
+def _setup_imports():
+    """设置导入路径，解决相对导入问题"""
+    import sys
+    from pathlib import Path
+
+    # 获取当前文件的目录
+    current_dir = Path(__file__).parent
+    # 获取项目根目录（src的父目录）
+    project_root = current_dir.parent.parent
+    # 添加src目录到Python路径
+    src_dir = project_root / "src"
+
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+
+
+# 在导入其他模块之前设置路径
+_setup_imports()
+
+try:
+    from ipclick.dto.proto import task_pb2_grpc
+    from ipclick.config_loader import load_config
+    from ipclick.services import TaskService
+    from ipclick.utils.logger import LoggerFactory
+    from ipclick.adapters import get_adapter_info, get_default_adapter
+except ImportError as e:
+    print(f"Import error: {e}")
+    print("Please run the server using: python -m ipclick.server")
+    sys.exit(1)
 
 
 class IPClickServer:
