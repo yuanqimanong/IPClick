@@ -16,6 +16,7 @@ import httpx
 
 from ipclick.config_loader import load_config
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
+from ipclick.utils.logger import LoggerFactory
 
 
 class TaskService(task_pb2_grpc.TaskServiceServicer):
@@ -154,15 +155,12 @@ def serve(config_path=None, port=None, host=None):
     config = load_config(config_path)
 
     # 命令行参数优先级最高
-    server_port = port or config.get('server', {}).get('port', 9527)
-    server_host = host or config.get('server', {}).get('host', '0.0.0.0')
-    max_workers = config.get('server', {}).get('max_workers', 10)
+    server_port = port or config.get('SERVER', {}).get('port', 9527)
+    server_host = host or config.get('SERVER', {}).get('host', '0.0.0.0')
+    max_workers = config.get('SERVER', {}).get('max_workers', 10)
 
     # 配置日志
-    log_level = config.get('logging', {}).get('level', 'INFO')
-    log_format = config.get('logging', {}).get('format', '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-    logging.basicConfig(level=getattr(logging, log_level), format=log_format)
+    LoggerFactory.setup_logging(config)
     logger = logging.getLogger(__name__)
 
     # 创建gRPC服务器

@@ -17,13 +17,13 @@ def load_config(config_path: str | Path | None = None):
 
     # 1. 包内默认配置文件（可选，如果你有的话）
     if DEFAULT_CONFIG_PATH.exists():
-        with open(DEFAULT_CONFIG_PATH, "rb", encoding="utf-8") as f:
+        with open(DEFAULT_CONFIG_PATH, "rb") as f:
             config.update(tomllib.load(f) or {})
 
     # 2. 用户家目录配置（~/.ipclick/config.toml）
     home_config = Path.home() / ".ipclick" / "config.toml"
     if home_config.exists():
-        with open(home_config, "rb", encoding="utf-8") as f:
+        with open(home_config, "rb") as f:
             config.update(tomllib.load(f) or {})
 
     # 3. 当前项目目录配置（最高优先级）
@@ -39,14 +39,14 @@ def load_config(config_path: str | Path | None = None):
             user_path = None
 
     if user_path and user_path.exists():
-        with open(user_path, "rb", encoding="utf-8") as f:
+        with open(user_path, "rb") as f:
             user_config = tomllib.load(f) or {}
             config.update(user_config)
 
     # 4. 环境变量覆盖（最高优先级）
     if os.getenv("IPCLICK_HOST"):
-        config.setdefault("server", {})["host"] = os.getenv("IPCLICK_HOST")
+        config.setdefault("SERVER", {})["host"] = os.getenv("IPCLICK_HOST")
     if os.getenv("IPCLICK_PORT"):
-        config.setdefault("server", {})["port"] = int(os.getenv("IPCLICK_PORT"))
+        config.setdefault("SERVER", {})["port"] = int(os.getenv("IPCLICK_PORT"))
 
     return config
