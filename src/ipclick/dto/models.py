@@ -24,6 +24,7 @@ class HttpMethod(Enum):
 
 
 class Adapter(Enum):
+    CURL_CFFI = "curl_cffi"  # 新增：默认适配器
     HTTPX = "httpx"
     REQUESTS = "requests"
     AIOHTTP = "aiohttp"
@@ -64,10 +65,13 @@ class DownloadTask:
     max_retries: int = 3
     verify_ssl: bool = True
     proxy: Optional[ProxyConfig] = None
-    adapter: Adapter = Adapter.HTTPX
+    adapter: Adapter = Adapter.CURL_CFFI  # 更改默认适配器
     user_agent: str = "IPClick Client v1.0"
     follow_redirects: bool = True
     stream: bool = False
+
+    # 新增字段用于curl_cffi
+    impersonate: Optional[str] = None  # 浏览器指纹伪装
 
     def __post_init__(self):
         """数据验证"""
@@ -80,6 +84,10 @@ class DownloadTask:
         body_fields = [self.data, self.json_data, self.files]
         if sum(x is not None for x in body_fields) > 1:
             raise ValueError("Cannot specify multiple body types (data, json_data, files)")
+
+        # 设置默认的浏览器伪装
+        if self.adapter == Adapter.CURL_CFFI and not self.impersonate:
+            self.impersonate = "chrome"
 
     def to_protobuf(self):
         """转换为protobuf对象"""
@@ -98,6 +106,7 @@ class DownloadTask:
 
         # 转换适配器枚举
         adapter_map = {
+            Adapter.CURL_CFFI: task_pb2.CURL_CFFI if hasattr(task_pb2, 'CURL_CFFI') else task_pb2.HTTPX,
             Adapter.HTTPX: task_pb2.HTTPX,
             Adapter.REQUESTS: task_pb2.REQUESTS if hasattr(task_pb2, 'REQUESTS') else task_pb2.HTTPX,
             Adapter.AIOHTTP: task_pb2.AIOHTTP if hasattr(task_pb2, 'AIOHTTP') else task_pb2.HTTPX,
@@ -172,6 +181,25 @@ class DownloadResponse:
             error=pb_response.error_message if pb_response.error_message else None
         )
 
+    @classmethod
+    def from_response(cls, response, request_uuid: str = ""):
+        """从统一Response对象创建"""
+        from ..dto.response import Response
+
+        if isinstance(response, Response):
+            return cls(
+                request_uuid=request_uuid,
+                status_code=response.status_code,
+                headers=response.headers or {},
+                content=response.content or b'',
+                text=response.text or '',
+                url=response.url,
+                elapsed_ms=response.elapsed_ms,
+                error=str(response.exception) if response.exception else None
+            )
+        else:
+            raise ValueError("Expected Response object")
+
     def json(self) -> Dict[str, Any]:
         """解析JSON响应"""
         try:
@@ -199,3 +227,8 @@ def create_get_task(url: str, **kwargs) -> DownloadTask:
 def create_post_task(url: str, data=None, json_data=None, **kwargs) -> DownloadTask:
     """创建POST请求任务"""
     return DownloadTask(url=url, method=HttpMethod.POST, data=data, json_data=json_data, **kwargs)
+
+
+def create_curl_cffi_task(url: str, impersonate: str = "chrome", **kwargs) -> DownloadTask:
+    """创建curl_cffi任务"""
+    return DownloadTask(url=url, adapter=Adapter.CURL_CFFI, impersonate=impersonate, **kwargs)

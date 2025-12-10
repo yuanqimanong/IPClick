@@ -6,11 +6,12 @@
 @file: sdk.py
 """
 
-import grpc
 from typing import Optional, Dict, Any, Union
 
-from .dto.models import DownloadTask, DownloadResponse, HttpMethod, ProxyConfig, Adapter
+import grpc
+
 from .config_loader import load_config
+from .dto.models import DownloadTask, DownloadResponse, HttpMethod
 from .dto.proto import task_pb2_grpc
 
 

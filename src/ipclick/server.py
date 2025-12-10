@@ -1,185 +1,207 @@
 # -*- coding:utf-8 -*-
 
 """
+gRPC服务器启动和管理
+
 @time: 2025-12-10
 @author: Hades
 @file: __init__.py
 """
-
 import logging
-import time
-import traceback
+import signal
+import sys
 from concurrent import futures
+from typing import Optional
 
 import grpc
-import httpx
 
-from ipclick.config_loader import load_config
-from ipclick.dto.proto import task_pb2, task_pb2_grpc
+from ipclick import load_config
+from ipclick.dto.proto import task_pb2_grpc
+from ipclick.services import TaskService
 from ipclick.utils.logger import LoggerFactory
 
 
-class TaskService(task_pb2_grpc.TaskServiceServicer):
-    """任务处理服务"""
+class IPClickServer:
+    """
+    IPClick gRPC服务器
 
-    def __init__(self):
+    职责：
+    1. gRPC服务器的启动和停止
+    2. 配置管理
+    3. 信号处理
+    4. 日志配置
+    5. 服务注册
+    """
+
+    def __init__(self, config_path: Optional[str] = None):
+        self.config = load_config(config_path)
+        self.server = None
+        self.task_service = None
+
+        # 配置日志
+        LoggerFactory.setup_logging(self.config)
         self.logger = logging.getLogger(__name__)
 
-    def Send(self, request: task_pb2.ReqTask, context):
-        """处理任务请求"""
-        start_time = time.time()
-        self.logger.info(f"Received request: {request.uuid} for URL: {request.url}")
+        self.logger.info("IPClickServer initialized")
+
+    def start(self, port: Optional[int] = None, host: Optional[str] = None) -> None:
+        """
+        启动服务器
+
+        Args:
+            port: 服务端口（覆盖配置）
+            host: 绑定地址（覆盖配置）
+        """
+        server_config = self.config.get('server', {})
+
+        # 参数优先级：函数参数 > 配置文件 > 默认值
+        server_port = port or server_config.get('port', 9527)
+        server_host = host or server_config.get('host', '0.0.0.0')
+        max_workers = server_config.get('max_workers', 10)
+
+        # 创建gRPC服务器
+        self.server = grpc.server(
+            futures.ThreadPoolExecutor(max_workers=max_workers),
+            options=[
+                ('grpc.keepalive_time_ms', 30000),
+                ('grpc. keepalive_timeout_ms', 5000),
+                ('grpc.keepalive_permit_without_calls', True),
+                ('grpc.http2.max_pings_without_data', 0),
+                ('grpc.http2.min_time_between_pings_ms', 10000),
+                ('grpc.http2.min_ping_interval_without_data_ms', 300000)
+            ]
+        )
 
         try:
-            # 根据适配器选择处理方式
-            if request.adapter == task_pb2.HTTPX:
-                response = self._handle_httpx_request(request)
-            else:
-                # 默认使用httpx
-                response = self._handle_httpx_request(request)
+            # 创建任务服务
+            self.task_service = TaskService(self.config)
 
-            elapsed_ms = int((time.time() - start_time) * 1000)
-            response.response_time_ms = elapsed_ms
+            # 注册服务
+            task_pb2_grpc.add_TaskServiceServicer_to_server(self.task_service, self.server)
 
-            self.logger.info(f"Request {request.uuid} completed in {elapsed_ms}ms, status: {response.status_code}")
-            return response
+            # 绑定地址
+            listen_addr = f'{server_host}:{server_port}'
+            self.server.add_insecure_port(listen_addr)
+
+            # 启动服务器
+            self.server.start()
+
+            # 记录启动信息
+            self.logger.info(f"IPClick server started on {listen_addr} with {max_workers} workers")
+            self._log_startup_info()
+
+            # 注册信号处理
+            self._setup_signal_handlers()
+
+            # 等待终止
+            try:
+                self.server.wait_for_termination()
+            except KeyboardInterrupt:
+                self.logger.info("Received KeyboardInterrupt, shutting down...")
+                self.stop()
 
         except Exception as e:
-            elapsed_ms = int((time.time() - start_time) * 1000)
-            self.logger.error(f"Request {request.uuid} failed: {str(e)}")
-            self.logger.debug(traceback.format_exc())
+            self.logger.error(f"Failed to start server: {e}")
+            self.stop()
+            raise
 
-            # 返回错误响应
-            return task_pb2.TaskResp(
-                request_uuid=request.uuid,
-                adapter=request.adapter,
-                original_request=request,
-                effective_url=request.url,
-                status_code=500,
-                response_headers={},
-                content=b'',
-                error_message=str(e),
-                response_time_ms=elapsed_ms
-            )
+    def _log_startup_info(self):
+        """记录启动信息"""
+        try:
+            from .adapters import get_adapter_info, get_default_adapter
 
-    def _handle_httpx_request(self, request: task_pb2.ReqTask):
-        """使用httpx处理HTTP请求"""
-        # 构建请求参数
-        method = self._convert_method(request.method)
-        headers = dict(request.headers)
-        params = dict(request.params)
+            # 记录适配器信息
+            adapter_info = get_adapter_info()
+            default = get_default_adapter()
 
-        # 设置User-Agent
-        if request.user_agent:
-            headers['User-Agent'] = request.user_agent
+            self.logger.info(f"Available HTTP adapters: {list(adapter_info.keys())}")
+            self.logger.info(f"Default adapter: {default}")
 
-        # 处理代理
-        proxies = None
-        if request.proxy and request.proxy.host:
-            proxy_url = f"{request.proxy.scheme}://{request.proxy.host}:{request.proxy.port}"
-            proxies = {"http://": proxy_url, "https://": proxy_url}
+            # 记录配置信息
+            server_config = self.config.get('server', {})
+            self.logger.info(f"Server configuration: {server_config}")
 
-        # 处理请求体
-        content = None
-        json_data = None
-        if request.text:
-            try:
-                # 尝试解析为JSON
-                import json
-                json_data = json.loads(request.text)
-            except (json.JSONDecodeError, ValueError):
-                # 如果不是JSON，作为普通文本处理
-                content = request.text
+            # 记录适配器配置
+            adapter_configs = self.config.get('adapters', {})
+            if adapter_configs:
+                self.logger.info(f"Adapter configurations: {list(adapter_configs.keys())}")
 
-        # 创建httpx客户端
-        with httpx.Client(
-                timeout=request.timeout_seconds,
-                verify=request.verify_ssl,
-                proxies=proxies,
-                follow_redirects=True
-        ) as client:
+        except Exception as e:
+            self.logger.warning(f"Could not log startup info: {e}")
 
-            # 执行请求，带重试逻辑
-            last_exception = None
-            for attempt in range(request.max_retries + 1):
-                try:
-                    if attempt > 0:
-                        self.logger.info(f"Retrying request {request.uuid}, attempt {attempt + 1}")
+    def _setup_signal_handlers(self):
+        """设置信号处理器"""
 
-                    response = client.request(
-                        method=method,
-                        url=request.url,
-                        headers=headers,
-                        params=params,
-                        content=content,
-                        json=json_data
-                    )
+        def signal_handler(signum, frame):
+            signal_name = signal.Signals(signum).name
+            self.logger.info(f"Received signal {signal_name} ({signum}), shutting down...")
+            self.stop()
+            sys.exit(0)
 
-                    # 构造响应
-                    return task_pb2.TaskResp(
-                        request_uuid=request.uuid,
-                        adapter=request.adapter,
-                        original_request=request,
-                        effective_url=str(response.url),
-                        status_code=response.status_code,
-                        response_headers={k: v for k, v in response.headers.items()},
-                        content=response.content,
-                        error_message="",
-                        response_time_ms=0  # 将在调用处设置
-                    )
+        # 注册信号处理器
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
 
-                except Exception as e:
-                    last_exception = e
-                    if attempt < request.max_retries:
-                        time.sleep(min(2 ** attempt, 10))  # 指数退避
-                    continue
+        # Windows支持
+        if hasattr(signal, 'SIGBREAK'):
+            signal.signal(signal.SIGBREAK, signal_handler)
 
-            # 所有重试都失败了
-            raise last_exception
+    def stop(self, grace_period: int = 10):
+        """
+        停止服务器
 
-    def _convert_method(self, pb_method):
-        """转换protobuf方法为字符串"""
-        method_map = {
-            task_pb2.GET: "GET",
-            task_pb2.POST: "POST",
-            task_pb2.PUT: "PUT",
-            task_pb2.DELETE: "DELETE",
-            task_pb2.PATCH: "PATCH",
+        Args:
+            grace_period: 优雅停机时间（秒）
+        """
+        if self.server:
+            self.logger.info(f"Stopping gRPC server (grace period: {grace_period}s)...")
+            self.server.stop(grace=grace_period)
+
+        if self.task_service:
+            self.task_service.cleanup()
+
+        self.logger.info("IPClick server stopped")
+
+    def is_running(self) -> bool:
+        """检查服务器是否正在运行"""
+        return self.server is not None
+
+    def get_config(self) -> dict:
+        """获取服务器配置"""
+        return self.config.copy()
+
+    def get_stats(self) -> dict:
+        """获取服务器统计信息"""
+        stats = {
+            'running': self.is_running(),
+            'config': self.get_config()
         }
-        return method_map.get(pb_method, "GET")
+
+        if self.task_service:
+            stats['task_service'] = self.task_service.get_stats()
+
+        return stats
 
 
-def serve(config_path=None, port=None, host=None):
-    """启动gRPC服务器"""
-    # 加载配置
-    config = load_config(config_path)
+def serve(config_path: Optional[str] = None,
+          port: Optional[int] = None,
+          host: Optional[str] = None):
+    """
+    启动IPClick服务器的便捷函数
 
-    # 命令行参数优先级最高
-    server_port = port or config.get('SERVER', {}).get('port', 9527)
-    server_host = host or config.get('SERVER', {}).get('host', '0.0.0.0')
-    max_workers = config.get('SERVER', {}).get('max_workers', 10)
-
-    # 配置日志
-    LoggerFactory.setup_logging(config)
-    logger = logging.getLogger(__name__)
-
-    # 创建gRPC服务器
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
-    task_pb2_grpc.add_TaskServiceServicer_to_server(TaskService(), server)
-
-    # 绑定地址
-    listen_addr = f'{server_host}:{server_port}'
-    server.add_insecure_port(listen_addr)
-
-    # 启动服务器
-    server.start()
-    logger.info(f"IPClick server started on {listen_addr} with {max_workers} workers")
-
+    Args:
+        config_path: 配置文件路径
+        port:  服务端口
+        host: 绑定地址
+    """
     try:
-        server.wait_for_termination()
+        server = IPClickServer(config_path)
+        server.start(port=port, host=host)
     except KeyboardInterrupt:
-        logger.info("Shutting down server...")
-        server.stop(grace=5)
+        pass  # 正常退出
+    except Exception as e:
+        logging.error(f"Server startup failed: {e}")
+        raise
 
 
 if __name__ == '__main__':
