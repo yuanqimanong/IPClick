@@ -135,7 +135,7 @@ class IPClickServer:
     def _log_startup_info(self):
         """记录启动信息"""
         try:
-            from .adapters import get_adapter_info, get_default_adapter
+            from ipclick.adapters import get_adapter_info, get_default_adapter
 
             # 记录适配器信息
             adapter_info = get_adapter_info()
