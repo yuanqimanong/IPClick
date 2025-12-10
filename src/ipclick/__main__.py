@@ -6,12 +6,7 @@
 @file: __main__.py
 """
 
-
-def main():
-    """主入口函数"""
-    from ipclick.cli.__main__ import main as cli_main
-    cli_main()
-
+from .cli.main import main
 
 if __name__ == '__main__':
     main()

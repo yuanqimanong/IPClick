@@ -6,8 +6,6 @@ mode = "standalone"
 env = "dev"
 # 调试模式 (开启后输出详细日志)
 debug = false
-# rpc 工作线程数
-workers = 10
 
 # ================ 代理配置 [PROXY] ================
 [PROXY]
@@ -22,6 +20,8 @@ timeout = 10
 host = "[::]"
 # 监听端口
 port = 9527
+# 最大线程数
+max_workers = 10
 
 # ================ 集群配置 [CLUSTER] ================
 [CLUSTER]
@@ -38,6 +38,8 @@ enabled = true
 [LOG]
 # 日志级别 (debug/info/warn/error)
 level = "info"
+# 日志格式
+format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 # 日志输出位置 (stdout 或文件路径)
 output = "stdout"
 # 日志轮转配置 (当 output 为文件时生效)

@@ -9,12 +9,11 @@ import os
 import tomllib
 from pathlib import Path
 
-DEFAULT_CONFIG_PATH = Path(__file__).parent / "configs" / "default_config.toml"
-DEFAULT_CONFIG = tomllib.load(DEFAULT_CONFIG_PATH.open("rb", encoding="utf-8")) or {}
+DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "configs" / "default_config.toml"
 
 
 def load_config(config_path: str | Path | None = None):
-    config = DEFAULT_CONFIG.copy()  # 先加载内置默认
+    config = {}
 
     # 1. 包内默认配置文件（可选，如果你有的话）
     if DEFAULT_CONFIG_PATH.exists():
@@ -45,8 +44,9 @@ def load_config(config_path: str | Path | None = None):
             config.update(user_config)
 
     # 4. 环境变量覆盖（最高优先级）
-    if os.getenv("IPCLICK_API_KEY"):
-        config["api_key"] = os.getenv("IPCLICK_API_KEY")
-    # ... 其他字段同理
+    if os.getenv("IPCLICK_HOST"):
+        config.setdefault("server", {})["host"] = os.getenv("IPCLICK_HOST")
+    if os.getenv("IPCLICK_PORT"):
+        config.setdefault("server", {})["port"] = int(os.getenv("IPCLICK_PORT"))
 
     return config
