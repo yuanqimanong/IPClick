@@ -1,0 +1,5 @@
+[DEFAULT_CONFIG]
+api_key = "default-key"
+timeout = 30
+model = "gpt-3.5-turbo"
+max_tokens = 2048
