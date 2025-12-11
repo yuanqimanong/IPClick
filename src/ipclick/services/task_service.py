@@ -7,9 +7,11 @@
 @author: Hades
 @file: task_service.py
 """
+import json
 import logging
 import time
 import traceback
+from json import JSONDecodeError
 from typing import Optional, Dict, Any
 
 from ipclick.adapters import get_default_adapter, get_adapter_info, create_adapter
@@ -33,18 +35,35 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         self.config = config or {}
         self.logger = logging.getLogger(__name__)
 
+        # protobuf适配器映射
+        self.adapter_mapping = {
+            task_pb2.ADAPTER_UNSPECIFIED: 'curl_cffi',
+            task_pb2.CURL_CFFI: 'curl_cffi',
+            task_pb2.HTTPX: 'httpx',
+        }
+        self.method_mapping = {
+            task_pb2.GET: "GET",
+            task_pb2.POST: "POST",
+            task_pb2.PUT: "PUT",
+            task_pb2.DELETE: "DELETE",
+            task_pb2.PATCH: "PATCH",
+            task_pb2.HEAD: "HEAD",
+            task_pb2.OPTIONS: "OPTIONS",
+        }
+
         # 适配器缓存
         self._adapters = {}
 
         # 获取默认适配器
         try:
-            self.default_adapter = self.config.get('adapters', {}).get('default') or get_default_adapter()
+            self.default_adapter = get_default_adapter()
         except RuntimeError as e:
             self.logger.error(f"No adapters available: {e}")
             raise
 
         # 适配器配置
-        self.adapter_configs = self.config.get('adapters', {})
+        self.adapter_configs = {'DOWNLOADER': self.config.get('DOWNLOADER', {}),
+                                'BROWSER': self.config.get('BROWSER', {})}
 
         # 记录初始化信息
         self.logger.info(f"TaskService initialized with default adapter: {self.default_adapter}")
@@ -71,8 +90,8 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         Returns:
             task_pb2.TaskResp: gRPC响应对象
         """
-        start_time = time.time()
         self.logger.info(f"Received request: {request.uuid} for URL: {request.url}")
+        start_time = time.time()
 
         try:
             # 选择适配器
@@ -115,35 +134,13 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         Returns:
             str: 适配器名称
         """
-        # protobuf适配器映射
-        adapter_mapping = {
-            task_pb2.HTTPX: 'httpx',
-            task_pb2.CURL_CFFI: 'curl_cffi',
-        }
-
-        # 如果有新的适配器枚举，可以在这里添加
-        if hasattr(task_pb2, 'REQUESTS'):
-            adapter_mapping[task_pb2.REQUESTS] = 'requests'
-        if hasattr(task_pb2, 'AIOHTTP'):
-            adapter_mapping[task_pb2.AIOHTTP] = 'aiohttp'
 
         # 如果没有指定或者是未知枚举，使用默认适配器
-        if pb_adapter not in adapter_mapping:
+        if pb_adapter not in self.adapter_mapping:
             self.logger.debug(f"Unknown adapter enum {pb_adapter}, using default:  {self.default_adapter}")
             return self.default_adapter
 
-        adapter_name = adapter_mapping[pb_adapter]
-
-        # 检查指定的适配器是否可用
-        try:
-            from ..adapters import get_adapter
-            get_adapter(adapter_name)
-            return adapter_name
-        except ValueError:
-            self.logger.warning(
-                f"Adapter {adapter_name} not available, using default: {self.default_adapter}"
-            )
-            return self.default_adapter
+        return self.adapter_mapping[pb_adapter]
 
     def _get_adapter(self, adapter_name: str):
         """
@@ -156,23 +153,19 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             Downloader: 适配器实例
         """
         if adapter_name not in self._adapters:
-            # 获取适配器特定配置
-            adapter_config = self.adapter_configs.get(adapter_name, {})
-
             # 创建适配器实例
             adapter = create_adapter(adapter_name)
 
-            # 应用配置
-            self._configure_adapter(adapter, adapter_config)
+            # TODO 应用配置
+            # self._configure_adapter(adapter)
 
             # 缓存适配器
             self._adapters[adapter_name] = adapter
-
             self.logger.debug(f"Created adapter instance: {adapter_name}")
 
         return self._adapters[adapter_name]
 
-    def _configure_adapter(self, adapter, config: Dict[str, Any]):
+    def _configure_adapter(self, adapter):
         """
         配置适配器实例
 
@@ -181,18 +174,18 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             config: 配置字典
         """
         # 通用配置项
-        if 'max_retries' in config:
-            adapter.max_retries = config['max_retries']
-        if 'retry_delay' in config:
-            adapter.retry_delay = config['retry_delay']
-        if 'timeout' in config:
-            adapter.timeout = config['timeout']
-        if 'verify_ssl' in config:
-            adapter.verify_ssl = config['verify_ssl']
+        if 'max_retries' in self.adapter_configs:
+            adapter.max_retries = self.adapter_configs['max_retries']
+        if 'retry_delay' in self.adapter_configs:
+            adapter.retry_delay = self.adapter_configs['retry_delay']
+        if 'timeout' in self.adapter_configs:
+            adapter.timeout = self.adapter_configs['timeout']
+        if 'verify_ssl' in self.adapter_configs:
+            adapter.verify_ssl = self.adapter_configs['verify_ssl']
 
         # curl_cffi特定配置
-        if hasattr(adapter, 'impersonate') and 'impersonate' in config:
-            adapter.impersonate = config['impersonate']
+        if hasattr(adapter, 'impersonate') and 'impersonate' in self.adapter_configs:
+            adapter.impersonate = self.adapter_configs['impersonate']
 
     def _execute_download(self, adapter, request: task_pb2.ReqTask) -> Response:
         """
@@ -229,9 +222,8 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         json_data = None
         if request.text:
             try:
-                import json
                 json_data = json.loads(request.text)
-            except (json.JSONDecodeError, ValueError):
+            except (JSONDecodeError, ValueError):
                 # 如果不是JSON，作为普通文本处理
                 data = request.text
 
@@ -268,21 +260,8 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         Returns:
             str: HTTP方法字符串
         """
-        method_mapping = {
-            task_pb2.GET: "GET",
-            task_pb2.POST: "POST",
-            task_pb2.PUT: "PUT",
-            task_pb2.DELETE: "DELETE",
-            task_pb2.PATCH: "PATCH",
-        }
 
-        # 添加可能存在的方法
-        if hasattr(task_pb2, 'HEAD'):
-            method_mapping[task_pb2.HEAD] = "HEAD"
-        if hasattr(task_pb2, 'OPTIONS'):
-            method_mapping[task_pb2.OPTIONS] = "OPTIONS"
-
-        return method_mapping.get(pb_method, "GET")
+        return self.method_mapping.get(pb_method, "GET")
 
     def _build_grpc_response(self, request: task_pb2.ReqTask, response: Response) -> task_pb2.TaskResp:
         """
@@ -325,7 +304,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             adapter=request.adapter,
             original_request=request,
             effective_url=request.url,
-            status_code=500,  # 服务器内部错误
+            status_code=-1,  # 错误
             response_headers={},
             content=b'',
             error_message=str(error),

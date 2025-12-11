@@ -16,7 +16,6 @@ from typing import Optional
 
 import grpc
 
-from ipclick.adapters import get_adapter_info, get_default_adapter
 from ipclick.config_loader import load_config
 from ipclick.dto.proto import task_pb2_grpc
 from ipclick.services import TaskService
@@ -89,7 +88,6 @@ class IPClickServer:
 
             # 记录启动信息
             self.logger.info(f"IPClick server started on {listen_addr} with {max_workers} workers")
-            self._log_startup_info()
 
             # 注册信号处理
             self._setup_signal_handlers()
@@ -105,29 +103,6 @@ class IPClickServer:
             self.logger.error(f"Failed to start server: {e}")
             self.stop()
             raise
-
-    def _log_startup_info(self):
-        """记录启动信息"""
-        try:
-            #TODO
-            # 记录适配器信息
-            adapter_info = get_adapter_info()
-            default = get_default_adapter()
-
-            self.logger.info(f"Available HTTP adapters: {list(adapter_info.keys())}")
-            self.logger.info(f"Default adapter: {default}")
-
-            # 记录配置信息
-            server_config = self.config.get('server', {})
-            self.logger.info(f"Server configuration: {server_config}")
-
-            # 记录适配器配置
-            adapter_configs = self.config.get('adapters', {})
-            if adapter_configs:
-                self.logger.info(f"Adapter configurations: {list(adapter_configs.keys())}")
-
-        except Exception as e:
-            self.logger.warning(f"Could not log startup info: {e}")
 
     def _setup_signal_handlers(self):
         """设置信号处理器"""

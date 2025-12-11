@@ -34,10 +34,9 @@ def list_adapters() -> Dict[str, Type[Downloader]]:
     return _ADAPTERS.copy()
 
 
-def create_adapter(name: str, **kwargs) -> Downloader:
+def create_adapter(name: str) -> Downloader:
     """创建适配器实例"""
-    adapter_class = get_adapter(name)
-    return adapter_class(**kwargs)
+    return get_adapter(name)()
 
 
 def is_adapter_available(name: str) -> bool:
@@ -54,7 +53,6 @@ def _register_available_adapters():
         from .curl_cffi_adapter import CurlCffiAdapter, is_available as curl_cffi_available
         if curl_cffi_available():
             register_adapter('curl_cffi', CurlCffiAdapter)
-            register_adapter('curlcffi', CurlCffiAdapter)  # 别名
             register_adapter('default', CurlCffiAdapter)  # 默认别名
     except ImportError:
         pass
