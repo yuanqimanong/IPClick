@@ -8,9 +8,9 @@
 
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, InitVar
 from enum import Enum
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any
 
 
 class HttpMethod(Enum):
@@ -24,10 +24,8 @@ class HttpMethod(Enum):
 
 
 class Adapter(Enum):
-    CURL_CFFI = "curl_cffi"  # 新增：默认适配器
+    CURL_CFFI = "curl_cffi"  # 默认适配器
     HTTPX = "httpx"
-    REQUESTS = "requests"
-    AIOHTTP = "aiohttp"
 
 
 @dataclass
@@ -54,26 +52,28 @@ class ProxyConfig:
 @dataclass
 class DownloadTask:
     """用户友好的下载任务"""
-    url: str
+    adapter: Adapter = Adapter.CURL_CFFI
     method: HttpMethod = HttpMethod.GET
-    headers: Optional[Dict[str, str]] = field(default_factory=dict)
+    url: str = ""
+    headers: Optional[Dict[str, Any]] = field(default_factory=dict)
+    cookies: Any = None
     params: Optional[Dict[str, Any]] = field(default_factory=dict)
-    data: Optional[Union[str, bytes]] = None
-    json_data: Optional[Dict[str, Any]] = None
+    data: Any = None
+    json: Optional[Dict[str, Any]] = None
     files: Optional[Dict[str, Any]] = None
-    timeout: int = 30
-    max_retries: int = 3
-    verify_ssl: bool = True
     proxy: Optional[ProxyConfig] = None
-    adapter: Adapter = Adapter.CURL_CFFI  # 更改默认适配器
-    user_agent: str = "IPClick Client v1.0"
+    timeout: int = 60
+    max_retries: int = 3
+    verify: bool = True
     follow_redirects: bool = True
     stream: bool = False
 
-    # 新增字段用于curl_cffi
+    # curl_cffi
     impersonate: Optional[str] = None  # 浏览器指纹伪装
 
-    def __post_init__(self):
+    kwargs: InitVar[Dict[str, Any]] = None
+
+    def __post_init__(self, kwargs):
         """数据验证"""
         if not self.url:
             raise ValueError("URL is required")
@@ -81,7 +81,7 @@ class DownloadTask:
             raise ValueError("URL must start with http:// or https://")
 
         # 不能同时指定多种请求体
-        body_fields = [self.data, self.json_data, self.files]
+        body_fields = [self.data, self.json, self.files]
         if sum(x is not None for x in body_fields) > 1:
             raise ValueError("Cannot specify multiple body types (data, json_data, files)")
 
@@ -100,16 +100,14 @@ class DownloadTask:
             HttpMethod.PUT: task_pb2.PUT,
             HttpMethod.DELETE: task_pb2.DELETE,
             HttpMethod.PATCH: task_pb2.PATCH,
-            HttpMethod.HEAD: task_pb2.HEAD if hasattr(task_pb2, 'HEAD') else task_pb2.GET,
-            HttpMethod.OPTIONS: task_pb2.OPTIONS if hasattr(task_pb2, 'OPTIONS') else task_pb2.GET,
+            HttpMethod.HEAD: task_pb2.HEAD,
+            HttpMethod.OPTIONS: task_pb2.OPTIONS,
         }
 
         # 转换适配器枚举
         adapter_map = {
-            Adapter.CURL_CFFI: task_pb2.CURL_CFFI if hasattr(task_pb2, 'CURL_CFFI') else task_pb2.HTTPX,
+            Adapter.CURL_CFFI: task_pb2.CURL_CFFI,
             Adapter.HTTPX: task_pb2.HTTPX,
-            Adapter.REQUESTS: task_pb2.REQUESTS if hasattr(task_pb2, 'REQUESTS') else task_pb2.HTTPX,
-            Adapter.AIOHTTP: task_pb2.AIOHTTP if hasattr(task_pb2, 'AIOHTTP') else task_pb2.HTTPX,
         }
 
         # 处理代理
@@ -118,7 +116,7 @@ class DownloadTask:
             proxy_info = task_pb2.ProxyInfo(
                 scheme=self.proxy.scheme,
                 host=self.proxy.host,
-                port=self.proxy.port or 8080
+                port=self.proxy.port
             )
 
         # 处理请求体
@@ -128,15 +126,15 @@ class DownloadTask:
                 request_body = self.data.decode('utf-8', errors='ignore')
             else:
                 request_body = str(self.data)
-        elif self.json_data:
-            request_body = json.dumps(self.json_data, ensure_ascii=False)
+        elif self.json:
+            request_body = json.dumps(self.json, ensure_ascii=False)
         elif self.files:
             # 简单处理文件上传，实际可能需要multipart编码
             request_body = json.dumps(self.files, ensure_ascii=False)
 
         return task_pb2.ReqTask(
             uuid=str(uuid.uuid4()),
-            adapter=adapter_map.get(self.adapter, task_pb2.HTTPX),
+            adapter=adapter_map.get(self.adapter, task_pb2.CURL_CFFI),
             url=self.url,
             method=method_map.get(self.method, task_pb2.GET),
             headers=self.headers or {},
@@ -145,8 +143,8 @@ class DownloadTask:
             timeout_seconds=self.timeout,
             proxy=proxy_info,
             max_retries=self.max_retries,
-            verify_ssl=self.verify_ssl,
-            user_agent=self.user_agent
+            verify_ssl=self.verify,
+            impersonate=self.impersonate
         )
 
 
@@ -216,19 +214,3 @@ class DownloadResponse:
         if not self.is_success():
             error_msg = self.error or f"HTTP {self.status_code} Error"
             raise Exception(f"Request failed:  {error_msg}")
-
-
-# 便捷的构造函数
-def create_get_task(url: str, **kwargs) -> DownloadTask:
-    """创建GET请求任务"""
-    return DownloadTask(url=url, method=HttpMethod.GET, **kwargs)
-
-
-def create_post_task(url: str, data=None, json_data=None, **kwargs) -> DownloadTask:
-    """创建POST请求任务"""
-    return DownloadTask(url=url, method=HttpMethod.POST, data=data, json_data=json_data, **kwargs)
-
-
-def create_curl_cffi_task(url: str, impersonate: str = "chrome", **kwargs) -> DownloadTask:
-    """创建curl_cffi任务"""
-    return DownloadTask(url=url, adapter=Adapter.CURL_CFFI, impersonate=impersonate, **kwargs)

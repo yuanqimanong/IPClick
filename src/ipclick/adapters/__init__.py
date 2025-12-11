@@ -10,7 +10,7 @@
 
 from typing import Dict, Type
 
-from ipclick import Downloader
+from ipclick.adapters.base import Downloader
 from ipclick.dto import Response
 
 # 适配器注册表

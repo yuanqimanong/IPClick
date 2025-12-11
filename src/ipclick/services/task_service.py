@@ -247,6 +247,8 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         elif data is not None:
             download_kwargs['data'] = data
 
+        if request.impersonate:
+            download_kwargs['impersonate'] = request.impersonate
         # 执行下载
         return adapter.download(request.url, **download_kwargs)
 

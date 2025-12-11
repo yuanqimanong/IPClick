@@ -5,8 +5,7 @@
 @author: Hades
 @file: sdk.py
 """
-
-from typing import Optional, Dict, Any, Union
+import logging
 
 import grpc
 
@@ -26,11 +25,60 @@ class Downloader:
             host: 服务器地址 (覆盖配置文件)
             port: 服务器端口 (覆盖配置文件)
         """
+        self.logger = logging.getLogger(__name__)
         self.config = load_config(config_path)
-        self.host = host or self.config.get('client', {}).get('host', 'localhost')
-        self.port = port or self.config.get('client', {}).get('port', 9527)
-        self.default_timeout = self.config.get('client', {}).get('default_timeout', 30)
-        self.default_retries = self.config.get('client', {}).get('retry_attempts', 3)
+        if self.config['GENERAL']['mode'] == 'standalone':
+            self.host = host or '127.0.0.1'
+            self.port = port or self.config['SERVER']['port']
+        else:
+            ...
+
+        self.default_adapter = 'curl_cffi'
+        self.downloader_cfg = self.config['DOWNLOADER']
+        self.browser_cfg = self.config['BROWSER']
+
+    def request(
+            self,
+            *,
+            adapter=None,
+            method,
+            url,
+            headers=None,
+            cookies=None,
+            params=None,
+            data=None,
+            json=None,
+            files=None,
+            proxy=None,
+            timeout=60,
+            max_retries=3,
+            verify=None,
+            follow_redirects=None,
+            stream=None,
+            impersonate=None,
+            **kwargs
+    ):
+
+        task = DownloadTask(
+            adapter=adapter or kwargs.get('adapter') or self.default_adapter,
+            url=url,
+            method=method.value,
+            headers=headers,
+            cookies=cookies,
+            params=params,
+            data=data,
+            json=json,
+            files=files,
+            proxy=proxy,
+            timeout=timeout,
+            max_retries=max_retries,
+            verify=verify,
+            follow_redirects=follow_redirects,
+            stream=stream,
+            impersonate=impersonate,
+            **kwargs
+        )
+        return self.download(task)
 
     def download(self, task: DownloadTask) -> DownloadResponse:
         """
@@ -57,98 +105,83 @@ class Downloader:
         except Exception as e:
             raise Exception(f"Connection error: {str(e)}") from e
 
-    def get(self, url: str,
-            headers: Optional[Dict[str, str]] = None,
-            params: Optional[Dict[str, Any]] = None,
-            timeout: Optional[int] = None,
-            **kwargs) -> DownloadResponse:
+    def get(self, url: str, params=None, **kwargs) -> DownloadResponse:
         """
         发送GET请求
 
         Args:
             url: 请求URL
-            headers: 请求头
             params: URL参数
-            timeout: 超时时间
             **kwargs:  其他DownloadTask参数
 
         Returns:
             响应对象
         """
-        task = DownloadTask(
-            url=url,
-            method=HttpMethod.GET,
-            headers=headers or {},
-            params=params or {},
-            timeout=timeout or self.default_timeout,
-            max_retries=self.default_retries,
-            **kwargs
-        )
-        return self.download(task)
+        return self.request(method=HttpMethod.GET, url=url, params=params, **kwargs)
 
-    def post(self, url: str,
-             data: Optional[Union[str, bytes]] = None,
-             json_data: Optional[Dict[str, Any]] = None,
-             headers: Optional[Dict[str, str]] = None,
-             timeout: Optional[int] = None,
-             **kwargs) -> DownloadResponse:
-        """
-        发送POST请求
-
-        Args:
-            url: 请求URL
-            data: 请求体数据
-            json_data:  JSON数据
-            headers: 请求头
-            timeout: 超时时间
-            **kwargs: 其他DownloadTask参数
-
-        Returns:
-            响应对象
-        """
-        task = DownloadTask(
-            url=url,
-            method=HttpMethod.POST,
-            data=data,
-            json_data=json_data,
-            headers=headers or {},
-            timeout=timeout or self.default_timeout,
-            max_retries=self.default_retries,
-            **kwargs
-        )
-        return self.download(task)
-
-    def put(self, url: str,
-            data: Optional[Union[str, bytes]] = None,
-            json_data: Optional[Dict[str, Any]] = None,
-            headers: Optional[Dict[str, str]] = None,
-            **kwargs) -> DownloadResponse:
-        """发送PUT请求"""
-        task = DownloadTask(
-            url=url,
-            method=HttpMethod.PUT,
-            data=data,
-            json_data=json_data,
-            headers=headers or {},
-            timeout=self.default_timeout,
-            max_retries=self.default_retries,
-            **kwargs
-        )
-        return self.download(task)
-
-    def delete(self, url: str,
-               headers: Optional[Dict[str, str]] = None,
-               **kwargs) -> DownloadResponse:
-        """发送DELETE请求"""
-        task = DownloadTask(
-            url=url,
-            method=HttpMethod.DELETE,
-            headers=headers or {},
-            timeout=self.default_timeout,
-            max_retries=self.default_retries,
-            **kwargs
-        )
-        return self.download(task)
+    # def post(self, url: str,
+    #          data: Optional[Union[str, bytes]] = None,
+    #          json_data: Optional[Dict[str, Any]] = None,
+    #          headers: Optional[Dict[str, str]] = None,
+    #          timeout: Optional[int] = None,
+    #          **kwargs) -> DownloadResponse:
+    #     """
+    #     发送POST请求
+    #
+    #     Args:
+    #         url: 请求URL
+    #         data: 请求体数据
+    #         json_data:  JSON数据
+    #         headers: 请求头
+    #         timeout: 超时时间
+    #         **kwargs: 其他DownloadTask参数
+    #
+    #     Returns:
+    #         响应对象
+    #     """
+    #     task = DownloadTask(
+    #         url=url,
+    #         method=HttpMethod.POST,
+    #         data=data,
+    #         json_data=json_data,
+    #         headers=headers or {},
+    #         timeout=timeout or self.default_timeout,
+    #         max_retries=self.default_retries,
+    #         **kwargs
+    #     )
+    #     return self.download(task)
+    #
+    # def put(self, url: str,
+    #         data: Optional[Union[str, bytes]] = None,
+    #         json_data: Optional[Dict[str, Any]] = None,
+    #         headers: Optional[Dict[str, str]] = None,
+    #         **kwargs) -> DownloadResponse:
+    #     """发送PUT请求"""
+    #     task = DownloadTask(
+    #         url=url,
+    #         method=HttpMethod.PUT,
+    #         data=data,
+    #         json_data=json_data,
+    #         headers=headers or {},
+    #         timeout=self.default_timeout,
+    #         max_retries=self.default_retries,
+    #         **kwargs
+    #     )
+    #     return self.download(task)
+    #
+    # def delete(self, url: str,
+    #            headers: Optional[Dict[str, str]] = None,
+    #            **kwargs) -> DownloadResponse:
+    #     """发送DELETE请求"""
+    #     task = DownloadTask(
+    #         url=url,
+    #         method=HttpMethod.DELETE,
+    #         headers=headers or {},
+    #         timeout=self.default_timeout,
+    #         max_retries=self.default_retries,
+    #         **kwargs
+    #     )
+    #     return self.download(task)
 
 
 # 提供默认的全局下载器实例
@@ -161,22 +194,6 @@ def get_downloader() -> Downloader:
     if _default_downloader is None:
         _default_downloader = Downloader()
     return _default_downloader
-
-
-# 便捷的全局函数
-def download(task: DownloadTask) -> DownloadResponse:
-    """全局下载函数"""
-    return get_downloader().download(task)
-
-
-def get(url: str, **kwargs) -> DownloadResponse:
-    """全局GET函数"""
-    return get_downloader().get(url, **kwargs)
-
-
-def post(url: str, **kwargs) -> DownloadResponse:
-    """全局POST函数"""
-    return get_downloader().post(url, **kwargs)
 
 
 # 向后兼容的别名

@@ -1,3 +1,6 @@
+// python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. task.proto
+// from . import task_pb2 as task__pb2
+
 syntax = "proto3";
 
 package task;
@@ -64,7 +67,8 @@ message ReqTask {
   int32 max_redirects = 19;  // 最大重定向次数
   string user_agent = 20;  // 用户代理字符串（可选覆盖默认）
   string encoding = 21;  // 响应编码（e.g., "utf-8"）
-  repeated string allowed_status_codes = 22;  // 重试白名单，如 ["200", "404"]
+  string impersonate = 22;  // 响应编码（e.g., "utf-8"）
+  repeated string allowed_status_codes = 23;  // 重试白名单，如 ["200", "404"]
 }
 
 // 响应消息

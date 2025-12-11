@@ -79,15 +79,6 @@ class CurlCffiAdapter(Downloader):
             self.session = curl_cffi.requests.Session(**kwargs)
         return self.session
 
-    def _get_user_agent(self) -> str:
-        """获取User-Agent"""
-        if self.ua_generator:
-            try:
-                return self.ua_generator.chrome
-            except:
-                pass
-        return self.user_agent
-
     @retry()
     def download(self, url: str, *,
                  method: HttpMethod = "GET",
@@ -122,19 +113,20 @@ class CurlCffiAdapter(Downloader):
             headers = {}
 
         # 自动设置User-Agent
-        if 'User-Agent' not in headers and 'user-agent' not in headers:
-            headers['User-Agent'] = self._get_user_agent()
+        # if 'User-Agent' not in headers and 'user-agent' not in headers:
+        #     headers['User-Agent'] = self._get_user_agent()
 
         # 设置超时
-        request_timeout = timeout or self.timeout
+        request_timeout = timeout
 
         # SSL验证处理
         if 'verify' in kwargs:
             # curl_cffi使用不同的参数名
             if not kwargs['verify']:
                 tmp_kwargs['verify'] = False
-        elif not self.verify_ssl:
-            tmp_kwargs['verify'] = False
+
+        # impersonate
+        impersonate = tmp_kwargs['impersonate']
 
         try:
             # 获取请求方法
@@ -151,7 +143,7 @@ class CurlCffiAdapter(Downloader):
                 cookies=cookies,
                 timeout=request_timeout,
                 proxies=proxies,
-                **tmp_kwargs
+                impersonate=impersonate,
             )
 
             # 转换响应

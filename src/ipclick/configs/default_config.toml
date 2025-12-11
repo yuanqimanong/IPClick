@@ -26,7 +26,7 @@ max_workers = 10
 # ================ 集群配置 [CLUSTER] ================
 [CLUSTER]
 # 负载均衡策略 (round_robin/random/weight)
-load_balancer = "least_connections"
+load_balancer = "round_robin"
 nodes = [
     # 格式：[id, address, region(可选), zone(可选), weight(可选), tags(可选)]
     { id = "node-101", address = "192.168.1.101:8080", region = "us-east-1", zone = "1a", weight = 100 },

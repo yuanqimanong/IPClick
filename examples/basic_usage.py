@@ -14,7 +14,8 @@ def basic_get_example():
 
     try:
         # 最简单的GET请求
-        response = downloader.get("http://192.168.14.60:9527/get")
+        # response = downloader.get("http://192.168.14.60:9527/get", impersonate='firefox')
+        response = downloader.get("http://httpbin.org/get", impersonate='firefox')
         print(f"状态码:  {response.status_code}")
         print(f"响应时间: {response.elapsed_ms}ms")
         print(f"响应内容: {response.json()}")

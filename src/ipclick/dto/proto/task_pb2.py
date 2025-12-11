@@ -23,7 +23,7 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n\ntask.proto\x12\x04task\"h\n\tProxyInfo\x12\x0e\n\x06scheme\x18\x01 \x01(\t\x12\x0c\n\x04host\x18\x02 \x01(\t\x12\x0c\n\x04port\x18\x03 \x01(\x05\x12\x10\n\x08username\x18\x04 \x01(\t\x12\x10\n\x08password\x18\x05 \x01(\t\x12\x0b\n\x03\x65xt\x18\x06 \x01(\t\"_\n\x08\x46ormData\x12&\n\x04\x64\x61ta\x18\x01 \x03(\x0b\x32\x18.task.FormData.DataEntry\x1a+\n\tDataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xa7\x06\n\x07ReqTask\x12\x0c\n\x04uuid\x18\x01 \x01(\t\x12\"\n\x07\x61\x64\x61pter\x18\x02 \x01(\x0e\x32\x11.task.AdapterType\x12\x0b\n\x03url\x18\x03 \x01(\t\x12 \n\x06method\x18\x04 \x01(\x0e\x32\x10.task.HttpMethod\x12+\n\x07headers\x18\x05 \x03(\x0b\x32\x1a.task.ReqTask.HeadersEntry\x12)\n\x06params\x18\x06 \x03(\x0b\x32\x19.task.ReqTask.ParamsEntry\x12\r\n\x03raw\x18\x07 \x01(\x0cH\x00\x12\x0e\n\x04text\x18\x08 \x01(\tH\x00\x12#\n\tform_data\x18\t \x01(\x0b\x32\x0e.task.FormDataH\x00\x12\x17\n\x0ftimeout_seconds\x18\x0b \x01(\x05\x12\x1e\n\x05proxy\x18\x0c \x01(\x0b\x32\x0f.task.ProxyInfo\x12\x13\n\x0bmax_retries\x18\r \x01(\x05\x12\x1d\n\x15retry_backoff_seconds\x18\x0e \x01(\x05\x12\x31\n\nextensions\x18\x0f \x03(\x0b\x32\x1d.task.ReqTask.ExtensionsEntry\x12\x19\n\x11\x61utomation_script\x18\x10 \x01(\t\x12+\n\x07\x63ookies\x18\x11 \x03(\x0b\x32\x1a.task.ReqTask.CookiesEntry\x12\x12\n\nverify_ssl\x18\x12 \x01(\x08\x12\x15\n\rmax_redirects\x18\x13 \x01(\x05\x12\x12\n\nuser_agent\x18\x14 \x01(\t\x12\x10\n\x08\x65ncoding\x18\x15 \x01(\t\x12\x1c\n\x14\x61llowed_status_codes\x18\x16 \x03(\t\x1a.\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x1a-\n\x0bParamsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x1a\x31\n\x0f\x45xtensionsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x1a.\n\x0c\x43ookiesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x42\x06\n\x04\x62ody\"\xd2\x02\n\x08TaskResp\x12\x14\n\x0crequest_uuid\x18\x01 \x01(\t\x12\"\n\x07\x61\x64\x61pter\x18\x02 \x01(\x0e\x32\x11.task.AdapterType\x12\'\n\x10original_request\x18\x03 \x01(\x0b\x32\r.task.ReqTask\x12\x15\n\reffective_url\x18\x04 \x01(\t\x12\x13\n\x0bstatus_code\x18\x05 \x01(\x05\x12=\n\x10response_headers\x18\x06 \x03(\x0b\x32#.task.TaskResp.ResponseHeadersEntry\x12\x0f\n\x07\x63ontent\x18\x07 \x01(\x0c\x12\x15\n\rerror_message\x18\x08 \x01(\t\x12\x18\n\x10response_time_ms\x18\t \x01(\x03\x1a\x36\n\x14ResponseHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01*^\n\x0b\x41\x64\x61pterType\x12\x17\n\x13\x41\x44\x41PTER_UNSPECIFIED\x10\x00\x12\r\n\tCURL_CFFI\x10\x01\x12\t\n\x05HTTPX\x10\x02\x12\x0c\n\x08REQUESTS\x10\x03\x12\x0e\n\nPLAYWRIGHT\x10\x04*n\n\nHttpMethod\x12\x16\n\x12METHOD_UNSPECIFIED\x10\x00\x12\x07\n\x03GET\x10\x01\x12\x08\n\x04POST\x10\x02\x12\x07\n\x03PUT\x10\x03\x12\n\n\x06\x44\x45LETE\x10\x04\x12\t\n\x05PATCH\x10\x05\x12\x08\n\x04HEAD\x10\x06\x12\x0b\n\x07OPTIONS\x10\x07\x32\x36\n\x0bTaskService\x12\'\n\x04Send\x12\r.task.ReqTask\x1a\x0e.task.TaskResp\"\x00\x62\x06proto3')
+    b'\n\ntask.proto\x12\x04task\"h\n\tProxyInfo\x12\x0e\n\x06scheme\x18\x01 \x01(\t\x12\x0c\n\x04host\x18\x02 \x01(\t\x12\x0c\n\x04port\x18\x03 \x01(\x05\x12\x10\n\x08username\x18\x04 \x01(\t\x12\x10\n\x08password\x18\x05 \x01(\t\x12\x0b\n\x03\x65xt\x18\x06 \x01(\t\"_\n\x08\x46ormData\x12&\n\x04\x64\x61ta\x18\x01 \x03(\x0b\x32\x18.task.FormData.DataEntry\x1a+\n\tDataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xbc\x06\n\x07ReqTask\x12\x0c\n\x04uuid\x18\x01 \x01(\t\x12\"\n\x07\x61\x64\x61pter\x18\x02 \x01(\x0e\x32\x11.task.AdapterType\x12\x0b\n\x03url\x18\x03 \x01(\t\x12 \n\x06method\x18\x04 \x01(\x0e\x32\x10.task.HttpMethod\x12+\n\x07headers\x18\x05 \x03(\x0b\x32\x1a.task.ReqTask.HeadersEntry\x12)\n\x06params\x18\x06 \x03(\x0b\x32\x19.task.ReqTask.ParamsEntry\x12\r\n\x03raw\x18\x07 \x01(\x0cH\x00\x12\x0e\n\x04text\x18\x08 \x01(\tH\x00\x12#\n\tform_data\x18\t \x01(\x0b\x32\x0e.task.FormDataH\x00\x12\x17\n\x0ftimeout_seconds\x18\x0b \x01(\x05\x12\x1e\n\x05proxy\x18\x0c \x01(\x0b\x32\x0f.task.ProxyInfo\x12\x13\n\x0bmax_retries\x18\r \x01(\x05\x12\x1d\n\x15retry_backoff_seconds\x18\x0e \x01(\x05\x12\x31\n\nextensions\x18\x0f \x03(\x0b\x32\x1d.task.ReqTask.ExtensionsEntry\x12\x19\n\x11\x61utomation_script\x18\x10 \x01(\t\x12+\n\x07\x63ookies\x18\x11 \x03(\x0b\x32\x1a.task.ReqTask.CookiesEntry\x12\x12\n\nverify_ssl\x18\x12 \x01(\x08\x12\x15\n\rmax_redirects\x18\x13 \x01(\x05\x12\x12\n\nuser_agent\x18\x14 \x01(\t\x12\x10\n\x08\x65ncoding\x18\x15 \x01(\t\x12\x13\n\x0bimpersonate\x18\x16 \x01(\t\x12\x1c\n\x14\x61llowed_status_codes\x18\x17 \x03(\t\x1a.\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x1a-\n\x0bParamsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x1a\x31\n\x0f\x45xtensionsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x1a.\n\x0c\x43ookiesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x42\x06\n\x04\x62ody\"\xd2\x02\n\x08TaskResp\x12\x14\n\x0crequest_uuid\x18\x01 \x01(\t\x12\"\n\x07\x61\x64\x61pter\x18\x02 \x01(\x0e\x32\x11.task.AdapterType\x12\'\n\x10original_request\x18\x03 \x01(\x0b\x32\r.task.ReqTask\x12\x15\n\reffective_url\x18\x04 \x01(\t\x12\x13\n\x0bstatus_code\x18\x05 \x01(\x05\x12=\n\x10response_headers\x18\x06 \x03(\x0b\x32#.task.TaskResp.ResponseHeadersEntry\x12\x0f\n\x07\x63ontent\x18\x07 \x01(\x0c\x12\x15\n\rerror_message\x18\x08 \x01(\t\x12\x18\n\x10response_time_ms\x18\t \x01(\x03\x1a\x36\n\x14ResponseHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01*^\n\x0b\x41\x64\x61pterType\x12\x17\n\x13\x41\x44\x41PTER_UNSPECIFIED\x10\x00\x12\r\n\tCURL_CFFI\x10\x01\x12\t\n\x05HTTPX\x10\x02\x12\x0c\n\x08REQUESTS\x10\x03\x12\x0e\n\nPLAYWRIGHT\x10\x04*n\n\nHttpMethod\x12\x16\n\x12METHOD_UNSPECIFIED\x10\x00\x12\x07\n\x03GET\x10\x01\x12\x08\n\x04POST\x10\x02\x12\x07\n\x03PUT\x10\x03\x12\n\n\x06\x44\x45LETE\x10\x04\x12\t\n\x05PATCH\x10\x05\x12\x08\n\x04HEAD\x10\x06\x12\x0b\n\x07OPTIONS\x10\x07\x32\x36\n\x0bTaskService\x12\'\n\x04Send\x12\r.task.ReqTask\x1a\x0e.task.TaskResp\"\x00\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -42,10 +42,10 @@ if not _descriptor._USE_C_DESCRIPTORS:
     _globals['_REQTASK_COOKIESENTRY']._serialized_options = b'8\001'
     _globals['_TASKRESP_RESPONSEHEADERSENTRY']._loaded_options = None
     _globals['_TASKRESP_RESPONSEHEADERSENTRY']._serialized_options = b'8\001'
-    _globals['_ADAPTERTYPE']._serialized_start = 1374
-    _globals['_ADAPTERTYPE']._serialized_end = 1468
-    _globals['_HTTPMETHOD']._serialized_start = 1470
-    _globals['_HTTPMETHOD']._serialized_end = 1580
+    _globals['_ADAPTERTYPE']._serialized_start = 1395
+    _globals['_ADAPTERTYPE']._serialized_end = 1489
+    _globals['_HTTPMETHOD']._serialized_start = 1491
+    _globals['_HTTPMETHOD']._serialized_end = 1601
     _globals['_PROXYINFO']._serialized_start = 20
     _globals['_PROXYINFO']._serialized_end = 124
     _globals['_FORMDATA']._serialized_start = 126
@@ -53,19 +53,19 @@ if not _descriptor._USE_C_DESCRIPTORS:
     _globals['_FORMDATA_DATAENTRY']._serialized_start = 178
     _globals['_FORMDATA_DATAENTRY']._serialized_end = 221
     _globals['_REQTASK']._serialized_start = 224
-    _globals['_REQTASK']._serialized_end = 1031
-    _globals['_REQTASK_HEADERSENTRY']._serialized_start = 831
-    _globals['_REQTASK_HEADERSENTRY']._serialized_end = 877
-    _globals['_REQTASK_PARAMSENTRY']._serialized_start = 879
-    _globals['_REQTASK_PARAMSENTRY']._serialized_end = 924
-    _globals['_REQTASK_EXTENSIONSENTRY']._serialized_start = 926
-    _globals['_REQTASK_EXTENSIONSENTRY']._serialized_end = 975
-    _globals['_REQTASK_COOKIESENTRY']._serialized_start = 977
-    _globals['_REQTASK_COOKIESENTRY']._serialized_end = 1023
-    _globals['_TASKRESP']._serialized_start = 1034
-    _globals['_TASKRESP']._serialized_end = 1372
-    _globals['_TASKRESP_RESPONSEHEADERSENTRY']._serialized_start = 1318
-    _globals['_TASKRESP_RESPONSEHEADERSENTRY']._serialized_end = 1372
-    _globals['_TASKSERVICE']._serialized_start = 1582
-    _globals['_TASKSERVICE']._serialized_end = 1636
+    _globals['_REQTASK']._serialized_end = 1052
+    _globals['_REQTASK_HEADERSENTRY']._serialized_start = 852
+    _globals['_REQTASK_HEADERSENTRY']._serialized_end = 898
+    _globals['_REQTASK_PARAMSENTRY']._serialized_start = 900
+    _globals['_REQTASK_PARAMSENTRY']._serialized_end = 945
+    _globals['_REQTASK_EXTENSIONSENTRY']._serialized_start = 947
+    _globals['_REQTASK_EXTENSIONSENTRY']._serialized_end = 996
+    _globals['_REQTASK_COOKIESENTRY']._serialized_start = 998
+    _globals['_REQTASK_COOKIESENTRY']._serialized_end = 1044
+    _globals['_TASKRESP']._serialized_start = 1055
+    _globals['_TASKRESP']._serialized_end = 1393
+    _globals['_TASKRESP_RESPONSEHEADERSENTRY']._serialized_start = 1339
+    _globals['_TASKRESP_RESPONSEHEADERSENTRY']._serialized_end = 1393
+    _globals['_TASKSERVICE']._serialized_start = 1603
+    _globals['_TASKSERVICE']._serialized_end = 1657
 # @@protoc_insertion_point(module_scope)
