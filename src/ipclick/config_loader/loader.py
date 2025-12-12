@@ -12,11 +12,13 @@ Config 加载器
 
 import os
 import tomllib
+from functools import lru_cache
 from pathlib import Path
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "configs" / "default_config.toml"
 
 
+@lru_cache(maxsize=3)
 def load_config(config_path: str | Path | None = None):
     config = {}
 

@@ -26,7 +26,10 @@ if _version_not_supported:
 
 
 class TaskServiceStub(object):
-    """服务定义
+    """=====================================
+    服务定义
+    =====================================
+
     """
 
     def __init__(self, channel):
@@ -43,7 +46,10 @@ class TaskServiceStub(object):
 
 
 class TaskServiceServicer(object):
-    """服务定义
+    """=====================================
+    服务定义
+    =====================================
+
     """
 
     def Send(self, request, context):
@@ -69,7 +75,10 @@ def add_TaskServiceServicer_to_server(servicer, server):
 
 # This class is part of an EXPERIMENTAL API.
 class TaskService(object):
-    """服务定义
+    """=====================================
+    服务定义
+    =====================================
+
     """
 
     @staticmethod

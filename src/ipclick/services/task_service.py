@@ -11,11 +11,11 @@ import json
 import logging
 import time
 import traceback
-from json import JSONDecodeError
 from typing import Optional, Dict, Any
 
 from ipclick.adapters import get_default_adapter, get_adapter_info, create_adapter
 from ipclick.dto import Response
+from ipclick.dto.models import ADAPTER_MAP, METHOD_MAP
 from ipclick.dto.proto import task_pb2_grpc, task_pb2
 
 
@@ -34,22 +34,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
         self.logger = logging.getLogger(__name__)
-
-        # protobuf适配器映射
-        self.adapter_mapping = {
-            task_pb2.ADAPTER_UNSPECIFIED: 'curl_cffi',
-            task_pb2.CURL_CFFI: 'curl_cffi',
-            task_pb2.HTTPX: 'httpx',
-        }
-        self.method_mapping = {
-            task_pb2.GET: "GET",
-            task_pb2.POST: "POST",
-            task_pb2.PUT: "PUT",
-            task_pb2.DELETE: "DELETE",
-            task_pb2.PATCH: "PATCH",
-            task_pb2.HEAD: "HEAD",
-            task_pb2.OPTIONS: "OPTIONS",
-        }
 
         # 适配器缓存
         self._adapters = {}
@@ -136,11 +120,11 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         """
 
         # 如果没有指定或者是未知枚举，使用默认适配器
-        if pb_adapter not in self.adapter_mapping:
+        if pb_adapter not in ADAPTER_MAP:
             self.logger.debug(f"Unknown adapter enum {pb_adapter}, using default:  {self.default_adapter}")
             return self.default_adapter
 
-        return self.adapter_mapping[pb_adapter]
+        return ADAPTER_MAP[pb_adapter]
 
     def _get_adapter(self, adapter_name: str):
         """
@@ -201,54 +185,27 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         # 转换HTTP方法
         method = self._convert_method(request.method)
 
-        # 构建请求参数
-        headers = dict(request.headers) if request.headers else {}
-        params = dict(request.params) if request.params else {}
-
-        # 设置User-Agent
-        if request.user_agent:
-            headers['User-Agent'] = request.user_agent
-
-        # 处理代理
-        proxy = None
-        if request.proxy and request.proxy.host:
-            scheme = request.proxy.scheme or 'http'
-            host = request.proxy.host
-            port = request.proxy.port or 8080
-            proxy = f"{scheme}://{host}:{port}"
-
+        # 处理请求头
+        headers = request.headers if request.headers else None
+        cookies = request.cookies if request.cookies else None
+        params = request.params if request.params else None
         # 处理请求体
-        data = None
-        json_data = None
-        if request.text:
-            try:
-                json_data = json.loads(request.text)
-            except (JSONDecodeError, ValueError):
-                # 如果不是JSON，作为普通文本处理
-                data = request.text
+        data = json.loads(request.data) if request.data else None
+        json_data = json.loads(request.json) if request.json else None
 
         # 构建下载参数
         download_kwargs = {
             'method': method,
             'headers': headers,
+            'cookies': cookies,
             'params': params,
-            'timeout': request.timeout_seconds if request.timeout_seconds > 0 else None,
-            'proxy': proxy,
+            'data': data,
+            'json': json_data,
+            'proxy': request.proxy,
+            'timeout': request.timeout_seconds,
             'max_retries': request.max_retries,
         }
 
-        # 添加SSL验证
-        if hasattr(request, 'verify_ssl'):
-            download_kwargs['verify'] = request.verify_ssl
-
-        # 添加请求体
-        if json_data is not None:
-            download_kwargs['json'] = json_data
-        elif data is not None:
-            download_kwargs['data'] = data
-
-        if request.impersonate:
-            download_kwargs['impersonate'] = request.impersonate
         # 执行下载
         return adapter.download(request.url, **download_kwargs)
 
@@ -263,7 +220,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             str: HTTP方法字符串
         """
 
-        return self.method_mapping.get(pb_method, "GET")
+        return METHOD_MAP.get(pb_method, "GET")
 
     def _build_grpc_response(self, request: task_pb2.ReqTask, response: Response) -> task_pb2.TaskResp:
         """

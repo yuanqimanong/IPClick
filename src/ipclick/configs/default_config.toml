@@ -9,10 +9,16 @@ debug = false
 
 # ================ 代理配置 [PROXY] ================
 [PROXY]
+scheme = 'http'
+host = '127.0.0.1'
+port = 7890
 # 三方隧道代理
-tunnel = ''
-# 代理超时时间(秒)
-timeout = 10
+auth_key = ''
+auth_password = ''
+channel_name = ''
+session_ttl = 60
+country_code = ''
+tunnel_server = ''
 
 # ================ 服务端配置 [SERVER] ================
 [SERVER]

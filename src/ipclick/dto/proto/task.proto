@@ -5,70 +5,66 @@ syntax = "proto3";
 
 package task;
 
+// =====================================
+// 基础枚举定义
+// =====================================
 
-// 适配器类型枚举（使用 UNSPECIFIED 作为默认值以支持向前兼容）
+// 适配器类型枚举
 enum AdapterType {
-  ADAPTER_UNSPECIFIED = 0;
-  CURL_CFFI = 1;
-  HTTPX = 2;
-  REQUESTS = 3;
-  PLAYWRIGHT = 4;
-  // 可扩展其他适配器
+  CURL_CFFI = 0;
+  HTTPX = 1;
+  REQUESTS = 2;
+  DRISSIONPAGE = 3;
+  UC = 4; // undetected-chromedriver
+  PLAYWRIGHT = 5;
 }
 
 // HTTP 方法枚举
 enum HttpMethod {
-  METHOD_UNSPECIFIED = 0;
-  GET = 1;
-  POST = 2;
-  PUT = 3;
-  DELETE = 4;
-  PATCH = 5;
-  HEAD = 6;
-  OPTIONS = 7;
+  GET = 0;
+  POST = 1;
+  PUT = 2;
+  DELETE = 3;
+  PATCH = 4;
+  HEAD = 5;
+  OPTIONS = 6;
+  TRACE = 7;
 }
 
-// 代理信息消息（分离字段以便灵活配置）
-message ProxyInfo {
-  string scheme = 1;  // e.g., "http", "https", "socks5"
-  string host = 2;
-  int32 port = 3;
-  string username = 4;
-  string password = 5;
-  string ext = 6; // 隧道代理： C{自定义通道名}:T{存活时间}:A{国家编码}
-}
 
-// 表单数据子消息（用于 oneof 中的 map）
-message FormData {
-  map<string, string> data = 1;  // 表单字段
-}
+// =====================================
+// 主要任务消息定义
+// =====================================
 
-// 请求任务消息
+// 请求消息
 message ReqTask {
   string uuid = 1;  // 唯一标识符
   AdapterType adapter = 2;  // 下载适配器
-  string url = 3;  // 请求 URL
-  HttpMethod method = 4;  // 请求方法
+
+  // 协议
+  HttpMethod method = 3;  // 请求方法
+  string url = 4;  // 请求 URL
   map<string, string> headers = 5;  // 请求头（键值对）
-  map<string, string> params = 6;  // 查询参数（键值对）
-  oneof body {// 请求体（互斥类型以优化大小）
-    bytes raw = 7;  // 二进制体
-    string text = 8;  // 文本体（e.g., JSON）
-    FormData form_data = 9;   // 表单数据
-  }
-  int32 timeout_seconds = 11;  // 超时时间（秒）
-  ProxyInfo proxy = 12;  // 代理信息
-  int32 max_retries = 13;  // 重试次数
-  int32 retry_backoff_seconds = 14;  // 重试间隔（秒，支持指数退避扩展）
-  map<string, string> extensions = 15;  // 扩展信息（e.g., "ja3_fingerprint": "value"）
-  string automation_script = 16;  // 自动化脚本（对于 Puppeteer 等，长脚本需注意大小）
-  map<string, string> cookies = 17;  // Cookie 映射，用于 Session 传递
-  bool verify_ssl = 18;  // 是否验证 SSL（默认 true）
-  int32 max_redirects = 19;  // 最大重定向次数
-  string user_agent = 20;  // 用户代理字符串（可选覆盖默认）
-  string encoding = 21;  // 响应编码（e.g., "utf-8"）
-  string impersonate = 22;  // 响应编码（e.g., "utf-8"）
-  repeated string allowed_status_codes = 23;  // 重试白名单，如 ["200", "404"]
+  map<string, string> cookies = 6;  // 请求 cookies
+  map<string, string> params = 7;  // 查询参数（键值对）
+  string data = 8;  // 二进制体
+  string json = 9;  // JSON
+  string proxy = 10;  // 代理信息
+  float timeout_seconds = 11;  // 超时时间（秒）
+  int32 max_retries = 12;  // 重试次数
+  float retry_backoff_seconds = 13;  // 重试间隔（秒，支持指数退避扩展）
+  bool verify_ssl = 14;  // 是否验证 SSL（默认 true）
+  bool allow_redirects = 15;  // 是否跟随重定向（默认 true）
+  bool stream = 16;  // 是否流式传输（默认 false）
+
+  string impersonate = 17; // curl_cffi专用
+  map<string, string> extensions = 18;  // 扩展信息（e.g., "ja3_fingerprint": "value"）
+
+  // 渲染
+  string automation_config = 19;  // 自动化框架的配置
+  string automation_script = 20;  // 自动化框架的脚本
+
+  repeated int32 allowed_status_codes = 21;  // 重试白名单，如 [200, 404]
 }
 
 // 响应消息
@@ -84,7 +80,11 @@ message TaskResp {
   int64 response_time_ms = 9;  // 响应时间（毫秒）
 }
 
+
+// =====================================
 // 服务定义
+// =====================================
+
 service TaskService {
   rpc Send(ReqTask) returns (TaskResp) {}
 }

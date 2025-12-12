@@ -8,9 +8,23 @@
 
 import json
 import uuid
-from dataclasses import dataclass, field, InitVar
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+
+from ipclick import load_config
+from ipclick.dto.proto import task_pb2
+
+
+class Adapter(Enum):
+    # 协议
+    CURL_CFFI = "curl_cffi"  # 默认适配器
+    HTTPX = "httpx"
+    REQUESTS = "requests"
+    # 渲染
+    DRISSIONPAGE = "DrissionPage"
+    UC = "undetected_chromedriver"
+    PLAYWRIGHT = "playwright"
 
 
 class HttpMethod(Enum):
@@ -21,11 +35,30 @@ class HttpMethod(Enum):
     PATCH = "PATCH"
     HEAD = "HEAD"
     OPTIONS = "OPTIONS"
+    TRACE = "TRACE"
 
 
-class Adapter(Enum):
-    CURL_CFFI = "curl_cffi"  # 默认适配器
-    HTTPX = "httpx"
+# 转换适配器枚举
+ADAPTER_MAP = {
+    Adapter.CURL_CFFI: task_pb2.CURL_CFFI,
+    Adapter.HTTPX: task_pb2.HTTPX,
+    Adapter.REQUESTS: task_pb2.REQUESTS,
+    Adapter.DRISSIONPAGE: task_pb2.DRISSIONPAGE,
+    Adapter.UC: task_pb2.UC,
+    Adapter.PLAYWRIGHT: task_pb2.PLAYWRIGHT,
+}
+
+# 转换方法枚举
+METHOD_MAP = {
+    HttpMethod.GET: task_pb2.GET,
+    HttpMethod.POST: task_pb2.POST,
+    HttpMethod.PUT: task_pb2.PUT,
+    HttpMethod.DELETE: task_pb2.DELETE,
+    HttpMethod.PATCH: task_pb2.PATCH,
+    HttpMethod.HEAD: task_pb2.HEAD,
+    HttpMethod.OPTIONS: task_pb2.OPTIONS,
+    HttpMethod.TRACE: task_pb2.TRACE,
+}
 
 
 @dataclass
@@ -34,51 +67,75 @@ class ProxyConfig:
     scheme: str = "http"
     host: Optional[str] = None
     port: Optional[int] = None
-    username: Optional[str] = None
-    password: Optional[str] = None
+    auth_key: Optional[str] = None
+    auth_password: Optional[str] = None
+    channel_name: Optional[str] = None
+    session_ttl: Optional[int] = None
+    country_code: Optional[str] = None
+    tunnel_server: Optional[str] = None
 
     def to_url(self) -> Optional[str]:
         """转换为代理URL"""
         if not self.host:
             return None
-        auth = f"{self.username}:{self.password}@" if self.username else ""
-        return f"{self.scheme}://{auth}{self.host}:{self.port}"
 
-    def __post_init__(self):
-        if self.host and not self.port:
-            self.port = 8080  # 默认代理端口
+        # 认证信息
+        auth = f'{self.auth_key}:{self.auth_password}' if self.auth_key else ''
+        # 自定义通道名
+        channel_name = f':C{self.channel_name}' if self.channel_name else ''
+        # 存活时间
+        session_ttl = f':T{self.session_ttl}' if self.session_ttl else ''
+        # 国家编码
+        country_code = f':A{self.country_code}' if self.country_code else ''
+        # 隧道服务器
+        tunnel_server = self.tunnel_server if self.tunnel_server else f'{self.host}:{self.port}'
+        # 分隔符
+        delimiter = '@' if any([auth, channel_name, country_code, session_ttl]) else ''
+
+        # curl -x {authkey}:{authpwd}:C{自定义通道名}:T{存活时间}:A{国家编码}@{隧道服务器} {目标url}
+        return f"{self.scheme}://{auth}{channel_name}{session_ttl}{country_code}{delimiter}{tunnel_server}"
 
 
 @dataclass
 class DownloadTask:
     """用户友好的下载任务"""
+    uuid: str = ""
     adapter: Adapter = Adapter.CURL_CFFI
+
+    # 协议
     method: HttpMethod = HttpMethod.GET
     url: str = ""
-    headers: Optional[Dict[str, Any]] = field(default_factory=dict)
-    cookies: Any = None
-    params: Optional[Dict[str, Any]] = field(default_factory=dict)
+    headers: Optional[Dict[str, Any]] = None
+    cookies: Optional[Dict[str, Any], str] = None
+    params: Optional[Dict[str, Any]] = None
     data: Any = None
     json: Optional[Dict[str, Any]] = None
     files: Optional[Dict[str, Any]] = None
-    proxy: Optional[ProxyConfig] = None
-    timeout: int = 60
+    proxy: Optional[ProxyConfig, str, bool] = None
+    timeout: float = 60
     max_retries: int = 3
+    retry_backoff: float = 2.0
     verify: bool = True
-    follow_redirects: bool = True
+    allow_redirects: bool = True
     stream: bool = False
 
-    # curl_cffi
-    impersonate: Optional[str] = None  # 浏览器指纹伪装
+    impersonate: Optional[str] = None  # curl_cffi 浏览器指纹伪装
+    extensions: Optional[Dict[str, Any]] = field(default_factory=dict)  # 拓展字段
 
-    kwargs: InitVar[Dict[str, Any]] = None
+    # 渲染
+    automation_config: str = None
+    automation_script: str = None
 
-    def __post_init__(self, kwargs):
+    allowed_status_codes: List[int] = field(default_factory=list)  # 允许的状态码
+
+    def __post_init__(self):
         """数据验证"""
         if not self.url:
             raise ValueError("URL is required")
         if not self.url.startswith(('http://', 'https://')):
             raise ValueError("URL must start with http:// or https://")
+        if self.files:
+            raise NotImplementedError("files is not supported.")
 
         # 不能同时指定多种请求体
         body_fields = [self.data, self.json, self.files]
@@ -89,62 +146,43 @@ class DownloadTask:
         if self.adapter == Adapter.CURL_CFFI and not self.impersonate:
             self.impersonate = "chrome"
 
+        if not self.allowed_status_codes:
+            self.allowed_status_codes = [200, 404]
+
     def to_protobuf(self):
         """转换为protobuf对象"""
-        from ipclick.dto.proto import task_pb2
-
-        # 转换方法枚举
-        method_map = {
-            HttpMethod.GET: task_pb2.GET,
-            HttpMethod.POST: task_pb2.POST,
-            HttpMethod.PUT: task_pb2.PUT,
-            HttpMethod.DELETE: task_pb2.DELETE,
-            HttpMethod.PATCH: task_pb2.PATCH,
-            HttpMethod.HEAD: task_pb2.HEAD,
-            HttpMethod.OPTIONS: task_pb2.OPTIONS,
-        }
-
-        # 转换适配器枚举
-        adapter_map = {
-            Adapter.CURL_CFFI: task_pb2.CURL_CFFI,
-            Adapter.HTTPX: task_pb2.HTTPX,
-        }
 
         # 处理代理
-        proxy_info = None
-        if self.proxy and self.proxy.host:
-            proxy_info = task_pb2.ProxyInfo(
-                scheme=self.proxy.scheme,
-                host=self.proxy.host,
-                port=self.proxy.port
-            )
-
-        # 处理请求体
-        request_body = ""
-        if self.data:
-            if isinstance(self.data, bytes):
-                request_body = self.data.decode('utf-8', errors='ignore')
-            else:
-                request_body = str(self.data)
-        elif self.json:
-            request_body = json.dumps(self.json, ensure_ascii=False)
-        elif self.files:
-            # 简单处理文件上传，实际可能需要multipart编码
-            request_body = json.dumps(self.files, ensure_ascii=False)
+        if self.proxy is True:
+            config = load_config()
+            proxy = ProxyConfig(**config.get("PROXY", {})).to_url()
+        elif isinstance(self.proxy, ProxyConfig):
+            proxy = self.proxy.to_url()
+        else:
+            proxy = self.proxy
 
         return task_pb2.ReqTask(
-            uuid=str(uuid.uuid4()),
-            adapter=adapter_map.get(self.adapter, task_pb2.CURL_CFFI),
+            uuid=str(self.uuid) or str(uuid.uuid4()),
+            adapter=ADAPTER_MAP.get(self.adapter, task_pb2.CURL_CFFI),
+            method=METHOD_MAP.get(self.method, task_pb2.GET),
             url=self.url,
-            method=method_map.get(self.method, task_pb2.GET),
-            headers=self.headers or {},
-            params=self.params or {},
-            text=request_body,
+            headers=self.headers,
+            cookies=self.cookies,
+            params=self.params,
+            data=json.dumps(self.data) if self.data else None,
+            json=json.dumps(self.json) if self.json else None,
+            proxy=proxy,
             timeout_seconds=self.timeout,
-            proxy=proxy_info,
             max_retries=self.max_retries,
+            retry_backoff_seconds=self.retry_backoff,
             verify_ssl=self.verify,
-            impersonate=self.impersonate
+            allow_redirects=self.allow_redirects,
+            stream=self.stream,
+            impersonate=self.impersonate,
+            extensions=self.extensions,
+            automation_config=self.automation_config,
+            automation_script=self.automation_script,
+            allowed_status_codes=self.allowed_status_codes,
         )
 
 

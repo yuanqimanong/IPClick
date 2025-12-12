@@ -6,11 +6,13 @@
 @file: sdk.py
 """
 import logging
+from collections import defaultdict
 
 import grpc
 
 from ipclick import load_config, DownloadTask, DownloadResponse, HttpMethod
 from ipclick.dto.proto import task_pb2_grpc
+from ipclick.utils import MD5
 
 
 class Downloader:
@@ -53,7 +55,7 @@ class Downloader:
             timeout=60,
             max_retries=3,
             verify=None,
-            follow_redirects=None,
+            allow_redirects=None,
             stream=None,
             impersonate=None,
             **kwargs
@@ -73,7 +75,7 @@ class Downloader:
             timeout=timeout,
             max_retries=max_retries,
             verify=verify,
-            follow_redirects=follow_redirects,
+            allow_redirects=allow_redirects,
             stream=stream,
             impersonate=impersonate,
             **kwargs
@@ -185,15 +187,20 @@ class Downloader:
 
 
 # 提供默认的全局下载器实例
-_default_downloader = None
+_default_downloader = defaultdict(Downloader)
 
 
-def get_downloader() -> Downloader:
+def get_downloader(config_path=None, host=None, port=None) -> Downloader:
     """获取默认下载器实例"""
     global _default_downloader
-    if _default_downloader is None:
-        _default_downloader = Downloader()
-    return _default_downloader
+
+    if all(bool(x) is False for x in [config_path, host, port]):
+        return _default_downloader.default_factory()
+
+    key = MD5.encrypt([config_path, host, port])
+    if key not in _default_downloader:
+        _default_downloader[key] = Downloader(config_path=config_path, host=host, port=port)
+    return _default_downloader[key]
 
 
 # 向后兼容的别名
