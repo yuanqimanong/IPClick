@@ -9,8 +9,7 @@ httpx下载器适配器 - 备选HTTP客户端
 """
 from typing import Optional, Dict, Any
 
-from ipclick import Downloader, HttpMethod
-from ipclick.adapters.base import retry
+from ipclick.adapters.base import retry, Downloader
 from ipclick.dto import Response
 
 try:
@@ -69,14 +68,27 @@ class HttpxAdapter(Downloader):
         return self.user_agent
 
     @retry()
-    def download(self, url: str, *,
-                 method: HttpMethod = "GET",
-                 params: Optional[Dict] = None,
+    def download(self, url: str,
+                 *,
+                 method: str = "GET",
+                 headers: Optional[Dict[str, Any]] = None,
+                 cookies: Optional[Dict[str, Any], str] = None,
+                 params: Optional[Dict[str, Any]] = None,
                  data: Any = None,
-                 headers: Optional[Dict] = None,
-                 cookies: Optional[Dict] = None,
-                 timeout: Optional[float] = None,
-                 proxy: Optional[str] = None,
+                 json: Optional[Dict[str, Any]] = None,
+                 files: Optional[Dict[str, Any]] = None,
+                 proxy: str = None,
+                 timeout: float = 60,
+                 max_retries: int = 3,
+                 retry_backoff: float = 2.0,
+                 verify: bool = True,
+                 allow_redirects: bool = True,
+                 stream: bool = False,
+                 impersonate: Optional[str] = None,
+                 extensions: Optional[Dict[str, Any]] = None,
+                 automation_config: str = None,
+                 automation_script: str = None,
+                 allowed_status_codes: None,
                  **kwargs) -> Response:
         """
         使用httpx执行HTTP请求

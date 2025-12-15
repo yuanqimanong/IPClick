@@ -204,6 +204,15 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             'proxy': request.proxy,
             'timeout': request.timeout_seconds,
             'max_retries': request.max_retries,
+            'retry_backoff': request.retry_backoff_seconds,
+            'verify': request.verify_ssl,
+            'allow_redirects': request.allow_redirects,
+            'stream': request.stream,
+            'impersonate': request.impersonate,
+            'extensions': request.extensions,
+            'automation_config': request.automation_config,
+            'automation_script': request.automation_script,
+            'kwargs': request.kwargs,
         }
 
         # 执行下载

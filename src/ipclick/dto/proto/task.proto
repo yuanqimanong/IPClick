@@ -65,6 +65,8 @@ message ReqTask {
   string automation_script = 20;  // 自动化框架的脚本
 
   repeated int32 allowed_status_codes = 21;  // 重试白名单，如 [200, 404]
+
+  string kwargs = 22; // 其他参数
 }
 
 // 响应消息

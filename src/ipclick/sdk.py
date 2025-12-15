@@ -5,6 +5,7 @@
 @author: Hades
 @file: sdk.py
 """
+import json as json_lib
 import logging
 from collections import defaultdict
 
@@ -54,10 +55,15 @@ class Downloader:
             proxy=None,
             timeout=60,
             max_retries=3,
+            retry_backoff=2.0,
             verify=None,
             allow_redirects=None,
             stream=None,
             impersonate=None,
+            extensions=None,
+            automation_config=None,
+            automation_script=None,
+            allowed_status_codes=None,
             **kwargs
     ):
 
@@ -74,11 +80,16 @@ class Downloader:
             proxy=proxy,
             timeout=timeout,
             max_retries=max_retries,
+            retry_backoff=retry_backoff,
             verify=verify,
             allow_redirects=allow_redirects,
             stream=stream,
             impersonate=impersonate,
-            **kwargs
+            extensions=extensions,
+            automation_config=automation_config,
+            automation_script=automation_script,
+            allowed_status_codes=allowed_status_codes,
+            kwargs=json_lib.dumps(kwargs)
         )
         return self.download(task)
 

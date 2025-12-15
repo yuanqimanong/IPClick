@@ -128,6 +128,9 @@ class DownloadTask:
 
     allowed_status_codes: List[int] = field(default_factory=list)  # 允许的状态码
 
+    # kwargs
+    kwargs: str = None
+
     def __post_init__(self):
         """数据验证"""
         if not self.url:
@@ -183,6 +186,7 @@ class DownloadTask:
             automation_config=self.automation_config,
             automation_script=self.automation_script,
             allowed_status_codes=self.allowed_status_codes,
+            kwargs=self.kwargs
         )
 
 

@@ -7,11 +7,10 @@ curl_cffi下载器适配器 - 默认推荐的HTTP客户端
 @author: Hades
 @file: curl_cffi_adapter.py
 """
-from copy import deepcopy
-from typing import Optional, Dict, Any
+import json as json_lib
+from typing import Optional, Dict, Any, List
 
-from ipclick import Downloader, HttpMethod
-from ipclick.adapters.base import retry
+from ipclick.adapters.base import retry, Downloader
 from ipclick.dto import Response
 
 try:
@@ -80,53 +79,38 @@ class CurlCffiAdapter(Downloader):
         return self.session
 
     @retry()
-    def download(self, url: str, *,
-                 method: HttpMethod = "GET",
-                 params: Optional[Dict] = None,
+    def download(self, url: str,
+                 *,
+                 method: str = "GET",
+                 headers: Optional[Dict[str, Any]] = None,
+                 cookies: Optional[Dict[str, Any], str] = None,
+                 params: Optional[Dict[str, Any]] = None,
                  data: Any = None,
-                 headers: Optional[Dict] = None,
-                 cookies: Optional[Dict] = None,
-                 timeout: Optional[float] = None,
-                 proxy: Optional[str] = None,
-                 **kwargs) -> Response:
+                 json: Optional[Dict[str, Any]] = None,
+                 files: Optional[Dict[str, Any]] = None,
+                 proxy: str = None,
+                 timeout: float = 60,
+                 max_retries: int = 3,
+                 retry_backoff: float = 2.0,
+                 verify: bool = True,
+                 allow_redirects: bool = True,
+                 stream: bool = False,
+                 impersonate: Optional[str] = None,
+                 extensions: Optional[Dict[str, Any]] = None,
+                 automation_config: str = None,
+                 automation_script: str = None,
+                 allowed_status_codes: Optional[List[int]] = None,
+                 kwargs: str = None) -> Response:
         """
         使用curl_cffi执行HTTP请求
         """
-        tmp_kwargs = deepcopy(kwargs)
+        json_kwargs = json_lib.loads(kwargs)
         method = method.upper()
 
         # 设置代理
         proxies = None
         if proxy:
             proxies = {'http': proxy, 'https': proxy}
-
-        # 设置浏览器指纹伪装
-        if 'impersonate' not in tmp_kwargs:
-            tmp_kwargs['impersonate'] = self.impersonate or DEFAULT_CHROME
-
-        # 清理不需要传递给curl_cffi的参数
-        for key in ['max_retries', 'retry_delay', 'verify']:
-            tmp_kwargs.pop(key, None)
-
-        # 设置默认headers
-        if headers is None:
-            headers = {}
-
-        # 自动设置User-Agent
-        # if 'User-Agent' not in headers and 'user-agent' not in headers:
-        #     headers['User-Agent'] = self._get_user_agent()
-
-        # 设置超时
-        request_timeout = timeout
-
-        # SSL验证处理
-        if 'verify' in kwargs:
-            # curl_cffi使用不同的参数名
-            if not kwargs['verify']:
-                tmp_kwargs['verify'] = False
-
-        # impersonate
-        impersonate = tmp_kwargs['impersonate']
 
         try:
             # 获取请求方法
@@ -141,9 +125,9 @@ class CurlCffiAdapter(Downloader):
                 data=data,
                 headers=headers,
                 cookies=cookies,
-                timeout=request_timeout,
+                timeout=timeout,
                 proxies=proxies,
-                impersonate=impersonate,
+                impersonate=impersonate or DEFAULT_CHROME,
             )
 
             # 转换响应

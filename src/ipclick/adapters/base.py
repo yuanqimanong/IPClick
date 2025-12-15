@@ -11,13 +11,9 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from random import randint
-from typing import Optional, Dict, Any, Literal
+from typing import Optional, Dict, Any, List
 
 from ipclick.dto import Response
-
-HttpMethod = Literal[
-    "GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "TRACE", "PATCH", "QUERY"
-]
 
 
 def retry(max_retries_attr="max_retries", retry_delay_attr="retry_delay"):
@@ -91,34 +87,59 @@ class Downloader(ABC):
         self.retry_delay = (1, 3)
         self.timeout = 30
         self.verify_ssl = True
-        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
         # 获取日志器
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
     @abstractmethod
     def download(self, url: str, *,
-                 method: HttpMethod = "GET",
-                 params: Optional[Dict] = None,
+                 # 协议
+                 method: str = "GET",
+                 headers: Optional[Dict[str, Any]] = None,
+                 cookies: Optional[Dict[str, Any], str] = None,
+                 params: Optional[Dict[str, Any]] = None,
                  data: Any = None,
-                 headers: Optional[Dict] = None,
-                 cookies: Optional[Dict] = None,
-                 timeout: Optional[float] = None,
-                 proxy: Optional[str] = None,
-                 **kwargs) -> Response:
+                 json: Optional[Dict[str, Any]] = None,
+                 files: Optional[Dict[str, Any]] = None,
+                 proxy: str = None,
+                 timeout: float = 60,
+                 max_retries: int = 3,
+                 retry_backoff: float = 2.0,
+                 verify: bool = True,
+                 allow_redirects: bool = True,
+                 stream: bool = False,
+                 impersonate: Optional[str] = None,
+                 extensions: Optional[Dict[str, Any]] = None,
+                 # 渲染
+                 automation_config: str = None,
+                 automation_script: str = None,
+                 allowed_status_codes: Optional[List[int]] = None,
+                 kwargs: str = None) -> Response:
         """
         执行HTTP请求
 
         Args:
             url: 请求URL
-            method: HTTP方法
-            params: URL参数
-            data: 请求体数据
+            method: 请求方法
             headers: 请求头
-            cookies: Cookie
-            timeout: 超时时间
+            cookies: 请求cookies
+            params: 请求参数
+            data: 请求数据
+            json: 请求JSON数据
+            files: 文件上传
             proxy: 代理地址
-            **kwargs: 其他参数
+            timeout: 超时时间
+            max_retries: 最大重试次数
+            retry_backoff: 重试退避因子
+            verify: SSL证书验证
+            allow_redirects: 允许重定向
+            stream: 是否流式读取
+            impersonate: 伪装身份
+            extensions: 扩展参数
+            automation_config: 自动化配置
+            automation_script: 自动化脚本
+            allowed_status_codes: 允许的状态码
+            **kwargs: 扩展参数
 
         Returns:
             Response:  统一的响应对象
