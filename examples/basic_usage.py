@@ -14,10 +14,7 @@ def basic_get_example():
 
     try:
         # 最简单的GET请求
-        # response = downloader.get("http://192.168.14.60:9527/ip", impersonate='firefox',proxy=True)
-        response = downloader.get(
-            "https://www.reddit.com/r/Entrepreneur/comments/18efj4c/i_built_a_better_google_trends_need_testers.json/?tl=zh-hans",
-            impersonate='firefox', proxy=True)
+        response = downloader.get("http://192.168.14.60:9527/get", impersonate='firefox', proxy=True)
         print(f"状态码:  {response.status_code}")
         print(f"响应时间: {response.elapsed_ms}ms")
         print(f"响应内容: {response.text}")

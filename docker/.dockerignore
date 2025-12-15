@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# Python 缓存
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+. venv
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 测试
+tests/
+. pytest_cache/
+.coverage
+htmlcov/
+
+# 构建产物
+dist/
+build/
+*.egg-info/
+
+# 运行时数据
+data/
+*. db
+*.json
+! pyproject.toml
+
+# 其他
+examples/
+. env
+*. log
