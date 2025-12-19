@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any, List
 
 from ipclick import load_config
 from ipclick.dto.proto import task_pb2
+from ipclick.utils import json_serializer
 
 
 class Adapter(Enum):
@@ -27,17 +28,6 @@ class Adapter(Enum):
     PLAYWRIGHT = "playwright"
 
 
-class HttpMethod(Enum):
-    GET = "GET"
-    POST = "POST"
-    PUT = "PUT"
-    DELETE = "DELETE"
-    PATCH = "PATCH"
-    HEAD = "HEAD"
-    OPTIONS = "OPTIONS"
-    TRACE = "TRACE"
-
-
 # 转换适配器枚举
 ADAPTER_MAP = {
     Adapter.CURL_CFFI: task_pb2.CURL_CFFI,
@@ -48,16 +38,28 @@ ADAPTER_MAP = {
     Adapter.PLAYWRIGHT: task_pb2.PLAYWRIGHT,
 }
 
-# 转换方法枚举
+
+class HttpMethod(Enum):
+    GET = task_pb2.GET
+    POST = task_pb2.POST
+    PUT = task_pb2.PUT
+    DELETE = task_pb2.DELETE
+    PATCH = task_pb2.PATCH
+    HEAD = task_pb2.HEAD
+    OPTIONS = task_pb2.OPTIONS
+    TRACE = task_pb2.TRACE
+
+
+# 转换HTTP方法枚举
 METHOD_MAP = {
-    HttpMethod.GET: task_pb2.GET,
-    HttpMethod.POST: task_pb2.POST,
-    HttpMethod.PUT: task_pb2.PUT,
-    HttpMethod.DELETE: task_pb2.DELETE,
-    HttpMethod.PATCH: task_pb2.PATCH,
-    HttpMethod.HEAD: task_pb2.HEAD,
-    HttpMethod.OPTIONS: task_pb2.OPTIONS,
-    HttpMethod.TRACE: task_pb2.TRACE,
+    0: "GET",
+    1: "POST",
+    2: "PUT",
+    3: "DELETE",
+    4: "PATCH",
+    5: "HEAD",
+    6: "OPTIONS",
+    7: "TRACE",
 }
 
 
@@ -155,7 +157,7 @@ class DownloadTask:
     def to_protobuf(self):
         """转换为protobuf对象"""
 
-        # 处理代理
+        # 代理
         if self.proxy is True:
             config = load_config()
             proxy = ProxyConfig(**config.get("PROXY", {})).to_url()
@@ -171,9 +173,9 @@ class DownloadTask:
             url=self.url,
             headers=self.headers,
             cookies=self.cookies,
-            params=self.params,
-            data=json.dumps(self.data) if self.data else None,
-            json=json.dumps(self.json) if self.json else None,
+            params=json.dumps(self.params, default=json_serializer) if self.params else None,
+            data=json.dumps(self.data, default=json_serializer) if self.data else None,
+            json=json.dumps(self.json, default=json_serializer) if self.json else None,
             proxy=proxy,
             timeout_seconds=self.timeout,
             max_retries=self.max_retries,

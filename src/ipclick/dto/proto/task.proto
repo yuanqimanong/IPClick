@@ -46,7 +46,7 @@ message ReqTask {
   string url = 4;  // 请求 URL
   map<string, string> headers = 5;  // 请求头（键值对）
   map<string, string> cookies = 6;  // 请求 cookies
-  map<string, string> params = 7;  // 查询参数（键值对）
+  string params = 7;  // 查询参数（键值对）
   string data = 8;  // 二进制体
   string json = 9;  // JSON
   string proxy = 10;  // 代理信息

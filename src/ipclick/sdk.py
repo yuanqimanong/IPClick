@@ -132,37 +132,23 @@ class Downloader:
         """
         return self.request(method=HttpMethod.GET, url=url, params=params, **kwargs)
 
-    # def post(self, url: str,
-    #          data: Optional[Union[str, bytes]] = None,
-    #          json_data: Optional[Dict[str, Any]] = None,
-    #          headers: Optional[Dict[str, str]] = None,
-    #          timeout: Optional[int] = None,
-    #          **kwargs) -> DownloadResponse:
-    #     """
-    #     发送POST请求
-    #
-    #     Args:
-    #         url: 请求URL
-    #         data: 请求体数据
-    #         json_data:  JSON数据
-    #         headers: 请求头
-    #         timeout: 超时时间
-    #         **kwargs: 其他DownloadTask参数
-    #
-    #     Returns:
-    #         响应对象
-    #     """
-    #     task = DownloadTask(
-    #         url=url,
-    #         method=HttpMethod.POST,
-    #         data=data,
-    #         json_data=json_data,
-    #         headers=headers or {},
-    #         timeout=timeout or self.default_timeout,
-    #         max_retries=self.default_retries,
-    #         **kwargs
-    #     )
-    #     return self.download(task)
+    def post(self, url: str,
+             data=None,
+             json=None,
+             **kwargs) -> DownloadResponse:
+        """
+        发送POST请求
+
+        Args:
+            url: 请求URL
+            data: 请求体数据
+            json:  JSON数据
+            **kwargs: 其他DownloadTask参数
+
+        Returns:
+            响应对象
+        """
+        return self.request(method=HttpMethod.POST, url=url, data=data, json=json, **kwargs)
     #
     # def put(self, url: str,
     #         data: Optional[Union[str, bytes]] = None,

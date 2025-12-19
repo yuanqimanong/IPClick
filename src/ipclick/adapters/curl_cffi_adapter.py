@@ -123,6 +123,7 @@ class CurlCffiAdapter(Downloader):
                 url=url,
                 params=params,
                 data=data,
+                json=json,
                 headers=headers,
                 cookies=cookies,
                 timeout=timeout,

@@ -17,6 +17,7 @@ from ipclick.adapters import get_default_adapter, get_adapter_info, create_adapt
 from ipclick.dto import Response
 from ipclick.dto.models import ADAPTER_MAP, METHOD_MAP
 from ipclick.dto.proto import task_pb2_grpc, task_pb2
+from ipclick.utils import json_hook
 
 
 class TaskService(task_pb2_grpc.TaskServiceServicer):
@@ -183,12 +184,12 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             Response: 统一响应对象
         """
         # 转换HTTP方法
-        method = self._convert_method(request.method)
+        method = METHOD_MAP.get(request.method, "GET")
 
         # 处理请求头
         headers = request.headers if request.headers else None
         cookies = request.cookies if request.cookies else None
-        params = request.params if request.params else None
+        params = json.loads(request.params, object_hook=json_hook) if request.params else None
         # 处理请求体
         data = json.loads(request.data) if request.data else None
         json_data = json.loads(request.json) if request.json else None
@@ -217,19 +218,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
         # 执行下载
         return adapter.download(request.url, **download_kwargs)
-
-    def _convert_method(self, pb_method: int) -> str:
-        """
-        转换protobuf方法枚举为字符串
-
-        Args:
-            pb_method: protobuf方法枚举
-
-        Returns:
-            str: HTTP方法字符串
-        """
-
-        return METHOD_MAP.get(pb_method, "GET")
 
     def _build_grpc_response(self, request: task_pb2.ReqTask, response: Response) -> task_pb2.TaskResp:
         """
