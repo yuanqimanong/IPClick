@@ -3,9 +3,9 @@ name = "ipclick"
 version = "0.1.0"
 description = "IPClick Tool"
 authors = [
-    {name = "'元气码农少女酱'",email = "'1276162429@qq.com'"}
+    { name = "元气码农少女酱", email = "1276162429@qq.com" }
 ]
-license = {text = "MIT License"}
+license = { text = "MIT License" }
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -17,6 +17,11 @@ dependencies = [
     "fake-useragent (>=2.2.0,<3.0.0)",
 ]
 
+[project.urls]
+"Homepage" = "https://github.com/yuanqimanong/IPClick"
+"Repository" = "https://github.com/yuanqimanong/IPClick"
+"Bug Tracker" = "https://github.com/yuanqimanong/IPClick/issues"
+
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
@@ -25,7 +30,8 @@ build-backend = "poetry.core.masonry.api"
 [dependency-groups]
 dev = [
     "grpcio-tools (>=1.76.0,<2.0.0)",
-    "requests (>=2.32.5,<3.0.0)"
+    "requests (>=2.32.5,<3.0.0)",
+    "twine (>=6.2.0,<7.0.0)"
 ]
 
 [project.scripts]
