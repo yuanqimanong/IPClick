@@ -19,23 +19,23 @@ from ipclick.utils import json_serializer
 
 class Adapter(Enum):
     # 协议
-    CURL_CFFI = "curl_cffi"  # 默认适配器
-    HTTPX = "httpx"
-    REQUESTS = "requests"
+    CURL_CFFI = task_pb2.CURL_CFFI  # 默认适配器
+    HTTPX = task_pb2.HTTPX
+    REQUESTS = task_pb2.REQUESTS
     # 渲染
-    DRISSIONPAGE = "DrissionPage"
-    UC = "undetected_chromedriver"
-    PLAYWRIGHT = "playwright"
+    DRISSIONPAGE = task_pb2.DRISSIONPAGE
+    UC = task_pb2.UC
+    PLAYWRIGHT = task_pb2.PLAYWRIGHT
 
 
 # 转换适配器枚举
 ADAPTER_MAP = {
-    Adapter.CURL_CFFI: task_pb2.CURL_CFFI,
-    Adapter.HTTPX: task_pb2.HTTPX,
-    Adapter.REQUESTS: task_pb2.REQUESTS,
-    Adapter.DRISSIONPAGE: task_pb2.DRISSIONPAGE,
-    Adapter.UC: task_pb2.UC,
-    Adapter.PLAYWRIGHT: task_pb2.PLAYWRIGHT,
+    0: "curl_cffi",
+    1: "httpx",
+    2: "requests",
+    3: "DrissionPage",
+    4: "undetected_chromedriver",
+    5: "playwright",
 }
 
 
@@ -196,11 +196,14 @@ class DownloadTask:
 class DownloadResponse:
     """下载响应封装"""
     request_uuid: str
+    adapter_type: str
+    request: Any
+    url: str
     status_code: int
     headers: Dict[str, str]
     content: bytes
     text: str
-    url: str
+
     elapsed_ms: int
     error: Optional[str] = None
 
@@ -214,13 +217,15 @@ class DownloadResponse:
 
         return cls(
             request_uuid=pb_response.request_uuid,
+            adapter_type=ADAPTER_MAP[pb_response.adapter],
+            request=pb_response.original_request,
+            url=pb_response.effective_url,
             status_code=pb_response.status_code,
             headers=dict(pb_response.response_headers),
             content=pb_response.content,
             text=text,
-            url=pb_response.effective_url,
-            elapsed_ms=pb_response.response_time_ms,
-            error=pb_response.error_message if pb_response.error_message else None
+            error=pb_response.error_message if pb_response.error_message else None,
+            elapsed_ms=pb_response.response_time_ms
         )
 
     @classmethod

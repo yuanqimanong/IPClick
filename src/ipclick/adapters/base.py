@@ -47,28 +47,28 @@ def retry(max_retries_attr="max_retries", retry_delay_attr="retry_delay"):
                 except Exception as e:
                     last_exception = e
 
-                    if attempt == max_retries:
+                    if attempt == max_retries or kwargs.get('max_retries') == 0:
                         # 最后一次尝试失败，返回错误响应
                         return Response.error_response(url, e)
 
                     # 计算退避延迟：指数退避 + 随机因子
-                    base_delay = min(2 ** attempt, 8)  # 最大8秒基础延迟
-                    if isinstance(retry_delay, tuple):
-                        random_delay = randint(retry_delay[0], retry_delay[1])
-                    else:
-                        random_delay = retry_delay
+                    if kwargs.get('retry_delay') != 0.0:
+                        base_delay = min(2 ** attempt, 600)  # 最大600秒基础延迟
+                        if isinstance(retry_delay, tuple):
+                            random_delay = randint(retry_delay[0], retry_delay[1])
+                        else:
+                            random_delay = retry_delay
 
-                    sleep_time = base_delay + random_delay
-                    sleep_time = min(sleep_time, 30)  # 最大延迟30秒
+                        sleep_time = base_delay + random_delay
 
-                    # 记录重试信息
-                    if hasattr(self, 'logger'):
-                        self.logger.warning(
-                            f"Download {url} failed, retrying {attempt + 1}/{max_retries} "
-                            f"in {sleep_time}s...  Error: {e}"
-                        )
+                        # 记录重试信息
+                        if hasattr(self, 'logger'):
+                            self.logger.warning(
+                                f"Download {url} failed, retrying {attempt + 1}/{max_retries} "
+                                f"in {sleep_time}s...  Error: {e}"
+                            )
 
-                    time.sleep(sleep_time)
+                        time.sleep(sleep_time)
 
             # 理论上不会到达这里
             return Response.error_response(url, last_exception or Exception("Max retries exceeded"))
@@ -104,7 +104,7 @@ class Downloader(ABC):
                  proxy: str = None,
                  timeout: float = 60,
                  max_retries: int = 3,
-                 retry_backoff: float = 2.0,
+                 retry_delay: float = 2.0,
                  verify: bool = True,
                  allow_redirects: bool = True,
                  stream: bool = False,
@@ -130,7 +130,7 @@ class Downloader(ABC):
             proxy: 代理地址
             timeout: 超时时间
             max_retries: 最大重试次数
-            retry_backoff: 重试退避因子
+            retry_delay: 重试退避因子
             verify: SSL证书验证
             allow_redirects: 允许重定向
             stream: 是否流式读取

@@ -3,9 +3,3 @@
 scheme = 'http'
 host = '127.0.0.1'
 port = 7890
-#auth_key = 'auth_key'
-#auth_password = 'auth_password'
-#channel_name = 'channel-1'
-#session_ttl = 60
-#country_code = '990100'
-#tunnel_server = 'overseas-us.tunnel.qg.net:15561'

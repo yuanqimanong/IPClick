@@ -91,7 +91,7 @@ class CurlCffiAdapter(Downloader):
                  proxy: str = None,
                  timeout: float = 60,
                  max_retries: int = 3,
-                 retry_backoff: float = 2.0,
+                 retry_delay: float = 2.0,
                  verify: bool = True,
                  allow_redirects: bool = True,
                  stream: bool = False,
@@ -104,7 +104,7 @@ class CurlCffiAdapter(Downloader):
         """
         使用curl_cffi执行HTTP请求
         """
-        json_kwargs = json_lib.loads(kwargs)
+        kwargs_dict = json_lib.loads(kwargs)
         method = method.upper()
 
         # 设置代理
@@ -121,13 +121,16 @@ class CurlCffiAdapter(Downloader):
             # 执行请求
             curl_cffi_resp = request_func(
                 url=url,
+                headers=headers,
+                cookies=cookies,
                 params=params,
                 data=data,
                 json=json,
-                headers=headers,
-                cookies=cookies,
-                timeout=timeout,
                 proxies=proxies,
+                timeout=timeout,
+                verify=verify,
+                allow_redirects=allow_redirects,
+                stream=stream,
                 impersonate=impersonate or DEFAULT_CHROME,
             )
 

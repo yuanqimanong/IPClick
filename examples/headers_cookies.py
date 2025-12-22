@@ -6,7 +6,7 @@
 @file: headers_cookies.py
 """
 
-from examples.base_config import HTTPBIN_HEADERS_URL
+from examples.base_config import HTTPBIN_HEADERS_URL, HTTPBIN_UA_URL
 from ipclick import downloader
 
 
@@ -17,7 +17,6 @@ def custom_headers():
     print(f"响应内容: {response.text}")
 
 
-# TODO
 def custom_cookies():
     print("=== 自定义 Cookies ===")
     cookies = {"session": "abc123", "test_flag": "yes"}
@@ -25,6 +24,15 @@ def custom_cookies():
     print(f"响应内容: {response.text}")
 
 
+def custom_ua():
+    print("=== 自定义 User-Agent ===")
+    response = downloader.get(HTTPBIN_UA_URL, impersonate='firefox')
+    print(f"响应内容: {response.text}")
+    response = downloader.get(HTTPBIN_UA_URL, impersonate='edge')
+    print(f"响应内容: {response.text}")
+
+
 if __name__ == "__main__":
     custom_headers()
     custom_cookies()
+    custom_ua()

@@ -10,7 +10,6 @@
 import json
 import logging
 import time
-import traceback
 from typing import Optional, Dict, Any
 
 from ipclick.adapters import get_default_adapter, get_adapter_info, create_adapter
@@ -78,36 +77,27 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         self.logger.info(f"Received request: {request.uuid} for URL: {request.url}")
         start_time = time.time()
 
-        try:
-            # 选择适配器
-            adapter_name = self._get_adapter_name(request.adapter)
-            adapter = self._get_adapter(adapter_name)
+        # 选择适配器
+        adapter_name = self._get_adapter_name(request.adapter)
+        adapter = self._get_adapter(adapter_name)
 
-            # 执行下载
-            response = self._execute_download(adapter, request)
+        # 执行下载
+        response = self._execute_download(adapter, request)
 
-            # 构造gRPC响应
-            grpc_response = self._build_grpc_response(request, response)
+        # 构造gRPC响应
+        grpc_response = self._build_grpc_response(request, response)
 
-            # 设置响应时间
-            elapsed_ms = int((time.time() - start_time) * 1000)
-            grpc_response.response_time_ms = elapsed_ms
+        # 设置响应时间
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        grpc_response.response_time_ms = elapsed_ms
 
-            # 记录成功日志
-            self.logger.info(
-                f"Request {request.uuid} completed in {elapsed_ms}ms, "
-                f"status:  {grpc_response.status_code}, adapter: {adapter_name}"
-            )
+        # 记录成功日志
+        self.logger.info(
+            f"Request {request.uuid} completed in {elapsed_ms}ms, "
+            f"status:  {grpc_response.status_code}, adapter: {adapter_name}"
+        )
 
-            return grpc_response
-
-        except Exception as e:
-            elapsed_ms = int((time.time() - start_time) * 1000)
-            self.logger.error(f"Request {request.uuid} failed: {str(e)}")
-            self.logger.debug(traceback.format_exc())
-
-            # 返回错误响应
-            return self._build_error_response(request, e, elapsed_ms)
+        return grpc_response
 
     def _get_adapter_name(self, pb_adapter: int) -> str:
         """
@@ -187,8 +177,8 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         method = METHOD_MAP.get(request.method, "GET")
 
         # 处理请求头
-        headers = request.headers if request.headers else None
-        cookies = request.cookies if request.cookies else None
+        headers = dict(request.headers) if request.headers else None
+        cookies = dict(request.cookies) if request.cookies else None
         params = json.loads(request.params, object_hook=json_hook) if request.params else None
         # 处理请求体
         data = json.loads(request.data) if request.data else None
@@ -205,7 +195,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             'proxy': request.proxy,
             'timeout': request.timeout_seconds,
             'max_retries': request.max_retries,
-            'retry_backoff': request.retry_backoff_seconds,
+            'retry_delay': request.retry_backoff_seconds,
             'verify': request.verify_ssl,
             'allow_redirects': request.allow_redirects,
             'stream': request.stream,
@@ -240,31 +230,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             content=response.content or b'',
             error_message=str(response.exception) if response.exception else "",
             response_time_ms=response.elapsed_ms
-        )
-
-    def _build_error_response(self, request: task_pb2.ReqTask,
-                              error: Exception, elapsed_ms: int) -> task_pb2.TaskResp:
-        """
-        构建错误响应
-
-        Args:
-            request: 原始gRPC请求
-            error:  错误异常
-            elapsed_ms: 耗时毫秒数
-
-        Returns:
-            task_pb2.TaskResp: 错误响应对象
-        """
-        return task_pb2.TaskResp(
-            request_uuid=request.uuid,
-            adapter=request.adapter,
-            original_request=request,
-            effective_url=request.url,
-            status_code=-1,  # 错误
-            response_headers={},
-            content=b'',
-            error_message=str(error),
-            response_time_ms=elapsed_ms
         )
 
     def cleanup(self):
