@@ -34,7 +34,7 @@ class IPClickServer:
     5. 服务注册
     """
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: str | None = None):
         self.config = load_config(config_path)
         self.server = None
         self.task_service = None

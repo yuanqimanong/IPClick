@@ -14,12 +14,13 @@ import os
 import tomllib
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "configs" / "default_config.toml"
 
 
 @lru_cache(maxsize=3)
-def load_config(config_path: str | Path | None = None):
+def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
     config = {}
 
     # 1. 包内默认配置文件（可选，如果你有的话）
@@ -54,6 +55,6 @@ def load_config(config_path: str | Path | None = None):
     if os.getenv("IPCLICK_HOST"):
         config.setdefault("SERVER", {})["host"] = os.getenv("IPCLICK_HOST")
     if os.getenv("IPCLICK_PORT"):
-        config.setdefault("SERVER", {})["port"] = int(os.getenv("IPCLICK_PORT"))
+        config.setdefault("SERVER", {})["port"] = int(os.getenv("IPCLICK_PORT",9527))
 
     return config
