@@ -5,6 +5,7 @@
 @author: Hades
 @file: basic_get.py
 """
+
 from datetime import datetime
 
 from examples.base_config import HTTPBIN_GET_URL
@@ -21,7 +22,10 @@ def basic_get_example():
 
 def get_params_example():
     print("=== 参数 GET ===")
-    response = downloader.get(HTTPBIN_GET_URL, params={'first': "lao tie", 'second': 666, 'third': datetime.now()})
+    response = downloader.get(
+        HTTPBIN_GET_URL,
+        params={"first": "lao tie", "second": 666, "third": datetime.now()},
+    )
     print(f"状态码: {response.status_code}")
     print(f"响应时间: {response.elapsed_ms}ms")
     print(f"响应内容: {response.text}")
