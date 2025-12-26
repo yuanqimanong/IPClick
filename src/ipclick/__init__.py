@@ -8,14 +8,14 @@
 
 from ipclick.config_loader import load_config
 from ipclick.dto.models import DownloadTask, DownloadResponse, HttpMethod, Adapter, ProxyConfig
-from ipclick.sdk import Downloader, downloader
+from ipclick.sdk import Downloader#, downloader
 
 __version__ = "1.0.0"
 __author__ = "Hades"
 
 __all__ = [
     'Downloader',
-    'downloader',
+    # 'downloader',
     'DownloadTask',
     'DownloadResponse',
     'HttpMethod',

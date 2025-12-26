@@ -201,4 +201,4 @@ def get_downloader(config_path=None, host=None, port=None) -> Downloader:
 
 
 # 向后兼容的别名
-downloader = get_downloader()
+# downloader = get_downloader()

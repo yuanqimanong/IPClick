@@ -66,6 +66,7 @@ METHOD_MAP = {
 @dataclass
 class ProxyConfig:
     """代理配置"""
+
     scheme: str = "http"
     host: Optional[str] = None
     port: Optional[int] = None
@@ -82,17 +83,19 @@ class ProxyConfig:
             return None
 
         # 认证信息
-        auth = f'{self.auth_key}:{self.auth_password}' if self.auth_key else ''
+        auth = f"{self.auth_key}:{self.auth_password}" if self.auth_key else ""
         # 自定义通道名
-        channel_name = f':C{self.channel_name}' if self.channel_name else ''
+        channel_name = f":C{self.channel_name}" if self.channel_name else ""
         # 存活时间
-        session_ttl = f':T{self.session_ttl}' if self.session_ttl else ''
+        session_ttl = f":T{self.session_ttl}" if self.session_ttl else ""
         # 国家编码
-        country_code = f':A{self.country_code}' if self.country_code else ''
+        country_code = f":A{self.country_code}" if self.country_code else ""
         # 隧道服务器
-        tunnel_server = self.tunnel_server if self.tunnel_server else f'{self.host}:{self.port}'
+        tunnel_server = (
+            self.tunnel_server if self.tunnel_server else f"{self.host}:{self.port}"
+        )
         # 分隔符
-        delimiter = '@' if any([auth, channel_name, country_code, session_ttl]) else ''
+        delimiter = "@" if any([auth, channel_name, country_code, session_ttl]) else ""
 
         # curl -x {authkey}:{authpwd}:C{自定义通道名}:T{存活时间}:A{国家编码}@{隧道服务器} {目标url}
         return f"{self.scheme}://{auth}{channel_name}{session_ttl}{country_code}{delimiter}{tunnel_server}"
@@ -101,6 +104,7 @@ class ProxyConfig:
 @dataclass
 class DownloadTask:
     """用户友好的下载任务"""
+
     uuid: str = ""
     adapter: Adapter = Adapter.CURL_CFFI
 
@@ -108,12 +112,12 @@ class DownloadTask:
     method: HttpMethod = HttpMethod.GET
     url: str = ""
     headers: Optional[Dict[str, Any]] = None
-    cookies: Optional[Dict[str, Any], str] = None
+    cookies: Dict[str, Any] | str | None = None
     params: Optional[Dict[str, Any]] = None
     data: Any = None
     json: Optional[Dict[str, Any]] = None
     files: Optional[Dict[str, Any]] = None
-    proxy: Optional[ProxyConfig, str, bool] = None
+    proxy: ProxyConfig | str | bool | None = None
     timeout: float = 60
     max_retries: int = 3
     retry_backoff: float = 2.0
@@ -137,7 +141,7 @@ class DownloadTask:
         """数据验证"""
         if not self.url:
             raise ValueError("URL is required")
-        if not self.url.startswith(('http://', 'https://')):
+        if not self.url.startswith(("http://", "https://")):
             raise ValueError("URL must start with http:// or https://")
         if self.files:
             raise NotImplementedError("files is not supported.")
@@ -145,7 +149,9 @@ class DownloadTask:
         # 不能同时指定多种请求体
         body_fields = [self.data, self.json, self.files]
         if sum(x is not None for x in body_fields) > 1:
-            raise ValueError("Cannot specify multiple body types (data, json_data, files)")
+            raise ValueError(
+                "Cannot specify multiple body types (data, json_data, files)"
+            )
 
         # 设置默认的浏览器伪装
         if self.adapter == Adapter.CURL_CFFI and not self.impersonate:
@@ -173,7 +179,9 @@ class DownloadTask:
             url=self.url,
             headers=self.headers,
             cookies=self.cookies,
-            params=json.dumps(self.params, default=json_serializer) if self.params else None,
+            params=json.dumps(self.params, default=json_serializer)
+            if self.params
+            else None,
             data=json.dumps(self.data, default=json_serializer) if self.data else None,
             json=json.dumps(self.json, default=json_serializer) if self.json else None,
             proxy=proxy,
@@ -188,13 +196,14 @@ class DownloadTask:
             automation_config=self.automation_config,
             automation_script=self.automation_script,
             allowed_status_codes=self.allowed_status_codes,
-            kwargs=self.kwargs
+            kwargs=self.kwargs,
         )
 
 
 @dataclass
 class DownloadResponse:
     """下载响应封装"""
+
     request_uuid: str
     adapter_type: str
     request: Any
@@ -211,7 +220,7 @@ class DownloadResponse:
     def from_protobuf(cls, pb_response):
         """从protobuf响应创建对象"""
         try:
-            text = pb_response.content.decode('utf-8', errors='ignore')
+            text = pb_response.content.decode("utf-8", errors="ignore")
         except (UnicodeDecodeError, AttributeError):
             text = str(pb_response.content)
 
@@ -225,7 +234,7 @@ class DownloadResponse:
             content=pb_response.content,
             text=text,
             error=pb_response.error_message if pb_response.error_message else None,
-            elapsed_ms=pb_response.response_time_ms
+            elapsed_ms=pb_response.response_time_ms,
         )
 
     @classmethod
@@ -238,11 +247,11 @@ class DownloadResponse:
                 request_uuid=request_uuid,
                 status_code=response.status_code,
                 headers=response.headers or {},
-                content=response.content or b'',
-                text=response.text or '',
+                content=response.content or b"",
+                text=response.text or "",
                 url=response.url,
                 elapsed_ms=response.elapsed_ms,
-                error=str(response.exception) if response.exception else None
+                error=str(response.exception) if response.exception else None,
             )
         else:
             raise ValueError("Expected Response object")
