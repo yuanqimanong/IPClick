@@ -3,13 +3,11 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from ipclick.utils.log_util import LogMixin
-
 
 class ConfigBase: ...
 
 
-class ConfigLoader(ConfigBase, LogMixin):
+class ConfigLoader(ConfigBase):
     """
     配置文件加载器
 
@@ -55,8 +53,8 @@ class ConfigLoader(ConfigBase, LogMixin):
 if __name__ == "__main__":
     c = ConfigLoader(r"D:\Projects\IPClick\src\ipclick\configs\default_config.toml")
     try:
-        a=0
-        b=0
-        c = a/b
+        a = 0
+        b = 0
+        c = a / b
     except Exception as e:
-        c.logger.exception(str(e),from_decorator=True)
+        ...
