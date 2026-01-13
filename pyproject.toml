@@ -17,7 +17,6 @@ dependencies = [
     "fake-useragent>=2.2.0,<3.0.0",
     "pydantic>=2.12.5",
     "loguru>=0.7.3",
-    "rich>=14.2.0",
 ]
 
 [project.urls]
@@ -32,13 +31,19 @@ build-backend = "poetry.core.masonry.api"
 
 [dependency-groups]
 dev = [
+    "basedpyright>=1.37.1",
     "grpcio-tools (>=1.76.0,<2.0.0)",
+    "ruff>=0.14.11",
     "twine>=6.2.0,<7.0.0",
 ]
 
 [project.scripts]
 ipclick = "ipclick.__main__:main"
 
+
 [tool.pyright]
 include = ["src"]
+exclude = ["**/__pycache__", ".venv", ".pytest_cache"]
+pythonVersion = "3.11"
 reportAny = false
+reportExplicitAny = false
