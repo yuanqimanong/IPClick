@@ -40,9 +40,9 @@ def main():
     # test_log()
 
     print("方法1: 使用ThreadPoolExecutor测试并发写入")
-    with ThreadPoolExecutor(max_workers=5, thread_name_prefix="LogWorker") as executor:
+    with ThreadPoolExecutor(max_workers=100, thread_name_prefix="LogWorker") as executor:
         futures = []
-        for thread_id in range(100):
+        for thread_id in range(1000):
             future = executor.submit(test_log)
             futures.append(future)
 
