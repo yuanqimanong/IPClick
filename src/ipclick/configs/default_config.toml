@@ -3,8 +3,6 @@
 [GENERAL]
 # 程序运行模式: "standalone" (单机) | "cluster" (多机器/集群)
 mode = "standalone"
-# 运行环境: "dev" (开发环境) | "prod" (生产环境)
-env = "dev"
 # 调试模式 (开启后输出详细日志)
 debug = false
 

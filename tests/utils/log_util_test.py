@@ -13,8 +13,8 @@ from ipclick.utils.log_util import SQLiteAdapter, log
 #     retention="30 days",
 # )
 
-sqlite_adapter = SQLiteAdapter("logs/app.db")
-log.init("debug", adapter=sqlite_adapter)
+# sqlite_adapter = SQLiteAdapter("logs/app.db")
+# log.init("debug", adapter=sqlite_adapter)
 
 
 def test_log():
@@ -37,20 +37,22 @@ def test_log():
 
 
 def main():
-    # test_log()
+    test_log()
 
-    print("方法1: 使用ThreadPoolExecutor测试并发写入")
-    with ThreadPoolExecutor(max_workers=100, thread_name_prefix="LogWorker") as executor:
-        futures = []
-        for thread_id in range(1000):
-            future = executor.submit(test_log)
-            futures.append(future)
-
-        # 等待所有线程完成
-        for future in futures:
-            future.result()
-
-    print("ThreadPoolExecutor测试完成！\n")
+    # print("使用ThreadPoolExecutor测试并发写入")
+    # with ThreadPoolExecutor(
+    #     max_workers=100, thread_name_prefix="LogWorker"
+    # ) as executor:
+    #     futures = []
+    #     for thread_id in range(1000):
+    #         future = executor.submit(test_log)
+    #         futures.append(future)
+    #
+    #     # 等待所有线程完成
+    #     for future in futures:
+    #         future.result()
+    #
+    # print("ThreadPoolExecutor测试完成！\n")
 
 
 if __name__ == "__main__":

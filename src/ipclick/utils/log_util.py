@@ -209,7 +209,7 @@ class LogUtil:
 
         console_format = (
             "[<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green>]"
-            "<level>{level: <8}</level>"
+            "<level> {level: <9}</level>"
             "[<cyan>{process.name}:{process}</cyan>]"
             "[<magenta>{thread.name}:{thread}</magenta>]"
             " <bold><yellow>{module}</yellow>:<yellow>{function}</yellow>:<underline>{line}</underline></bold> "
