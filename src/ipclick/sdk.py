@@ -5,13 +5,15 @@
 @author: Hades
 @file: sdk.py
 """
+
 import json as json_lib
 import logging
 from collections import defaultdict
 
 import grpc
 
-from ipclick import load_config, DownloadTask, DownloadResponse, HttpMethod
+from ipclick.config_loader import load_config
+from ipclick.dto.models import DownloadResponse, DownloadTask, HttpMethod
 from ipclick.dto.proto import task_pb2_grpc
 from ipclick.utils import MD5
 
@@ -30,45 +32,44 @@ class Downloader:
         """
         self.logger = logging.getLogger(__name__)
         self.config = load_config(config_path)
-        if self.config['GENERAL']['mode'] == 'standalone':
-            self.host = host or '127.0.0.1'
-            self.port = port or self.config['SERVER']['port']
+        if self.config["GENERAL"]["mode"] == "standalone":
+            self.host = host or "127.0.0.1"
+            self.port = port or self.config["SERVER"]["port"]
         else:
             ...
 
-        self.default_adapter = 'curl_cffi'
-        self.downloader_cfg = self.config['DOWNLOADER']
-        self.browser_cfg = self.config['BROWSER']
+        self.default_adapter = "curl_cffi"
+        self.downloader_cfg = self.config["DOWNLOADER"]
+        self.browser_cfg = self.config["BROWSER"]
 
     def request(
-            self,
-            *,
-            adapter=None,
-            method,
-            url,
-            headers=None,
-            cookies=None,
-            params=None,
-            data=None,
-            json=None,
-            files=None,
-            proxy=None,
-            timeout=60,
-            max_retries=3,
-            retry_backoff=2.0,
-            verify=None,
-            allow_redirects=None,
-            stream=None,
-            impersonate=None,
-            extensions=None,
-            automation_config=None,
-            automation_script=None,
-            allowed_status_codes=None,
-            **kwargs
+        self,
+        *,
+        adapter=None,
+        method,
+        url,
+        headers=None,
+        cookies=None,
+        params=None,
+        data=None,
+        json=None,
+        files=None,
+        proxy=None,
+        timeout=60,
+        max_retries=3,
+        retry_backoff=2.0,
+        verify=None,
+        allow_redirects=None,
+        stream=None,
+        impersonate=None,
+        extensions=None,
+        automation_config=None,
+        automation_script=None,
+        allowed_status_codes=None,
+        **kwargs,
     ):
-
         task = DownloadTask(
-            adapter=adapter or kwargs.get('adapter') or self.default_adapter,
+            adapter=adapter or kwargs.get("adapter") or self.default_adapter,
             url=url,
             method=method.value,
             headers=headers,
@@ -89,7 +90,7 @@ class Downloader:
             automation_config=automation_config,
             automation_script=automation_script,
             allowed_status_codes=allowed_status_codes,
-            kwargs=json_lib.dumps(kwargs)
+            kwargs=json_lib.dumps(kwargs),
         )
         return self.download(task)
 
@@ -109,7 +110,7 @@ class Downloader:
         pb_request = task.to_protobuf()
 
         try:
-            with grpc.insecure_channel(f'{self.host}:{self.port}') as channel:
+            with grpc.insecure_channel(f"{self.host}:{self.port}") as channel:
                 stub = task_pb2_grpc.TaskServiceStub(channel)
                 pb_response = stub.Send(pb_request)
                 return DownloadResponse.from_protobuf(pb_response)
@@ -132,10 +133,7 @@ class Downloader:
         """
         return self.request(method=HttpMethod.GET, url=url, params=params, **kwargs)
 
-    def post(self, url: str,
-             data=None,
-             json=None,
-             **kwargs) -> DownloadResponse:
+    def post(self, url: str, data=None, json=None, **kwargs) -> DownloadResponse:
         """
         发送POST请求
 
@@ -148,7 +146,10 @@ class Downloader:
         Returns:
             响应对象
         """
-        return self.request(method=HttpMethod.POST, url=url, data=data, json=json, **kwargs)
+        return self.request(
+            method=HttpMethod.POST, url=url, data=data, json=json, **kwargs
+        )
+
     #
     # def put(self, url: str,
     #         data: Optional[Union[str, bytes]] = None,
@@ -196,9 +197,11 @@ def get_downloader(config_path=None, host=None, port=None) -> Downloader:
 
     key = MD5.encrypt([config_path, host, port])
     if key not in _default_downloader:
-        _default_downloader[key] = Downloader(config_path=config_path, host=host, port=port)
+        _default_downloader[key] = Downloader(
+            config_path=config_path, host=host, port=port
+        )
     return _default_downloader[key]
 
 
 # 向后兼容的别名
-# downloader = get_downloader()
+downloader = get_downloader()
