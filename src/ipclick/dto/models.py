@@ -10,9 +10,9 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
 
-from ipclick import load_config
+from ipclick.config_loader import load_config
 from ipclick.dto.proto import task_pb2
 from ipclick.utils import json_serializer
 

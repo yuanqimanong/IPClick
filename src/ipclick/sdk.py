@@ -15,13 +15,18 @@ import grpc
 from ipclick.config_loader import load_config
 from ipclick.dto.models import DownloadResponse, DownloadTask, HttpMethod
 from ipclick.dto.proto import task_pb2_grpc
-from ipclick.utils import MD5
+from ipclick.utils.secure_util import SecureUtil
 
 
 class Downloader:
     """IPClick下载器客户端"""
 
-    def __init__(self, config_path=None, host=None, port=None):
+    def __init__(
+        self,
+        config_path: str | None = None,
+        host: str | None = None,
+        port: int | None = None,
+    ):
         """
         初始化下载器
 
@@ -185,17 +190,19 @@ class Downloader:
 
 
 # 提供默认的全局下载器实例
-_default_downloader = defaultdict(Downloader)
+_default_downloader: defaultdict[str, Downloader] = defaultdict(Downloader)
 
 
-def get_downloader(config_path=None, host=None, port=None) -> Downloader:
+def get_downloader(
+    config_path: str | None = None, host: str | None = None, port: int | None = None
+) -> Downloader:
     """获取默认下载器实例"""
     global _default_downloader
 
     if all(bool(x) is False for x in [config_path, host, port]):
-        return _default_downloader.default_factory()
+        return Downloader()
 
-    key = MD5.encrypt([config_path, host, port])
+    key = SecureUtil.md5([config_path, host, port])
     if key not in _default_downloader:
         _default_downloader[key] = Downloader(
             config_path=config_path, host=host, port=port

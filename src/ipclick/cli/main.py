@@ -13,7 +13,7 @@ from pathlib import Path
 
 import click
 
-from ipclick import load_config
+from ipclick.config_loader import load_config
 from ipclick.server import serve
 
 
@@ -96,8 +96,8 @@ def config_info(config):
 @click.option('--config', '-c', help='配置文件路径')
 def test(url, method, headers, data, timeout, config):
     """测试HTTP请求"""
-    from ..sdk import Downloader
     from ..dto.models import DownloadTask, HttpMethod
+    from ..sdk import Downloader
 
     try:
         # 解析headers

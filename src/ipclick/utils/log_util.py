@@ -305,4 +305,4 @@ class LogUtil:
 
 
 # 快捷方式
-log = LogUtil
+log = LogUtil()
