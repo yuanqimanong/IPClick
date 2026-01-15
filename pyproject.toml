@@ -48,3 +48,44 @@ exclude = ["**/__pycache__", ".venv", ".pytest_cache"]
 pythonVersion = "3.11"
 reportAny = false
 reportExplicitAny = false
+
+[tool.ruff]
+# 代码格式化
+line-length = 88
+indent-width = 4
+target-version = "py311"
+fix = true  # 启用自动修复
+
+[tool.ruff.format]
+# 格式化特定配置
+quote-style = "double"
+skip-magic-trailing-comma = false
+indent-style = "space"
+
+[tool.ruff.lint]
+# 选择检查规则
+select = [
+    "E", # pycodestyle 错误
+    "W", # pycodestyle 警告
+    "F", # Pyflakes - 包含 F401
+    "I", # isort - 导入排序
+    "B", # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+    "TID", # flake8-tidy-imports
+]
+
+# 忽略的规则
+ignore = ["E501"]  # 忽略行长度限制
+
+[tool.ruff.lint.per-file-ignores]
+# 特定文件的忽略规则
+"__init__.py" = ["F401"]  # 未使用的导入
+"tests/**/*.py" = ["F401"]
+"test_*.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+# 导入排序配置
+known-first-party = ["ipclick"]
+lines-after-imports = 2
+force-sort-within-sections = true
