@@ -175,19 +175,20 @@ class LogUtil:
     """
 
     _configured: ClassVar[bool] = False
+    _depth = 2
 
     @classmethod
     def init(
-        cls,
-        level: str = "INFO",
-        *,
-        format: str | None = None,
-        log_file: str | Path | None = None,
-        base_dir: Path | None = None,
-        rotation: str = "10 MB",
-        retention: str = "30 days",
-        adapter: DatabaseAdapter | None = None,
-        **kwargs: Any,
+            cls,
+            level: str = "INFO",
+            *,
+            format: str | None = None,
+            log_file: str | Path | None = None,
+            base_dir: Path | None = None,
+            rotation: str = "10 MB",
+            retention: str = "30 days",
+            adapter: DatabaseAdapter | None = None,
+            **kwargs: Any,
     ) -> None:
         """初始化日志工具配置
 
@@ -212,7 +213,7 @@ class LogUtil:
             "<level> {level: <9}</level>"
             "[<cyan>{process.name}:{process}</cyan>]"
             "[<magenta>{thread.name}:{thread}</magenta>]"
-            " <bold><yellow>{module}</yellow>:<yellow>{function}</yellow>:<underline>{line}</underline></bold> "
+            " <bold>[<yellow>{file}</yellow>]<yellow>{name}</yellow>:<yellow>{function}</yellow>:<underline>{line}</underline></bold> "
             "| <level>{message}</level>"
         )
         level = level.upper()
@@ -266,42 +267,42 @@ class LogUtil:
     @classmethod
     @ensure_configured
     def trace(cls, message: str, *args: Any, **kwargs: Any) -> None:
-        logger.trace(message, *args, **kwargs)
+        logger.opt(depth=cls._depth).trace(message, *args, **kwargs)
 
     @classmethod
     @ensure_configured
     def debug(cls, message: str, *args: Any, **kwargs: Any) -> None:
-        logger.debug(message, *args, **kwargs)
+        logger.opt(depth=cls._depth).debug(message, *args, **kwargs)
 
     @classmethod
     @ensure_configured
     def info(cls, message: str, *args: Any, **kwargs: Any) -> None:
-        logger.info(message, *args, **kwargs)
+        logger.opt(depth=cls._depth).info(message, *args, **kwargs)
 
     @classmethod
     @ensure_configured
     def success(cls, message: str, *args: Any, **kwargs: Any) -> None:
-        logger.success(message, *args, **kwargs)
+        logger.opt(depth=cls._depth).success(message, *args, **kwargs)
 
     @classmethod
     @ensure_configured
     def warning(cls, message: str, *args: Any, **kwargs: Any) -> None:
-        logger.warning(message, *args, **kwargs)
+        logger.opt(depth=cls._depth).warning(message, *args, **kwargs)
 
     @classmethod
     @ensure_configured
     def error(cls, message: str, *args: Any, **kwargs: Any) -> None:
-        logger.error(message, *args, **kwargs)
+        logger.opt(depth=cls._depth).error(message, *args, **kwargs)
 
     @classmethod
     @ensure_configured
     def critical(cls, message: str, *args: Any, **kwargs: Any) -> None:
-        logger.critical(message, *args, **kwargs)
+        logger.opt(depth=cls._depth).critical(message, *args, **kwargs)
 
     @classmethod
     @ensure_configured
     def exception(cls, message: str, *args: Any, **kwargs: Any) -> None:
-        logger.exception(message, *args, **kwargs)
+        logger.opt(depth=cls._depth).exception(message, *args, **kwargs)
 
 
 # 快捷方式

@@ -16,12 +16,10 @@ import grpc
 from ipclick.config_loader import load_config
 from ipclick.dto.models import DownloadResponse, DownloadTask, HttpMethod
 from ipclick.dto.proto import task_pb2_grpc
-from ipclick.utils.log_util import get_logger
+from ipclick.utils.log_util import log
 from ipclick.utils.secure_util import SecureUtil
 
 
-log = get_logger()
-log.init("debug")
 log.debug("debug")
 
 
@@ -44,6 +42,9 @@ class Downloader:
         """
         log.info("config_path", config_path)
         log.debug("config_path debug", config_path)
+
+    def xxx(self):
+        log.debug("config_path xxx")
 
     #     self.config = load_config(config_path)
     #     if self.config["GENERAL"]["mode"] == "standalone":
