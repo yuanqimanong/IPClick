@@ -199,14 +199,14 @@ def get_downloader(
     """获取默认下载器实例"""
     global _default_downloader
 
-    if all(bool(x) is False for x in [config_path, host, port]):
-        return Downloader()
-
     key = SecureUtil.md5([config_path, host, port])
     if key not in _default_downloader:
-        _default_downloader[key] = Downloader(
-            config_path=config_path, host=host, port=port
-        )
+        if all(bool(x) is False for x in [config_path, host, port]):
+            _default_downloader["default"] = Downloader()
+        else:
+            _default_downloader[key] = Downloader(
+                config_path=config_path, host=host, port=port
+            )
     return _default_downloader[key]
 
 
