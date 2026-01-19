@@ -7,11 +7,11 @@
 @author: Hades
 @file: base.py
 """
-import logging
-import time
 from abc import ABC, abstractmethod
+import logging
 from random import randint
-from typing import Optional, Dict, Any, List
+import time
+from typing import Any
 
 from ipclick.dto import Response
 
@@ -95,26 +95,26 @@ class Downloader(ABC):
     def download(self, url: str, *,
                  # 协议
                  method: str = "GET",
-                 headers: Optional[Dict[str, Any]] = None,
-                 cookies: Optional[Dict[str, Any], str] = None,
-                 params: Optional[Dict[str, Any]] = None,
+                 headers:  dict[str, Any] | None = None,
+                 cookies:  dict[str, Any] |str| None = None,
+                 params:  dict[str, Any] | None = None,
                  data: Any = None,
-                 json: Optional[Dict[str, Any]] = None,
-                 files: Optional[Dict[str, Any]] = None,
-                 proxy: str = None,
+                 json:  dict[str, Any] | None = None,
+                 files:  dict[str, Any] | None = None,
+                 proxy: str |None= None,
                  timeout: float = 60,
                  max_retries: int = 3,
                  retry_delay: float = 2.0,
                  verify: bool = True,
                  allow_redirects: bool = True,
                  stream: bool = False,
-                 impersonate: Optional[str] = None,
-                 extensions: Optional[Dict[str, Any]] = None,
+                 impersonate:str|None = None,
+                 extensions:  dict[str, Any] | None = None,
                  # 渲染
-                 automation_config: str = None,
-                 automation_script: str = None,
-                 allowed_status_codes: Optional[List[int]] = None,
-                 kwargs: str = None) -> Response:
+                 automation_config: str|None = None,
+                 automation_script: str|None = None,
+                 allowed_status_codes: list[Any]|None = None,
+                 kwargs: str|None = None) -> Response:
         """
         执行HTTP请求
 

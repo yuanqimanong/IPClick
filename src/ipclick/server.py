@@ -8,18 +8,17 @@ gRPC服务器启动和管理
 @file: __init__.py
 """
 
+from concurrent import futures
 import logging
 import signal
 import sys
-from concurrent import futures
-from typing import Optional
 
 import grpc
 
 from ipclick.config_loader import load_config
 from ipclick.dto.proto import task_pb2_grpc
 from ipclick.services import TaskService
-from ipclick.utils.logger import LoggerFactory
+from ipclick.utils.log_util import log
 
 
 class IPClickServer:
@@ -38,13 +37,10 @@ class IPClickServer:
         self.config = load_config(config_path)
         self.server = None
         self.task_service = None
-
         # 配置日志
-        LoggerFactory.setup_logging(self.config)
-        self.logger = logging.getLogger(__name__)
-        self.logger.info("IPClickServer initialized")
+        log.info("IPClickServer initialized")
 
-    def start(self, host: Optional[str] = None, port: Optional[int] = None) -> None:
+    def start(self, host: str | None = None, port: int | None = None) -> None:
         """
         启动服务器
 
@@ -77,9 +73,7 @@ class IPClickServer:
             self.task_service = TaskService(self.config)
 
             # 注册服务
-            task_pb2_grpc.add_TaskServiceServicer_to_server(
-                self.task_service, self.server
-            )
+            task_pb2_grpc.add_TaskServiceServicer_to_server(self.task_service, self.server)
 
             # 绑定地址
             listen_addr = f"{server_host}:{server_port}"
@@ -89,9 +83,7 @@ class IPClickServer:
             self.server.start()
 
             # 记录启动信息
-            self.logger.info(
-                f"IPClick server started on {listen_addr} with {max_workers} workers"
-            )
+            log.info(f"IPClick server started on {listen_addr} with {max_workers} workers")
 
             # 注册信号处理
             self._setup_signal_handlers()
@@ -100,11 +92,11 @@ class IPClickServer:
             try:
                 self.server.wait_for_termination()
             except KeyboardInterrupt:
-                self.logger.info("Received KeyboardInterrupt, shutting down...")
+                log.info("Received KeyboardInterrupt, shutting down...")
                 self.stop()
 
         except Exception as e:
-            self.logger.error(f"Failed to start server: {e}")
+            log.error(f"Failed to start server: {e}")
             self.stop()
             raise
 
@@ -113,9 +105,7 @@ class IPClickServer:
 
         def signal_handler(signum, frame):
             signal_name = signal.Signals(signum).name
-            self.logger.info(
-                f"Received signal {signal_name} ({signum}), shutting down..."
-            )
+            log.info(f"Received signal {signal_name} ({signum}), shutting down...")
             self.stop()
             sys.exit(0)
 
@@ -135,13 +125,13 @@ class IPClickServer:
             grace_period: 优雅停机时间（秒）
         """
         if self.server:
-            self.logger.info(f"Stopping gRPC server (grace period: {grace_period}s)...")
+            log.info(f"Stopping gRPC server (grace period: {grace_period}s)...")
             self.server.stop(grace=grace_period)
 
         if self.task_service:
             self.task_service.cleanup()
 
-        self.logger.info("IPClick server stopped")
+        log.info("IPClick server stopped")
 
     def is_running(self) -> bool:
         """检查服务器是否正在运行"""
@@ -161,9 +151,7 @@ class IPClickServer:
         return stats
 
 
-def serve(
-    config_path: str | None = None, host: str | None = None, port: int | None = None
-):
+def serve(config_path: str | None = None, host: str | None = None, port: int | None = None):
     """启动IPClick服务器的便捷函数。
 
     根据提供的配置路径、主机地址和端口启动服务器。
