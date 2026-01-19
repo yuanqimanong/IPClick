@@ -1,14 +1,15 @@
 import functools
-import sqlite3
-import sys
 from pathlib import Path
+import sqlite3
 from sqlite3 import Connection
+import sys
 from typing import Any, Callable, ClassVar, Protocol, TypeVar, cast
 
 from loguru import logger
 from typing_extensions import runtime_checkable
 
 from ipclick.utils.path_util import PathUtil
+
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -53,9 +54,7 @@ class SQLiteAdapter(DatabaseAdapter):
         self.table_name: str = table_name
         sql_path = PathUtil.resolve_path(db_path)
         PathUtil.ensure_parent_dir(sql_path)
-        self.conn: Connection = sqlite3.connect(
-            db_path, check_same_thread=False, timeout=10.0
-        )
+        self.conn: Connection = sqlite3.connect(db_path, check_same_thread=False, timeout=10.0)
         self._create_table()
 
     def _create_table(self):
@@ -154,6 +153,9 @@ def ensure_configured(func: F) -> F:
     return cast(F, wrapper)
 
 
+logger.remove()
+
+
 class LogUtil:
     """日志工具类
 
@@ -174,21 +176,31 @@ class LogUtil:
             LogUtil.info("这是一条信息日志")
     """
 
-    _configured: ClassVar[bool] = False
-    _depth = 2
+    _configurations: ClassVar[dict[str, dict[str, Any]]] = {}
+    _default_logger_name: ClassVar[str] = "default"
+    _depth: ClassVar[int] = 2
+
+    def __init__(self, logger_name: str | None = None):
+        """创建日志器实例
+
+        Args:
+            logger_name: 日志器名称，如果不指定则使用默认日志器
+        """
+        self._logger_name: str = logger_name or self._default_logger_name
 
     @classmethod
     def init(
-            cls,
-            level: str = "INFO",
-            *,
-            format: str | None = None,
-            log_file: str | Path | None = None,
-            base_dir: Path | None = None,
-            rotation: str = "10 MB",
-            retention: str = "30 days",
-            adapter: DatabaseAdapter | None = None,
-            **kwargs: Any,
+        cls,
+        level: str = "INFO",
+        *,
+        logger_name: str = "default",
+        format: str | None = None,
+        log_file: str | Path | None = None,
+        base_dir: Path | None = None,
+        rotation: str = "10 MB",
+        retention: str = "30 days",
+        adapter: DatabaseAdapter | None = None,
+        **kwargs: Any,
     ) -> None:
         """初始化日志工具配置
 
@@ -196,6 +208,7 @@ class LogUtil:
 
         Args:
             level: 日志级别，如 DEBUG, INFO, WARNING, ERROR 等
+            logger_name: 日志器名称，默认为 "default"
             format: 日志格式字符串，如果不指定则使用默认格式
             log_file: 日志文件路径，如果指定则同时输出到文件
             base_dir: 基础目录，用于构建日志文件路径
@@ -204,10 +217,6 @@ class LogUtil:
             adapter: 数据库适配器，如果指定则同时输出到数据库
             **kwargs: 传递给 loguru 的其他参数
         """
-        if cls._configured:
-            return
-        logger.remove()
-
         console_format = (
             "[<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green>]"
             "<level> {level: <9}</level>"
@@ -217,6 +226,14 @@ class LogUtil:
             "| <level>{message}</level>"
         )
         level = level.upper()
+
+        # 如果已经存在这个日志器的配置，先移除旧的handler
+        if logger_name in cls._configurations:
+            for handler_id in cls._configurations[logger_name]["handler_ids"]:
+                logger.remove(handler_id)
+
+        handler_ids: list[int] = []
+
         console_handler = logger.add(
             sys.stderr,
             level=level,
@@ -224,6 +241,7 @@ class LogUtil:
             format=format or console_format,
             **kwargs,
         )
+        handler_ids.append(console_handler)
 
         if log_file:
             resolved_path = PathUtil.resolve_path(log_file, base_dir)
@@ -242,6 +260,7 @@ class LogUtil:
                 compression="gz",
                 **kwargs,
             )
+            handler_ids.append(file_handler)
 
         if adapter:
             adapter_handler = logger.add(
@@ -250,17 +269,36 @@ class LogUtil:
                 enqueue=True,
                 **kwargs,
             )
+            handler_ids.append(adapter_handler)
 
-        cls._configured = True
+        # 保存配置
+        cls._configurations[logger_name] = {
+            "handler_ids": handler_ids,
+            "level": level,
+            "adapter": adapter,
+        }
 
     @classmethod
-    def _ensure_configured(cls):
-        """确保日志工具已配置
+    def remove_logger(cls, logger_name: str) -> None:
+        """移除指定名称的日志器配置
 
-        如果日志工具尚未配置，则使用默认设置进行初始化。
+        Args:
+            logger_name: 要移除的日志器名称
         """
-        if not cls._configured:
-            cls.init()
+        if logger_name in cls._configurations:
+            for handler_id in cls._configurations[logger_name]["handler_ids"]:
+                logger.remove(handler_id)
+            del cls._configurations[logger_name]
+
+    @classmethod
+    def _ensure_configured(cls, logger_name: str = "default"):
+        """确保日志器已配置
+
+        Args:
+            logger_name: 日志器名称
+        """
+        if logger_name not in cls._configurations:
+            cls.init(logger_name=logger_name)
 
     # ==================== 核心日志方法 ====================
 

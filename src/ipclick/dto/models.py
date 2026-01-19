@@ -6,20 +6,19 @@
 @file: models.py
 """
 
-import json
-import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+import json
+from typing import Any
+import uuid
 
-from ipclick.config_loader import load_config
 from ipclick.dto.proto import task_pb2
 from ipclick.utils import json_serializer
 
 
 class Adapter(Enum):
     # 协议
-    CURL_CFFI = task_pb2.CURL_CFFI  # 默认适配器
+    CURL_CFFI = task_pb2.CURL_CFFI
     HTTPX = task_pb2.HTTPX
     REQUESTS = task_pb2.REQUESTS
     # 渲染
@@ -68,16 +67,16 @@ class ProxyConfig:
     """代理配置"""
 
     scheme: str = "http"
-    host: Optional[str] = None
-    port: Optional[int] = None
-    auth_key: Optional[str] = None
-    auth_password: Optional[str] = None
-    channel_name: Optional[str] = None
-    session_ttl: Optional[int] = None
-    country_code: Optional[str] = None
-    tunnel_server: Optional[str] = None
+    host: str | None = None
+    port: int | None = None
+    auth_key: str | None = None
+    auth_password: str | None = None
+    channel_name: str | None = None
+    session_ttl: int | None = None
+    country_code: str | None = None
+    tunnel_server: str | None = None
 
-    def to_url(self) -> Optional[str]:
+    def to_url(self) -> str | None:
         """转换为代理URL"""
         if not self.host:
             return None
@@ -91,9 +90,7 @@ class ProxyConfig:
         # 国家编码
         country_code = f":A{self.country_code}" if self.country_code else ""
         # 隧道服务器
-        tunnel_server = (
-            self.tunnel_server if self.tunnel_server else f"{self.host}:{self.port}"
-        )
+        tunnel_server = self.tunnel_server if self.tunnel_server else f"{self.host}:{self.port}"
         # 分隔符
         delimiter = "@" if any([auth, channel_name, country_code, session_ttl]) else ""
 
@@ -103,7 +100,7 @@ class ProxyConfig:
 
 @dataclass
 class DownloadTask:
-    """用户友好的下载任务"""
+    """下载任务"""
 
     uuid: str = ""
     adapter: Adapter = Adapter.CURL_CFFI
@@ -111,12 +108,12 @@ class DownloadTask:
     # 协议
     method: HttpMethod = HttpMethod.GET
     url: str = ""
-    headers: Optional[Dict[str, Any]] = None
-    cookies: Dict[str, Any] | str | None = None
-    params: Optional[Dict[str, Any]] = None
+    headers: dict[str, Any] | None = None
+    cookies: dict[str, Any] | str | None = None
+    params: dict[str, Any] | None = None
     data: Any = None
-    json: Optional[Dict[str, Any]] = None
-    files: Optional[Dict[str, Any]] = None
+    json: dict[str, Any] | None = None
+    files: dict[str, Any] | None = None
     proxy: ProxyConfig | str | bool | None = None
     timeout: float = 60
     max_retries: int = 3
@@ -125,17 +122,17 @@ class DownloadTask:
     allow_redirects: bool = True
     stream: bool = False
 
-    impersonate: Optional[str] = None  # curl_cffi 浏览器指纹伪装
-    extensions: Optional[Dict[str, Any]] = field(default_factory=dict)  # 拓展字段
+    impersonate: str | None = None  # curl_cffi 浏览器指纹伪装
+    extensions: dict[str, Any] | None = field(default_factory=dict)  # 拓展字段
 
     # 渲染
-    automation_config: str = None
-    automation_script: str = None
+    automation_config: str | None = None
+    automation_script: str | None = None
 
-    allowed_status_codes: List[int] = field(default_factory=list)  # 允许的状态码
+    allowed_status_codes: list[int] = field(default_factory=list)  # 允许的状态码
 
     # kwargs
-    kwargs: str = None
+    kwargs: str | None = None
 
     def __post_init__(self):
         """数据验证"""
@@ -149,9 +146,7 @@ class DownloadTask:
         # 不能同时指定多种请求体
         body_fields = [self.data, self.json, self.files]
         if sum(x is not None for x in body_fields) > 1:
-            raise ValueError(
-                "Cannot specify multiple body types (data, json_data, files)"
-            )
+            raise ValueError("Cannot specify multiple body types (data, json_data, files)")
 
         # 设置默认的浏览器伪装
         if self.adapter == Adapter.CURL_CFFI and not self.impersonate:
@@ -162,16 +157,6 @@ class DownloadTask:
 
     def to_protobuf(self):
         """转换为protobuf对象"""
-
-        # 代理
-        if self.proxy is True:
-            config = load_config()
-            proxy = ProxyConfig(**config.get("PROXY", {})).to_url()
-        elif isinstance(self.proxy, ProxyConfig):
-            proxy = self.proxy.to_url()
-        else:
-            proxy = self.proxy
-
         return task_pb2.ReqTask(
             uuid=str(self.uuid) or str(uuid.uuid4()),
             adapter=ADAPTER_MAP.get(self.adapter, task_pb2.CURL_CFFI),
@@ -179,12 +164,10 @@ class DownloadTask:
             url=self.url,
             headers=self.headers,
             cookies=self.cookies,
-            params=json.dumps(self.params, default=json_serializer)
-            if self.params
-            else None,
+            params=json.dumps(self.params, default=json_serializer) if self.params else None,
             data=json.dumps(self.data, default=json_serializer) if self.data else None,
             json=json.dumps(self.json, default=json_serializer) if self.json else None,
-            proxy=proxy,
+            proxy=self.proxy,
             timeout_seconds=self.timeout,
             max_retries=self.max_retries,
             retry_backoff_seconds=self.retry_backoff,
@@ -209,12 +192,12 @@ class DownloadResponse:
     request: Any
     url: str
     status_code: int
-    headers: Dict[str, str]
+    headers: dict[str, str]
     content: bytes
     text: str
 
     elapsed_ms: int
-    error: Optional[str] = None
+    error: str | None = None
 
     @classmethod
     def from_protobuf(cls, pb_response):
@@ -256,7 +239,7 @@ class DownloadResponse:
         else:
             raise ValueError("Expected Response object")
 
-    def json(self) -> Dict[str, Any]:
+    def json(self) -> dict[str, Any]:
         """解析JSON响应"""
         try:
             return json.loads(self.text)

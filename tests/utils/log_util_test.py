@@ -2,17 +2,19 @@
 example_usage.py - 展示如何使用日志工具类
 """
 
-from concurrent.futures import ThreadPoolExecutor
+# from concurrent.futures import ThreadPoolExecutor
 
 from ipclick.utils.log_util import SQLiteAdapter, log
 
+
 # log.init(
+#     logger_name='txt',
 #     level="warning",
 #     log_file="logs/app.txt",
 #     rotation="10 KB",
 #     retention="30 days",
 # )
-
+#
 # sqlite_adapter = SQLiteAdapter("logs/app.db")
 # log.init("debug", adapter=sqlite_adapter)
 

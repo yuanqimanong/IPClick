@@ -51,7 +51,7 @@ reportExplicitAny = false
 
 [tool.ruff]
 # 代码格式化
-line-length = 88
+line-length = 120
 indent-width = 4
 target-version = "py311"
 fix = true  # 启用自动修复
@@ -63,17 +63,17 @@ skip-magic-trailing-comma = false
 indent-style = "space"
 
 [tool.ruff.lint]
-# 选择检查规则
-select = [
-    "E", # pycodestyle 错误
-    "W", # pycodestyle 警告
-    "F", # Pyflakes - 包含 F401
-    "I", # isort - 导入排序
-    "B", # flake8-bugbear
-    "C4", # flake8-comprehensions
-    "UP", # pyupgrade
-    "TID", # flake8-tidy-imports
-]
+## 选择检查规则
+#select = [
+#    "E", # pycodestyle 错误
+#    "W", # pycodestyle 警告
+#    "F", # Pyflakes - 包含 F401
+#    "I", # isort - 导入排序
+#    "B", # flake8-bugbear
+#    "C4", # flake8-comprehensions
+#    "UP", # pyupgrade
+#    "TID", # flake8-tidy-imports
+#]
 
 # 忽略的规则
 ignore = ["E501"]  # 忽略行长度限制

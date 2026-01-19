@@ -1,5 +1,5 @@
-import tomllib
 from pathlib import Path
+import tomllib
 from typing import cast
 
 from box import Box
@@ -35,14 +35,14 @@ class ConfigUtil:
         Returns:
             来自所有有效文件的合并 Settings 对象。
         """
-        log.debug(f"path ==> {repr(path)}")
+        log.debug(f"load path ==> {repr(path)}")
         file_paths = [path] if isinstance(path, (str, Path)) else path
 
         setting_config_list: list[Settings] = []
         for file_path in file_paths:
             path = Path(file_path)
             if not path.exists():
-                log.warning(f"配置文件 {file_path} 不存在，请检查路径！")
+                log.debug(f"配置文件 {file_path} 不存在")
                 continue
             try:
                 with open(path, "r", encoding=encoding) as f:
