@@ -34,7 +34,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
         # 获取默认适配器
         try:
-            self.default_adapter = get_default_adapter()
+            self.default_adapter: str = get_default_adapter()
         except RuntimeError as e:
             log.error(f"No adapters available: {e}")
             raise
@@ -90,8 +90,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
         # 记录成功日志
         log.info(
-            f"Request {request.uuid} completed in {elapsed_ms}ms, "
-            f"status:  {grpc_response.status_code}, adapter: {adapter_name}"
+            f"Request {request.uuid} completed in {elapsed_ms}ms, status:  {grpc_response.status_code}, adapter: {adapter_name}"
         )
 
         return grpc_response
