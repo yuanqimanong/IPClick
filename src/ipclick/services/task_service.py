@@ -1,13 +1,3 @@
-# -*- coding:utf-8 -*-
-
-"""
-任务处理服务
-
-@time: 2025-12-10
-@author: Hades
-@file: task_service.py
-"""
-
 import json
 import time
 from typing import Any

@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 from ipclick.utils.config_util import ConfigUtil, Settings
-from ipclick.utils.log_util import log
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "configs" / "default_config.toml"

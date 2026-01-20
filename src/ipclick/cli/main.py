@@ -1,12 +1,3 @@
-# -*- coding:utf-8 -*-
-
-"""
-IPClick命令行工具
-
-@time: 2025-12-10
-@author: Hades
-@file: main.py
-"""
 
 import logging
 from pathlib import Path

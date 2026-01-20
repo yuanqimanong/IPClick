@@ -1,17 +1,8 @@
-# -*- coding:utf-8 -*-
-
-"""
-gRPC服务器启动和管理
-
-@time: 2025-12-10
-@author: Hades
-@file: __init__.py
-"""
-
 from concurrent import futures
 import signal
 import sys
-from typing import cast
+from types import FrameType
+from typing import TypedDict, cast
 
 import grpc
 from grpc import Server
@@ -23,22 +14,21 @@ from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
 
 
+class ServerConfig(TypedDict, total=False):
+    host: str
+    port: int
+    max_workers: int
+
+
 class IPClickServer:
     """
     IPClick gRPC服务器
-
-    职责：
-    1. gRPC服务器的启动和停止
-    2. 配置管理
-    3. 信号处理
-    4. 日志配置
-    5. 服务注册
     """
 
     def __init__(self, config_path: str | None = None):
         self.config: Settings = load_config(config_path)
         self.server: Server | None = None
-        self.task_service: None = None
+        self.task_service: TaskService | None = None
         log.info("IPClickServer initialized")
 
     def start(self, host: str | None = None, port: int | None = None) -> None:
@@ -49,19 +39,19 @@ class IPClickServer:
             port: 服务端口（覆盖配置）
             host: 绑定地址（覆盖配置）
         """
-        server_config: Settings = self.config["SERVER"]
+        server_config: ServerConfig = cast(ServerConfig, self.config["SERVER"])
 
         # 参数优先级：函数参数 > 配置文件 > 默认值
-        server_host: str = host or server_config["host"] or "[::]"
-        server_port: int = port or server_config["port"] or 9527
-        max_workers: int = server_config["max_workers"] or 10
+        server_host: str = host or server_config.get("host", "[::]")
+        server_port: int = port or server_config.get("port", 9527)
+        max_workers: int = port or server_config.get("max_workers", 10)
 
         # 创建gRPC服务器
         self.server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=max_workers),
             options=[
                 ("grpc.keepalive_time_ms", 60000),
-                ("grpc. keepalive_timeout_ms", 30000),
+                ("grpc.keepalive_timeout_ms", 30000),
                 ("grpc.keepalive_permit_without_calls", True),
                 ("grpc.http2.max_pings_without_data", 2),
                 ("grpc.http2.min_time_between_pings_ms", 10000),
@@ -78,7 +68,9 @@ class IPClickServer:
 
             # 绑定地址
             listen_addr = f"{server_host}:{server_port}"
-            self.server.add_insecure_port(listen_addr)
+            bound_port: int = self.server.add_insecure_port(listen_addr)
+            if bound_port == 0:
+                raise RuntimeError(f"Failed to bind to address {listen_addr}")
 
             # 启动服务器
             self.server.start()
@@ -91,32 +83,32 @@ class IPClickServer:
 
             # 等待终止
             try:
-                self.server.wait_for_termination()
+                _ = self.server.wait_for_termination()
             except KeyboardInterrupt:
                 log.info("Received KeyboardInterrupt, shutting down...")
                 self.stop()
 
         except Exception as e:
-            log.error(f"Failed to start server: {e}")
+            log.exception(f"Failed to start server: {e}")
             self.stop()
             raise
 
     def _setup_signal_handlers(self):
         """设置信号处理器"""
 
-        def signal_handler(signum, frame):
+        def signal_handler(signum: int, frame: FrameType | None) -> None:
             signal_name = signal.Signals(signum).name
             log.info(f"Received signal {signal_name} ({signum}), shutting down...")
             self.stop()
             sys.exit(0)
 
         # 注册信号处理器
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
+        _ = signal.signal(signal.SIGINT, signal_handler)
+        _ = signal.signal(signal.SIGTERM, signal_handler)
 
         # Windows支持
         if hasattr(signal, "SIGBREAK"):
-            signal.signal(signal.SIGBREAK, signal_handler)
+            _ = signal.signal(signal.SIGBREAK, signal_handler)
 
     def stop(self, grace_period: int = 10):
         """
@@ -127,7 +119,7 @@ class IPClickServer:
         """
         if self.server:
             log.info(f"Stopping gRPC server (grace period: {grace_period}s)...")
-            self.server.stop(grace=grace_period)
+            _ = self.server.stop(grace=grace_period)
 
         if self.task_service:
             self.task_service.cleanup()

@@ -1,12 +1,3 @@
-# -*- coding:utf-8 -*-
-
-"""
-curl_cffi下载器适配器 - 默认推荐的HTTP客户端
-
-@time: 2025-12-10
-@author: Hades
-@file: curl_cffi_adapter.py
-"""
 
 import json as json_lib
 from typing import Any, Dict, List, Optional

@@ -1,11 +1,3 @@
-# -*- coding:utf-8 -*-
-
-"""
-@time: 2025-12-10
-@author: Hades
-@file: models.py
-"""
-
 from dataclasses import dataclass, field
 from enum import Enum
 import json

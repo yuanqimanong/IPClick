@@ -1,12 +1,3 @@
-# -*- coding:utf-8 -*-
-
-"""
-适配器模块 - 统一的HTTP下载器接口
-
-@time: 2025-12-10
-@author: Hades
-@file: __init__.py
-"""
 
 from typing import Dict, Type
 

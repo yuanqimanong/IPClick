@@ -44,10 +44,18 @@ ipclick = "ipclick.__main__:main"
 
 [tool.pyright]
 include = ["src"]
-exclude = ["**/__pycache__", ".venv", ".pytest_cache"]
+exclude = [
+    "**/__pycache__",
+    ".venv",
+    ".pytest_cache",
+    "**/dto/proto/*.py",
+    "**/dto/proto/*_pb2*.py",
+    "**/generated/**"
+]
 pythonVersion = "3.11"
 reportAny = false
 reportExplicitAny = false
+reportUnknownMemberType = "none"
 
 [tool.ruff]
 # 代码格式化

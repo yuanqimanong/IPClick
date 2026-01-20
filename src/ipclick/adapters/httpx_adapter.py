@@ -1,12 +1,3 @@
-# -*- coding:utf-8 -*-
-
-"""
-httpx下载器适配器 - 备选HTTP客户端
-
-@time: 2025-12-10
-@author: Hades
-@file: httpx_adapter.py
-"""
 
 from typing import Any, Dict, Optional
 

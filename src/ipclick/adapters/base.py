@@ -1,12 +1,3 @@
-# -*- coding:utf-8 -*-
-
-"""
-下载器基类和通用装饰器
-
-@time: 2025-12-10
-@author: Hades
-@file: base.py
-"""
 from abc import ABC, abstractmethod
 import logging
 from random import randint

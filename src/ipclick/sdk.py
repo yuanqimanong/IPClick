@@ -46,7 +46,7 @@ class Downloader:
         max_retries=3,
         retry_backoff=2.0,
         verify=None,
-        allow_redirects=None,
+        allow_redirects=True,
         stream=None,
         impersonate=None,
         extensions=None,
@@ -54,13 +54,12 @@ class Downloader:
         automation_script=None,
         allowed_status_codes=None,
         **kwargs,
-    ):
+    ) -> DownloadResponse:
         # 代理
         if not proxy:
             proxy = None
         elif proxy is True:
             proxy = ProxyConfig(**self.config.get("PROXY", {})).to_url()
-            log.info(proxy)
         elif isinstance(proxy, ProxyConfig):
             proxy = proxy.to_url()
 
@@ -144,38 +143,13 @@ class Downloader:
         """
         return self.request(method=HttpMethod.POST, url=url, data=data, json=json, **kwargs)
 
-    #
-    # def put(self, url: str,
-    #         data: Optional[Union[str, bytes]] = None,
-    #         json_data: Optional[Dict[str, Any]] = None,
-    #         headers: Optional[Dict[str, str]] = None,
-    #         **kwargs) -> DownloadResponse:
-    #     """发送PUT请求"""
-    #     task = DownloadTask(
-    #         url=url,
-    #         method=HttpMethod.PUT,
-    #         data=data,
-    #         json_data=json_data,
-    #         headers=headers or {},
-    #         timeout=self.default_timeout,
-    #         max_retries=self.default_retries,
-    #         **kwargs
-    #     )
-    #     return self.download(task)
-    #
-    # def delete(self, url: str,
-    #            headers: Optional[Dict[str, str]] = None,
-    #            **kwargs) -> DownloadResponse:
-    #     """发送DELETE请求"""
-    #     task = DownloadTask(
-    #         url=url,
-    #         method=HttpMethod.DELETE,
-    #         headers=headers or {},
-    #         timeout=self.default_timeout,
-    #         max_retries=self.default_retries,
-    #         **kwargs
-    #     )
-    #     return self.download(task)
+    def put(self, url: str, data=None, **kwargs) -> DownloadResponse:
+        """发送PUT请求"""
+        return self.request(method=HttpMethod.PUT, url=url, data=data, **kwargs)
+
+    def delete(self, url: str, **kwargs) -> DownloadResponse:
+        """发送DELETE请求"""
+        return self.request(method=HttpMethod.DELETE, **kwargs)
 
 
 # 提供默认的全局下载器实例
