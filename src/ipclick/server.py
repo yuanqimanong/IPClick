@@ -147,9 +147,6 @@ def serve(config_path: str | None = None, host: str | None = None, port: int | N
     Returns:
         None: 函数执行成功返回None。
 
-    Examples:
-        >>> serve()  # 使用默认配置启动
-        >>> serve(port=8000)  # 指定端口启动
     """
     try:
         server = IPClickServer(config_path)

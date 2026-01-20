@@ -15,7 +15,7 @@ port = 7890
 auth_key = ''
 auth_password = ''
 channel_name = ''
-session_ttl = 60
+session_ttl = ''
 country_code = ''
 tunnel_server = ''
 

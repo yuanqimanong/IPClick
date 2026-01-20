@@ -24,8 +24,8 @@ class Downloader:
             port: 服务器端口 (覆盖配置文件)
         """
         self.config_path: str | None = config_path
-        self.host: str | None = host
-        self.port: int | None = port
+        self.host: str | None = host or "127.0.0.1"
+        self.port: int | None = port or 9527
         self.config: Settings = load_config(self.config_path)
         log.debug(f"========== Downloader加载的设置为 ==========\n{self.config.to_json(indent=4)}")
 
@@ -56,8 +56,11 @@ class Downloader:
         **kwargs,
     ):
         # 代理
-        if proxy is True:
+        if not proxy:
+            proxy = None
+        elif proxy is True:
             proxy = ProxyConfig(**self.config.get("PROXY", {})).to_url()
+            log.info(proxy)
         elif isinstance(proxy, ProxyConfig):
             proxy = proxy.to_url()
 
@@ -87,11 +90,6 @@ class Downloader:
         )
         return self.download(task)
 
-    def update_host_port(self) -> tuple[str, int]:
-        host: str = "127.0.0.1" # self.config["SERVER"]["host"] or "[::]"
-        port: int = self.config["SERVER"]["port"] or 9527
-        return host, port
-
     def download(self, task: DownloadTask) -> DownloadResponse:
         """
         执行下载任务
@@ -106,9 +104,6 @@ class Downloader:
             Exception: 当连接失败或任务执行失败时
         """
         pb_request = task.to_protobuf()
-
-        if not (self.host and self.port):
-            self.host, self.port = self.update_host_port()
 
         try:
             with grpc.insecure_channel(f"{self.host}:{self.port}") as channel:
