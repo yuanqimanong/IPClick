@@ -2,6 +2,9 @@ import json
 import time
 from typing import Any
 
+from grpc import ServicerContext
+from typing_extensions import override
+
 from ipclick.adapters import create_adapter, get_adapter_info, get_default_adapter
 from ipclick.dto import Response
 from ipclick.dto.models import ADAPTER_MAP, METHOD_MAP
@@ -56,7 +59,8 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         except Exception as e:
             log.warning(f"Could not get adapter info: {e}")
 
-    def Send(self, request: task_pb2.ReqTask, context) -> task_pb2.TaskResp:
+    @override
+    def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
         """
         处理gRPC任务请求
 
