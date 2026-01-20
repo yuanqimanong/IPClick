@@ -9,15 +9,17 @@ gRPC服务器启动和管理
 """
 
 from concurrent import futures
-import logging
 import signal
 import sys
+from typing import cast
 
 import grpc
+from grpc import Server
 
 from ipclick.config_loader import load_config
 from ipclick.dto.proto import task_pb2_grpc
 from ipclick.services import TaskService
+from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
 
 
@@ -34,10 +36,9 @@ class IPClickServer:
     """
 
     def __init__(self, config_path: str | None = None):
-        self.config = load_config(config_path)
-        self.server = None
-        self.task_service = None
-        # 配置日志
+        self.config: Settings = load_config(config_path)
+        self.server: Server | None = None
+        self.task_service: None = None
         log.info("IPClickServer initialized")
 
     def start(self, host: str | None = None, port: int | None = None) -> None:
@@ -48,12 +49,12 @@ class IPClickServer:
             port: 服务端口（覆盖配置）
             host: 绑定地址（覆盖配置）
         """
-        server_config = self.config.get("SERVER", {})
+        server_config: Settings = self.config["SERVER"]
 
         # 参数优先级：函数参数 > 配置文件 > 默认值
-        server_host = host or server_config.get("host", "0.0.0.0")
-        server_port = port or server_config.get("port", 9527)
-        max_workers = server_config.get("max_workers", 10)
+        server_host: str = host or server_config["host"] or "[::]"
+        server_port: int = port or server_config["port"] or 9527
+        max_workers: int = server_config["max_workers"] or 10
 
         # 创建gRPC服务器
         self.server = grpc.server(
@@ -133,23 +134,6 @@ class IPClickServer:
 
         log.info("IPClick server stopped")
 
-    def is_running(self) -> bool:
-        """检查服务器是否正在运行"""
-        return self.server is not None
-
-    def get_config(self) -> dict:
-        """获取服务器配置"""
-        return self.config.copy()
-
-    def get_stats(self) -> dict:
-        """获取服务器统计信息"""
-        stats = {"running": self.is_running(), "config": self.get_config()}
-
-        if self.task_service:
-            stats["task_service"] = self.task_service.get_stats()
-
-        return stats
-
 
 def serve(config_path: str | None = None, host: str | None = None, port: int | None = None):
     """启动IPClick服务器的便捷函数。
@@ -173,7 +157,7 @@ def serve(config_path: str | None = None, host: str | None = None, port: int | N
     except KeyboardInterrupt:
         pass  # 正常退出
     except Exception as e:
-        logging.error(f"Server startup failed: {e}")
+        log.exception(f"Server startup failed: {e}")
         raise
 
 

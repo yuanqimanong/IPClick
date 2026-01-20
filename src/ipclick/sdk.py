@@ -88,7 +88,7 @@ class Downloader:
         return self.download(task)
 
     def update_host_port(self) -> tuple[str, int]:
-        host: str = self.config["SERVER"]["host"] or "[::]"
+        host: str = "127.0.0.1" # self.config["SERVER"]["host"] or "[::]"
         port: int = self.config["SERVER"]["port"] or 9527
         return host, port
 

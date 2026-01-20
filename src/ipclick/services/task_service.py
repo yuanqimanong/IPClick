@@ -10,13 +10,14 @@
 
 import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 from ipclick.adapters import create_adapter, get_adapter_info, get_default_adapter
 from ipclick.dto import Response
 from ipclick.dto.models import ADAPTER_MAP, METHOD_MAP
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
 from ipclick.utils import json_hook
+from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
 
 
@@ -32,8 +33,8 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     5. 错误处理和日志记录
     """
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        self.config = config or {}
+    def __init__(self, config: Settings):
+        self.config: Settings = config
 
         # 适配器缓存
         self._adapters = {}
@@ -252,7 +253,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         self._adapters.clear()
         log.info("TaskService cleanup completed")
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """
         获取服务统计信息
 
