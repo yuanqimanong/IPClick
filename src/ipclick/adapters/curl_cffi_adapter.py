@@ -1,17 +1,10 @@
-# -*- coding:utf-8 -*-
-
-"""
-curl_cffi下载器适配器 - 默认推荐的HTTP客户端
-
-@time: 2025-12-10
-@author: Hades
-@file: curl_cffi_adapter.py
-"""
 import json as json_lib
-from typing import Optional, Dict, Any, List
+from typing import Any, List, Optional
 
-from ipclick.adapters.base import retry, Downloader
+from ipclick.adapters.base import DownloaderAdapter, retry
 from ipclick.dto import Response
+from ipclick.utils.log_util import log
+
 
 try:
     import curl_cffi.requests
@@ -30,7 +23,7 @@ except ImportError:
     FAKE_UA_AVAILABLE = False
 
 
-class CurlCffiAdapter(Downloader):
+class CurlCffiAdapter(DownloaderAdapter):
     """
     curl_cffi适配器，支持浏览器指纹伪装
 
@@ -41,23 +34,23 @@ class CurlCffiAdapter(Downloader):
     - 支持HTTP/2
     """
 
+    adapter_name: str = "curl_cffi"
+
     def __init__(self):
         if not CURL_CFFI_AVAILABLE:
-            raise ImportError(
-                "curl_cffi is not installed. Install it with: pip install curl-cffi"
-            )
+            raise ImportError("curl_cffi is not installed. Install it with: pip install curl-cffi")
 
         super().__init__()
 
         # HTTP方法映射
         self.method_mapping = {
-            'GET': curl_cffi.requests.get,
-            'POST': curl_cffi.requests.post,
-            'PUT': curl_cffi.requests.put,
-            'DELETE': curl_cffi.requests.delete,
-            'PATCH': curl_cffi.requests.patch,
-            'HEAD': curl_cffi.requests.head,
-            'OPTIONS': curl_cffi.requests.options,
+            "GET": curl_cffi.requests.get,
+            "POST": curl_cffi.requests.post,
+            "PUT": curl_cffi.requests.put,
+            "DELETE": curl_cffi.requests.delete,
+            "PATCH": curl_cffi.requests.patch,
+            "HEAD": curl_cffi.requests.head,
+            "OPTIONS": curl_cffi.requests.options,
         }
 
         # curl_cffi特有配置
@@ -68,7 +61,7 @@ class CurlCffiAdapter(Downloader):
 
         # User Agent生成器
         if FAKE_UA_AVAILABLE:
-            self.ua_generator = UserAgent(platforms='desktop')
+            self.ua_generator = UserAgent(platforms="desktop")
         else:
             self.ua_generator = None
 
@@ -79,28 +72,31 @@ class CurlCffiAdapter(Downloader):
         return self.session
 
     @retry()
-    def download(self, url: str,
-                 *,
-                 method: str = "GET",
-                 headers: Optional[Dict[str, Any]] = None,
-                 cookies: Optional[Dict[str, Any], str] = None,
-                 params: Optional[Dict[str, Any]] = None,
-                 data: Any = None,
-                 json: Optional[Dict[str, Any]] = None,
-                 files: Optional[Dict[str, Any]] = None,
-                 proxy: str = None,
-                 timeout: float = 60,
-                 max_retries: int = 3,
-                 retry_delay: float = 2.0,
-                 verify: bool = True,
-                 allow_redirects: bool = True,
-                 stream: bool = False,
-                 impersonate: Optional[str] = None,
-                 extensions: Optional[Dict[str, Any]] = None,
-                 automation_config: str = None,
-                 automation_script: str = None,
-                 allowed_status_codes: Optional[List[int]] = None,
-                 kwargs: str = None) -> Response:
+    def download(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        headers: dict[str, Any] | None = None,
+        cookies: dict[str, Any] | str | None = None,
+        params: dict[str, Any] | None = None,
+        data: Any = None,
+        json: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+        proxy: str | None = None,
+        timeout: float = 60,
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
+        verify: bool = True,
+        allow_redirects: bool = True,
+        stream: bool = False,
+        impersonate: str | None = None,
+        extensions: dict[str, Any] | None = None,
+        automation_config: str | None = None,
+        automation_script: str | None = None,
+        allowed_status_codes: Optional[List[int]] = None,
+        kwargs: str | None = None,
+    ) -> Response:
         """
         使用curl_cffi执行HTTP请求
         """
@@ -110,7 +106,7 @@ class CurlCffiAdapter(Downloader):
         # 设置代理
         proxies = None
         if proxy:
-            proxies = {'http': proxy, 'https': proxy}
+            proxies = {"http": proxy, "https": proxy}
 
         try:
             # 获取请求方法
@@ -141,11 +137,11 @@ class CurlCffiAdapter(Downloader):
                 content=curl_cffi_resp.content,
                 text=curl_cffi_resp.text,
                 headers=dict(curl_cffi_resp.headers),
-                raw_response=curl_cffi_resp
+                raw_response=curl_cffi_resp,
             )
 
         except Exception as e:
-            self.logger.error(f"curl_cffi request failed for {url}: {e}")
+            log.exception(f"curl_cffi request failed for {url}: {e}")
             raise
 
     def close(self):

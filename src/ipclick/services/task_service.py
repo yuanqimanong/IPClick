@@ -1,22 +1,19 @@
-# -*- coding:utf-8 -*-
-
-"""
-任务处理服务
-
-@time: 2025-12-10
-@author: Hades
-@file: task_service.py
-"""
 import json
-import logging
 import time
-from typing import Optional, Dict, Any
+from typing import Any
 
-from ipclick.adapters import get_default_adapter, get_adapter_info, create_adapter
+from grpc import ServicerContext
+from typing_extensions import override
+
+from ipclick import IPClickAdapter
+from ipclick.adapters.base import DownloaderAdapter
+from ipclick.adapters.registry import ADAPTER_CLASSES, get_adapter, get_default_adapter
 from ipclick.dto import Response
-from ipclick.dto.models import ADAPTER_MAP, METHOD_MAP
-from ipclick.dto.proto import task_pb2_grpc, task_pb2
+from ipclick.dto.models import METHOD_MAP
+from ipclick.dto.proto import task_pb2, task_pb2_grpc
 from ipclick.utils import json_hook
+from ipclick.utils.config_util import Settings
+from ipclick.utils.log_util import log
 
 
 class TaskService(task_pb2_grpc.TaskServiceServicer):
@@ -31,39 +28,23 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     5. 错误处理和日志记录
     """
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        self.config = config or {}
-        self.logger = logging.getLogger(__name__)
-
-        # 适配器缓存
-        self._adapters = {}
-
-        # 获取默认适配器
-        try:
-            self.default_adapter = get_default_adapter()
-        except RuntimeError as e:
-            self.logger.error(f"No adapters available: {e}")
-            raise
-
+    def __init__(self, config: Settings):
+        self.config: Settings = config
         # 适配器配置
-        self.adapter_configs = {'DOWNLOADER': self.config.get('DOWNLOADER', {}),
-                                'BROWSER': self.config.get('BROWSER', {})}
+        self.adapter_config: dict[str, Any] = {
+            "DOWNLOADER": self.config.get("DOWNLOADER", {}),
+            "BROWSER": self.config.get("BROWSER", {}),
+        }
+
+        self._adapter_cache: dict[str, DownloaderAdapter] = {}
+        # 获取默认适配器
+        self.default_adapter: DownloaderAdapter = get_default_adapter()
 
         # 记录初始化信息
-        self.logger.info(f"TaskService initialized with default adapter: {self.default_adapter}")
-        self._log_adapter_info()
+        log.debug(f"TaskService initialized with default adapter: {self.default_adapter}")
 
-    def _log_adapter_info(self):
-        """记录适配器信息"""
-        try:
-            adapter_info = get_adapter_info()
-            self.logger.info(f"Available adapters: {list(adapter_info.keys())}")
-            for name, info in adapter_info.items():
-                self.logger.debug(f"  {name}: {info['class']} ({info['module']})")
-        except Exception as e:
-            self.logger.warning(f"Could not get adapter info: {e}")
-
-    def Send(self, request: task_pb2.ReqTask, context) -> task_pb2.TaskResp:
+    @override
+    def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
         """
         处理gRPC任务请求
 
@@ -74,12 +55,15 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         Returns:
             task_pb2.TaskResp: gRPC响应对象
         """
-        self.logger.info(f"Received request: {request.uuid} for URL: {request.url}")
+        log.info(f"Received request: {request.uuid} for URL: {request.url}")
         start_time = time.time()
 
         # 选择适配器
-        adapter_name = self._get_adapter_name(request.adapter)
-        adapter = self._get_adapter(adapter_name)
+        adapter_member = IPClickAdapter.from_pb(request.adapter)
+        if adapter_member.display_name not in self._adapter_cache:
+            adapter = get_adapter(adapter_member.display_name)
+        else:
+            adapter = self._adapter_cache[adapter_member.display_name]
 
         # 执行下载
         response = self._execute_download(adapter, request)
@@ -92,77 +76,13 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         grpc_response.response_time_ms = elapsed_ms
 
         # 记录成功日志
-        self.logger.info(
-            f"Request {request.uuid} completed in {elapsed_ms}ms, "
-            f"status:  {grpc_response.status_code}, adapter: {adapter_name}"
+        log.info(
+            f"Request {request.uuid} completed in {elapsed_ms}ms, status:  {grpc_response.status_code}, adapter: {adapter_member.display_name}"
         )
 
         return grpc_response
 
-    def _get_adapter_name(self, pb_adapter: int) -> str:
-        """
-        根据protobuf适配器枚举获取适配器名称
-
-        Args:
-            pb_adapter: protobuf适配器枚举值
-
-        Returns:
-            str: 适配器名称
-        """
-
-        # 如果没有指定或者是未知枚举，使用默认适配器
-        if pb_adapter not in ADAPTER_MAP:
-            self.logger.debug(f"Unknown adapter enum {pb_adapter}, using default:  {self.default_adapter}")
-            return self.default_adapter
-
-        return ADAPTER_MAP[pb_adapter]
-
-    def _get_adapter(self, adapter_name: str):
-        """
-        获取适配器实例（带缓存）
-
-        Args:
-            adapter_name:  适配器名称
-
-        Returns:
-            Downloader: 适配器实例
-        """
-        if adapter_name not in self._adapters:
-            # 创建适配器实例
-            adapter = create_adapter(adapter_name)
-
-            # TODO 应用配置
-            # self._configure_adapter(adapter)
-
-            # 缓存适配器
-            self._adapters[adapter_name] = adapter
-            self.logger.debug(f"Created adapter instance: {adapter_name}")
-
-        return self._adapters[adapter_name]
-
-    def _configure_adapter(self, adapter):
-        """
-        配置适配器实例
-
-        Args:
-            adapter: 适配器实例
-            config: 配置字典
-        """
-        # 通用配置项
-        if 'max_retries' in self.adapter_configs:
-            adapter.max_retries = self.adapter_configs['max_retries']
-        if 'retry_delay' in self.adapter_configs:
-            adapter.retry_delay = self.adapter_configs['retry_delay']
-        if 'timeout' in self.adapter_configs:
-            adapter.timeout = self.adapter_configs['timeout']
-        if 'verify_ssl' in self.adapter_configs:
-            adapter.verify_ssl = self.adapter_configs['verify_ssl']
-
-        # curl_cffi特定配置
-        if hasattr(adapter, 'impersonate') and 'impersonate' in self.adapter_configs:
-            adapter.impersonate = self.adapter_configs['impersonate']
-
-    def _execute_download(self, adapter, request: task_pb2.ReqTask) -> Response:
+    def _execute_download(self, adapter: DownloaderAdapter, request: task_pb2.ReqTask) -> Response:
         """
         执行下载请求
 
@@ -184,32 +104,80 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         data = json.loads(request.data) if request.data else None
         json_data = json.loads(request.json) if request.json else None
 
+        extensions = dict(request.extensions) if request.extensions else None
+
         # 构建下载参数
         download_kwargs = {
-            'method': method,
-            'headers': headers,
-            'cookies': cookies,
-            'params': params,
-            'data': data,
-            'json': json_data,
-            'proxy': request.proxy,
-            'timeout': request.timeout_seconds,
-            'max_retries': request.max_retries,
-            'retry_delay': request.retry_backoff_seconds,
-            'verify': request.verify_ssl,
-            'allow_redirects': request.allow_redirects,
-            'stream': request.stream,
-            'impersonate': request.impersonate,
-            'extensions': request.extensions,
-            'automation_config': request.automation_config,
-            'automation_script': request.automation_script,
-            'kwargs': request.kwargs,
+            "method": method,
+            "headers": headers,
+            "cookies": cookies,
+            "params": params,
+            "data": data,
+            "json": json_data,
+            "proxy": request.proxy,
+            "timeout": request.timeout_seconds,
+            "max_retries": request.max_retries,
+            "retry_delay": request.retry_backoff_seconds,
+            "verify": request.verify_ssl,
+            "allow_redirects": request.allow_redirects,
+            "stream": request.stream,
+            "impersonate": request.impersonate,
+            "extensions": extensions,
+            "automation_config": request.automation_config,
+            "automation_script": request.automation_script,
+            "kwargs": request.kwargs,
         }
+
+        # 构建并验证下载参数
+        download_kwargs = self._validate_and_convert_params(download_kwargs)
 
         # 执行下载
         return adapter.download(request.url, **download_kwargs)
 
-    def _build_grpc_response(self, request: task_pb2.ReqTask, response: Response) -> task_pb2.TaskResp:
+    @staticmethod
+    def _validate_and_convert_params(params: dict[str, Any]) -> dict[str, Any]:
+        """
+        验证并转换参数类型以符合适配器方法的要求
+        """
+        validated_params: dict[str, Any] = {}
+
+        for key, value in params.items():
+            if value is None:
+                validated_params[key] = None
+                continue
+
+            # 根据参数名称确定期望的类型
+            if key == "method":
+                validated_params[key] = str(value) if value is not None else None
+            elif key in ["headers", "cookies", "params", "data", "json", "extensions"]:
+                # 这些应该是字典类型
+                if isinstance(value, dict):
+                    validated_params[key] = value
+                elif value is not None:
+                    # 如果不是字典但不为None，则尝试转换或抛出错误
+                    raise TypeError(f"Parameter '{key}' must be a dict, got {type(value)}")
+                else:
+                    validated_params[key] = None
+            elif key in ["timeout", "retry_delay"]:
+                # 这些应该是浮点数
+                validated_params[key] = float(value) if value is not None else None
+            elif key in ["max_retries"]:
+                # 这些应该是整数
+                validated_params[key] = int(value) if value is not None else None
+            elif key in ["verify", "allow_redirects", "stream"]:
+                # 这些应该是布尔值
+                validated_params[key] = bool(value) if value is not None else None
+            elif key in ["proxy", "impersonate", "automation_config", "automation_script", "kwargs"]:
+                # 这些应该是字符串
+                validated_params[key] = str(value) if value is not None else None
+            else:
+                # 对于其他参数，保持原值
+                validated_params[key] = value
+
+        return validated_params
+
+    @staticmethod
+    def _build_grpc_response(request: task_pb2.ReqTask, response: Response) -> task_pb2.TaskResp:
         """
         构建gRPC响应
 
@@ -227,9 +195,9 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             effective_url=response.url,
             status_code=response.status_code,
             response_headers=response.headers or {},
-            content=response.content or b'',
+            content=response.content or b"",
             error_message=str(response.exception) if response.exception else "",
-            response_time_ms=response.elapsed_ms
+            response_time_ms=response.elapsed_ms,
         )
 
     def cleanup(self):
@@ -238,31 +206,14 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
         关闭所有适配器连接，释放资源
         """
-        self.logger.info("Cleaning up TaskService resources...")
+        log.info("Cleaning up TaskService resources...")
 
-        for name, adapter in self._adapters.items():
+        for name, adapter in self._adapter_cache.items():
             try:
                 adapter.close()
-                self.logger.debug(f"Closed adapter: {name}")
+                log.debug(f"Closed adapter: {name}")
             except Exception as e:
-                self.logger.warning(f"Error closing adapter {name}: {e}")
+                log.warning(f"Error closing adapter {name}: {e}")
 
-        self._adapters.clear()
-        self.logger.info("TaskService cleanup completed")
-
-    def get_stats(self) -> Dict[str, Any]:
-        """
-        获取服务统计信息
-
-        Returns:
-            Dict:  统计信息
-        """
-        return {
-            'default_adapter': self.default_adapter,
-            'active_adapters': list(self._adapters.keys()),
-            'adapter_count': len(self._adapters),
-            'config': {
-                'adapters': self.adapter_configs,
-                'default': self.default_adapter
-            }
-        }
+        ADAPTER_CLASSES.clear()
+        log.info("TaskService cleanup completed")

@@ -1,20 +1,23 @@
 [project]
 name = "ipclick"
-version = "0.1.0"
+version = "0.1.2"
 description = "IPClick Tool"
 authors = [
     { name = "元气码农少女酱", email = "1276162429@qq.com" }
 ]
 license = { text = "MIT License" }
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = [
-    "curl-cffi (>=0.13.0,<0.14.0)",
-    "grpcio (>=1.76.0,<2.0.0)",
-    "protobuf (>=6.33.2,<7.0.0)",
-    "click (>=8.3.1,<9.0.0)",
-    "httpx (>=0.28.1,<0.29.0)",
-    "fake-useragent (>=2.2.0,<3.0.0)",
+    "curl-cffi>=0.14.0,<0.15.0",
+    "grpcio>=1.76.0,<2.0.0",
+    "protobuf>=6.33.2,<7.0.0",
+    "click>=8.3.1,<9.0.0",
+    "httpx>=0.28.1,<0.29.0",
+    "fake-useragent>=2.2.0,<3.0.0",
+    "pydantic>=2.12.5",
+    "loguru>=0.7.3",
+    "python-box[all]~=7.0",
 ]
 
 [project.urls]
@@ -29,10 +32,70 @@ build-backend = "poetry.core.masonry.api"
 
 [dependency-groups]
 dev = [
+    "basedpyright>=1.37.1",
     "grpcio-tools (>=1.76.0,<2.0.0)",
-    "requests (>=2.32.5,<3.0.0)",
-    "twine (>=6.2.0,<7.0.0)"
+    "ruff>=0.14.11",
+    "twine>=6.2.0,<7.0.0",
 ]
 
 [project.scripts]
 ipclick = "ipclick.__main__:main"
+
+
+[tool.pyright]
+include = ["src"]
+exclude = [
+    "**/__pycache__",
+    ".venv",
+    ".pytest_cache",
+    "**/dto/proto/*.py",
+    "**/dto/proto/*_pb2*.py",
+    "**/generated/**"
+]
+pythonVersion = "3.11"
+reportAny = false
+reportExplicitAny = false
+reportUnknownMemberType = "none"
+
+[tool.ruff]
+# 代码格式化
+line-length = 120
+indent-width = 4
+target-version = "py311"
+fix = true  # 启用自动修复
+fixable = ["F401"]  # F401: 检测未使用的导入
+unfixable = []      # 允许修复 F401 问题
+
+[tool.ruff.format]
+# 格式化特定配置
+quote-style = "double"
+skip-magic-trailing-comma = false
+indent-style = "space"
+
+[tool.ruff.lint]
+## 选择检查规则
+#select = [
+#    "E", # pycodestyle 错误
+#    "W", # pycodestyle 警告
+#    "F", # Pyflakes - 包含 F401
+#    "I", # isort - 导入排序
+#    "B", # flake8-bugbear
+#    "C4", # flake8-comprehensions
+#    "UP", # pyupgrade
+#    "TID", # flake8-tidy-imports
+#]
+
+# 忽略的规则
+ignore = ["E501"]  # 忽略行长度限制
+
+[tool.ruff.lint.per-file-ignores]
+# 特定文件的忽略规则
+"__init__.py" = ["F401"]  # 未使用的导入
+"tests/**/*.py" = ["F401"]
+"test_*.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+# 导入排序配置
+known-first-party = ["ipclick"]
+lines-after-imports = 2
+force-sort-within-sections = true

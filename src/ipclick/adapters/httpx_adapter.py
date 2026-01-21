@@ -1,16 +1,9 @@
-# -*- coding:utf-8 -*-
+from typing import Any
 
-"""
-httpx下载器适配器 - 备选HTTP客户端
-
-@time: 2025-12-10
-@author: Hades
-@file: httpx_adapter.py
-"""
-from typing import Optional, Dict, Any
-
-from ipclick.adapters.base import retry, Downloader
+from ipclick.adapters.base import DownloaderAdapter, retry
 from ipclick.dto import Response
+from ipclick.utils.log_util import log
+
 
 try:
     import httpx
@@ -27,7 +20,7 @@ except ImportError:
     FAKE_UA_AVAILABLE = False
 
 
-class HttpxAdapter(Downloader):
+class HttpxAdapter(DownloaderAdapter):
     """
     httpx适配器 - 现代HTTP客户端
 
@@ -37,18 +30,18 @@ class HttpxAdapter(Downloader):
     - 完善的API
     """
 
+    adapter_name: str = "httpx"
+
     def __init__(self):
         if not HTTPX_AVAILABLE:
-            raise ImportError(
-                "httpx is not installed. Install it with: pip install httpx"
-            )
+            raise ImportError("httpx is not installed. Install it with: pip install httpx")
 
         super().__init__()
         self.session = None
 
         # User Agent生成器
         if FAKE_UA_AVAILABLE:
-            self.ua_generator = UserAgent(platforms='desktop')
+            self.ua_generator = UserAgent(platforms="desktop")
         else:
             self.ua_generator = None
 
@@ -68,28 +61,31 @@ class HttpxAdapter(Downloader):
         return self.user_agent
 
     @retry()
-    def download(self, url: str,
-                 *,
-                 method: str = "GET",
-                 headers: Optional[Dict[str, Any]] = None,
-                 cookies: Optional[Dict[str, Any], str] = None,
-                 params: Optional[Dict[str, Any]] = None,
-                 data: Any = None,
-                 json: Optional[Dict[str, Any]] = None,
-                 files: Optional[Dict[str, Any]] = None,
-                 proxy: str = None,
-                 timeout: float = 60,
-                 max_retries: int = 3,
-                 retry_backoff: float = 2.0,
-                 verify: bool = True,
-                 allow_redirects: bool = True,
-                 stream: bool = False,
-                 impersonate: Optional[str] = None,
-                 extensions: Optional[Dict[str, Any]] = None,
-                 automation_config: str = None,
-                 automation_script: str = None,
-                 allowed_status_codes: None,
-                 **kwargs) -> Response:
+    def download(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        headers: dict[str, Any] | None = None,
+        cookies: dict[str, Any] | str | None = None,
+        params: dict[str, Any] | None = None,
+        data: Any = None,
+        json: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+        proxy: str | None = None,
+        timeout: float = 60,
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
+        verify: bool = True,
+        allow_redirects: bool = True,
+        stream: bool = False,
+        impersonate: str | None = None,
+        extensions: dict[str, Any] | None = None,
+        automation_config: str | None = None,
+        automation_script: str | None = None,
+        allowed_status_codes: list[Any] | None = None,
+        kwargs: str | None = None,
+    ) -> Response:
         """
         使用httpx执行HTTP请求
         """
@@ -98,43 +94,40 @@ class HttpxAdapter(Downloader):
         # 设置默认headers
         if headers is None:
             headers = {
-                'User-Agent': self._get_user_agent(),
-                'Accept': '*/*',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
+                "User-Agent": self._get_user_agent(),
+                "Accept": "*/*",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
             }
-        elif 'User-Agent' not in headers and 'user-agent' not in headers:
-            headers['User-Agent'] = self._get_user_agent()
+        elif "User-Agent" not in headers and "user-agent" not in headers:
+            headers["User-Agent"] = self._get_user_agent()
 
         # 构建httpx请求参数
         httpx_kwargs = {
-            'params': params,
-            'data': data,
-            'headers': headers,
-            'cookies': cookies,
-            'timeout': timeout or self.timeout,
+            "params": params,
+            "data": data,
+            "headers": headers,
+            "cookies": cookies,
+            "timeout": timeout or self.timeout,
         }
 
         # 设置代理
         if proxy:
-            httpx_kwargs['proxies'] = proxy
+            httpx_kwargs["proxies"] = proxy
 
         # 添加其他参数
-        supported_kwargs = [
-            'content', 'files', 'json', 'auth', 'follow_redirects',
-            'verify', 'cert', 'trust_env'
-        ]
+        supported_kwargs = ["content", "files", "json", "auth", "follow_redirects", "verify", "cert", "trust_env"]
         for key in supported_kwargs:
             if key in kwargs:
                 httpx_kwargs[key] = kwargs[key]
 
         # SSL验证
-        if 'verify' not in httpx_kwargs:
-            httpx_kwargs['verify'] = self.verify_ssl
+        if "verify" not in httpx_kwargs:
+            httpx_kwargs["verify"] = self.verify_ssl
 
         # 默认跟随重定向
-        if 'follow_redirects' not in httpx_kwargs:
-            httpx_kwargs['follow_redirects'] = True
+        if "follow_redirects" not in httpx_kwargs:
+            httpx_kwargs["follow_redirects"] = True
 
         # 移除None值
         httpx_kwargs = {k: v for k, v in httpx_kwargs.items() if v is not None}
@@ -150,11 +143,11 @@ class HttpxAdapter(Downloader):
                 content=httpx_resp.content,
                 text=httpx_resp.text,
                 headers=dict(httpx_resp.headers),
-                raw_response=httpx_resp
+                raw_response=httpx_resp,
             )
 
         except Exception as e:
-            self.logger.error(f"httpx request failed for {url}: {e}")
+            log.exception(f"httpx request failed for {url}: {e}")
             raise
 
     def close(self):

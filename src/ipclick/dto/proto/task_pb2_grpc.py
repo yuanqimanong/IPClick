@@ -10,7 +10,6 @@ _version_not_supported = False
 
 try:
     from grpc._utilities import first_version_is_lower
-
     _version_not_supported = first_version_is_lower(GRPC_VERSION, GRPC_GENERATED_VERSION)
 except ImportError:
     _version_not_supported = True
@@ -39,10 +38,10 @@ class TaskServiceStub(object):
             channel: A grpc.Channel.
         """
         self.Send = channel.unary_unary(
-            '/task.TaskService/Send',
-            request_serializer=task__pb2.ReqTask.SerializeToString,
-            response_deserializer=task__pb2.TaskResp.FromString,
-            _registered_method=True)
+                '/task.TaskService/Send',
+                request_serializer=task__pb2.ReqTask.SerializeToString,
+                response_deserializer=task__pb2.TaskResp.FromString,
+                _registered_method=True)
 
 
 class TaskServiceServicer(object):
@@ -61,19 +60,19 @@ class TaskServiceServicer(object):
 
 def add_TaskServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-        'Send': grpc.unary_unary_rpc_method_handler(
-            servicer.Send,
-            request_deserializer=task__pb2.ReqTask.FromString,
-            response_serializer=task__pb2.TaskResp.SerializeToString,
-        ),
+            'Send': grpc.unary_unary_rpc_method_handler(
+                    servicer.Send,
+                    request_deserializer=task__pb2.ReqTask.FromString,
+                    response_serializer=task__pb2.TaskResp.SerializeToString,
+            ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-        'task.TaskService', rpc_method_handlers)
+            'task.TaskService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
     server.add_registered_method_handlers('task.TaskService', rpc_method_handlers)
 
 
-# This class is part of an EXPERIMENTAL API.
+ # This class is part of an EXPERIMENTAL API.
 class TaskService(object):
     """=====================================
     服务定义
@@ -83,15 +82,15 @@ class TaskService(object):
 
     @staticmethod
     def Send(request,
-             target,
-             options=(),
-             channel_credentials=None,
-             call_credentials=None,
-             insecure=False,
-             compression=None,
-             wait_for_ready=None,
-             timeout=None,
-             metadata=None):
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
         return grpc.experimental.unary_unary(
             request,
             target,

@@ -1,44 +1,34 @@
-# -*- coding:utf-8 -*-
-
 """
 Config 加载器
-加载顺序：指定路径配置 > Home目录配置 > 包内默认配置
-环境变量：覆盖服务端 IP 和 PORT 配置
 
-@time: 2025-12-10
-@author: Hades
-@file: loader.py
+配置文件加载顺序 (1>2>3)：
+    1. 指定的配置文件路径
+    2. Home目录配置（~/.ipclick/config.toml）
+    3. 包内默认配置（可选，如果你有的话）
+环境变量：覆盖服务端 IP 和 PORT 配置
 """
 
-import os
-import tomllib
 from functools import lru_cache
+import os
 from pathlib import Path
+from typing import Any
+
+from ipclick.utils.config_util import ConfigUtil, Settings
+
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "configs" / "default_config.toml"
+HOME_CONFIG_PATH = Path.home() / ".ipclick" / "config.toml"
 
 
 @lru_cache(maxsize=3)
-def load_config(config_path: str | Path | None = None):
-    config = {}
+def load_config(config_path: str | Path | None = None) -> Settings:
+    config_list: list[Any] = [DEFAULT_CONFIG_PATH, HOME_CONFIG_PATH]
 
-    # 1. 包内默认配置文件（可选，如果你有的话）
-    if DEFAULT_CONFIG_PATH.exists():
-        with open(DEFAULT_CONFIG_PATH, "rb") as f:
-            config.update(tomllib.load(f) or {})
-
-    # 2. 用户家目录配置（~/.ipclick/config.toml）
-    home_config = Path.home() / ".ipclick" / "config.toml"
-    if home_config.exists():
-        with open(home_config, "rb") as f:
-            config.update(tomllib.load(f) or {})
-
-    # 3. 当前项目目录配置（最高优先级）
     if config_path:
         user_path = Path(config_path)
     else:
         # 自动查找常见文件名
-        for name in ["config.toml", "ipclick.toml", ".ipclick.toml"]:
+        for name in ["ipclick.toml", ".ipclick.toml"]:
             if Path(name).exists():
                 user_path = Path(name)
                 break
@@ -46,14 +36,13 @@ def load_config(config_path: str | Path | None = None):
             user_path = None
 
     if user_path and user_path.exists():
-        with open(user_path, "rb") as f:
-            user_config = tomllib.load(f) or {}
-            config.update(user_config)
+        config_list.append(user_path)
 
-    # 4. 环境变量覆盖（最高优先级）
+    config = ConfigUtil.load(config_list)
+
     if os.getenv("IPCLICK_HOST"):
-        config.setdefault("SERVER", {})["host"] = os.getenv("IPCLICK_HOST")
+        config["SERVER"]["host"] = os.getenv("IPCLICK_HOST")
     if os.getenv("IPCLICK_PORT"):
-        config.setdefault("SERVER", {})["port"] = int(os.getenv("IPCLICK_PORT"))
+        config["SERVER"]["port"] = int(os.getenv("IPCLICK_PORT", 9527))
 
     return config

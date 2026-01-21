@@ -1,13 +1,12 @@
-# ================ 基础配置 [GENERAL] ================
+# ================ SDK配置 [CLIENT] ================
+# -------------- 基础配置 [GENERAL] --------------
 [GENERAL]
 # 程序运行模式: "standalone" (单机) | "cluster" (多机器/集群)
 mode = "standalone"
-# 运行环境: "dev" (开发环境) | "prod" (生产环境)
-env = "dev"
 # 调试模式 (开启后输出详细日志)
 debug = false
 
-# ================ 代理配置 [PROXY] ================
+# ------- 代理配置 [PROXY] -------
 [PROXY]
 scheme = 'http'
 host = '127.0.0.1'
@@ -16,9 +15,19 @@ port = 7890
 auth_key = ''
 auth_password = ''
 channel_name = ''
-session_ttl = 60
+session_ttl = ''
 country_code = ''
 tunnel_server = ''
+
+# ------- 集群配置 [CLUSTER] -------
+[CLUSTER]
+# 负载均衡策略 (round_robin/random/weight)
+load_balancer = "round_robin"
+nodes = [
+    # 格式：[id, address, region(可选), zone(可选), weight(可选), tags(可选)]
+    { id = "node-101", address = "192.168.1.101:8080", region = "us-east-1", zone = "1a", weight = 100 },
+]
+db_uri = "mysql://..."
 
 # ================ 服务端配置 [SERVER] ================
 [SERVER]
@@ -27,33 +36,9 @@ host = "[::]"
 # 监听端口
 port = 9527
 # 最大线程数
-max_workers = 10
+max_workers = 100
 
-# ================ 集群配置 [CLUSTER] ================
-[CLUSTER]
-# 负载均衡策略 (round_robin/random/weight)
-load_balancer = "round_robin"
-nodes = [
-    # 格式：[id, address, region(可选), zone(可选), weight(可选), tags(可选)]
-    { id = "node-101", address = "192.168.1.101:8080", region = "us-east-1", zone = "1a", weight = 100 },
-]
-[CLUSTER.health_check]
-enabled = true
-
-# ================ 日志配置 [LOG] ================
-[LOG]
-# 日志级别 (debug/info/warn/error)
-level = "info"
-# 日志格式
-format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-# 日志输出位置 (stdout 或文件路径)
-output = "stdout"
-# 日志轮转配置 (当 output 为文件时生效)
-[LOG.rotation]
-max_size = 100   # 单文件最大(MB)
-max_backups = 5  # 保留历史文件数
-
-# ================ 下载器配置 [DOWNLOADER] ================
+# ------- 下载器配置 [DOWNLOADER] -------
 [DOWNLOADER]
 # 连接超时（秒）
 connect_timeout = 10
@@ -85,7 +70,7 @@ verify_checksum = true          # 下载完成后校验哈希
 temp_dir = "/tmp/downloads"     # 分块临时存储目录
 auto_clean = true               # 下载完成后清除临时文件
 
-# ================ 浏览器渲染配置 [BROWSER] ================
+# ------- 浏览器渲染配置 [BROWSER] -------
 [BROWSER]
 # 启用浏览器渲染引擎
 enabled = true
@@ -124,3 +109,23 @@ path = "/data/browser_cache"
 [BROWSER.sandbox]
 enable = true
 level = "strict"    # strict/moderate/off
+
+
+
+# ================ 监控配置 [MONITOR] ================
+[MONITOR]
+health_check = true
+
+# ================ 日志配置 [LOG] ================
+[LOG]
+# 日志级别 (debug/info/warn/error)
+level = "info"
+# 日志格式
+format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+# 日志输出位置 (stdout 或文件路径)
+output = "stdout"
+# 日志轮转配置 (当 output 为文件时生效)
+[LOG.rotation]
+max_size = 100   # 单文件最大(MB)
+max_backups = 5  # 保留历史文件数
+

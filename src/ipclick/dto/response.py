@@ -1,15 +1,6 @@
-# -*- coding:utf-8 -*-
-
-"""
-统一的HTTP响应类
-
-@time: 2025-12-10
-@author: Hades
-@file: response.py
-"""
-import json as json_module
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+import json as json_module
+from typing import Any, Dict, Optional
 
 
 @dataclass
@@ -19,6 +10,7 @@ class Response:
 
     用于封装所有HTTP适配器的响应，提供一致的接口
     """
+
     url: str
     status_code: int
     content: Optional[bytes] = None
@@ -33,7 +25,7 @@ class Response:
         # 如果没有text但有content，尝试解码
         if self.text is None and self.content is not None:
             try:
-                self.text = self.content.decode('utf-8', errors='ignore')
+                self.text = self.content.decode("utf-8", errors="ignore")
             except (AttributeError, UnicodeDecodeError):
                 self.text = str(self.content)
 
@@ -97,22 +89,22 @@ class Response:
         if not self.ok:
             error_msg = f"HTTP {self.status_code} Error for url: {self.url}"
             if self.text:
-                error_msg += f"\nResponse: {self.text[: 200]}"
+                error_msg += f"\nResponse: {self.text[:200]}"
             raise Exception(error_msg)
 
     def get_content_type(self) -> Optional[str]:
         """获取内容类型"""
-        return self.headers.get('content-type') or self.headers.get('Content-Type')
+        return self.headers.get("content-type") or self.headers.get("Content-Type")
 
     def get_encoding(self) -> str:
         """获取编码类型"""
         content_type = self.get_content_type()
-        if content_type and 'charset=' in content_type:
-            return content_type.split('charset=')[1].split(';')[0].strip()
-        return 'utf-8'
+        if content_type and "charset=" in content_type:
+            return content_type.split("charset=")[1].split(";")[0].strip()
+        return "utf-8"
 
     @classmethod
-    def error_response(cls, url: str, exception: Exception, status_code: int = -1) -> 'Response':
+    def error_response(cls, url: str, exception: Exception, status_code: int = -1) -> "Response":
         """
         创建错误响应
 
@@ -131,12 +123,13 @@ class Response:
             text=str(exception),
             headers={},
             raw_response=None,
-            exception=exception
+            exception=exception,
         )
 
     @classmethod
-    def success_response(cls, url: str, content: bytes = b'',
-                         status_code: int = 200, headers: Optional[Dict[str, str]] = None) -> 'Response':
+    def success_response(
+        cls, url: str, content: bytes = b"", status_code: int = 200, headers: Optional[Dict[str, str]] = None
+    ) -> "Response":
         """
         创建成功响应
 
@@ -153,22 +146,22 @@ class Response:
             url=url,
             status_code=status_code,
             content=content,
-            text=content.decode('utf-8', errors='ignore') if content else '',
+            text=content.decode("utf-8", errors="ignore") if content else "",
             headers=headers or {},
             raw_response=None,
-            exception=None
+            exception=None,
         )
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
-            'url': self.url,
-            'status_code': self.status_code,
-            'headers': self.headers,
-            'text': self.text,
-            'elapsed_ms': self.elapsed_ms,
-            'ok': self.ok,
-            'exception': str(self.exception) if self.exception else None
+            "url": self.url,
+            "status_code": self.status_code,
+            "headers": self.headers,
+            "text": self.text,
+            "elapsed_ms": self.elapsed_ms,
+            "ok": self.ok,
+            "exception": str(self.exception) if self.exception else None,
         }
 
     def __str__(self) -> str:
@@ -177,5 +170,4 @@ class Response:
 
     def __repr__(self) -> str:
         """详细字符串表示"""
-        return (f"Response(url={self.url!r}, status_code={self.status_code}, "
-                f"elapsed_ms={self.elapsed_ms}, ok={self.ok})")
+        return f"Response(url={self.url!r}, status_code={self.status_code}, elapsed_ms={self.elapsed_ms}, ok={self.ok})"
