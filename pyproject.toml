@@ -63,6 +63,8 @@ line-length = 120
 indent-width = 4
 target-version = "py311"
 fix = true  # 启用自动修复
+fixable = ["F401"]  # F401: 检测未使用的导入
+unfixable = []      # 允许修复 F401 问题
 
 [tool.ruff.format]
 # 格式化特定配置

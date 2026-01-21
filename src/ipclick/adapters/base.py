@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 from ipclick.dto import Response
+from ipclick.utils.log_util import log
 
 
 def retry(max_retries_attr="max_retries", retry_delay_attr="retry_delay"):
@@ -53,7 +54,7 @@ def retry(max_retries_attr="max_retries", retry_delay_attr="retry_delay"):
 
                         # 记录重试信息
                         if hasattr(self, "logger"):
-                            self.logger.warning(
+                            log.warning(
                                 f"Download {url} failed, retrying {attempt + 1}/{max_retries} in {sleep_time}s...  Error: {e}"
                             )
 

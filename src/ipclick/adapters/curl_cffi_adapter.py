@@ -1,8 +1,9 @@
 import json as json_lib
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 from ipclick.adapters.base import DownloaderAdapter, retry
 from ipclick.dto import Response
+from ipclick.utils.log_util import log
 
 
 try:
@@ -140,7 +141,7 @@ class CurlCffiAdapter(DownloaderAdapter):
             )
 
         except Exception as e:
-            self.logger.error(f"curl_cffi request failed for {url}: {e}")
+            log.exception(f"curl_cffi request failed for {url}: {e}")
             raise
 
     def close(self):

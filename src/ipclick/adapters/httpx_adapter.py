@@ -1,7 +1,8 @@
-from typing import Any, Dict, Optional
+from typing import Any
 
 from ipclick.adapters.base import DownloaderAdapter, retry
 from ipclick.dto import Response
+from ipclick.utils.log_util import log
 
 
 try:
@@ -146,7 +147,7 @@ class HttpxAdapter(DownloaderAdapter):
             )
 
         except Exception as e:
-            self.logger.error(f"httpx request failed for {url}: {e}")
+            log.exception(f"httpx request failed for {url}: {e}")
             raise
 
     def close(self):
