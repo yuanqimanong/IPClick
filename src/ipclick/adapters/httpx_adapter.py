@@ -1,7 +1,6 @@
-
 from typing import Any, Dict, Optional
 
-from ipclick.adapters.base import Downloader, retry
+from ipclick.adapters.base import DownloaderAdapter, retry
 from ipclick.dto import Response
 
 
@@ -20,7 +19,7 @@ except ImportError:
     FAKE_UA_AVAILABLE = False
 
 
-class HttpxAdapter(Downloader):
+class HttpxAdapter(DownloaderAdapter):
     """
     httpx适配器 - 现代HTTP客户端
 
@@ -29,6 +28,8 @@ class HttpxAdapter(Downloader):
     - HTTP/2支持
     - 完善的API
     """
+
+    adapter_name: str = "httpx"
 
     def __init__(self):
         if not HTTPX_AVAILABLE:
@@ -73,7 +74,7 @@ class HttpxAdapter(Downloader):
         proxy: str | None = None,
         timeout: float = 60,
         max_retries: int = 3,
-        retry_backoff: float = 2.0,
+        retry_delay: float = 2.0,
         verify: bool = True,
         allow_redirects: bool = True,
         stream: bool = False,
@@ -81,8 +82,8 @@ class HttpxAdapter(Downloader):
         extensions: dict[str, Any] | None = None,
         automation_config: str | None = None,
         automation_script: str | None = None,
-        allowed_status_codes: None,
-        **kwargs,
+        allowed_status_codes: list[Any] | None = None,
+        kwargs: str | None = None,
     ) -> Response:
         """
         使用httpx执行HTTP请求

@@ -10,7 +10,7 @@ except importlib.metadata.PackageNotFoundError:
     __version__ = "1.0.0"
     __author__ = "Hades"
 
-from ipclick.dto.models import ProxyConfig
+from ipclick.dto.models import IPClickAdapter, ProxyConfig
 from ipclick.sdk import Downloader, downloader, get_downloader
 
 
@@ -19,4 +19,5 @@ __all__ = [
     "get_downloader",
     "downloader",
     "ProxyConfig",
+    "IPClickAdapter",
 ]

@@ -55,39 +55,42 @@ class Downloader:
         allowed_status_codes=None,
         **kwargs,
     ) -> DownloadResponse:
-        # 代理
-        if not proxy:
-            proxy = None
-        elif proxy is True:
-            proxy = ProxyConfig(**self.config.get("PROXY", {})).to_url()
-        elif isinstance(proxy, ProxyConfig):
-            proxy = proxy.to_url()
+        try:
+            # 代理
+            if not proxy:
+                proxy = None
+            elif proxy is True:
+                proxy = ProxyConfig(**self.config.get("PROXY", {})).to_url()
+            elif isinstance(proxy, ProxyConfig):
+                proxy = proxy.to_url()
 
-        task = DownloadTask(
-            adapter=adapter or kwargs.get("adapter"),
-            url=url,
-            method=method.value,
-            headers=headers,
-            cookies=cookies,
-            params=params,
-            data=data,
-            json=json,
-            files=files,
-            proxy=proxy,
-            timeout=timeout,
-            max_retries=max_retries,
-            retry_backoff=retry_backoff,
-            verify=verify,
-            allow_redirects=allow_redirects,
-            stream=stream,
-            impersonate=impersonate,
-            extensions=extensions,
-            automation_config=automation_config,
-            automation_script=automation_script,
-            allowed_status_codes=allowed_status_codes,
-            kwargs=json_lib.dumps(kwargs),
-        )
-        return self.download(task)
+            task = DownloadTask(
+                adapter=adapter or kwargs.get("adapter"),
+                url=url,
+                method=method,
+                headers=headers,
+                cookies=cookies,
+                params=params,
+                data=data,
+                json=json,
+                files=files,
+                proxy=proxy,
+                timeout=timeout,
+                max_retries=max_retries,
+                retry_backoff=retry_backoff,
+                verify=verify,
+                allow_redirects=allow_redirects,
+                stream=stream,
+                impersonate=impersonate,
+                extensions=extensions,
+                automation_config=automation_config,
+                automation_script=automation_script,
+                allowed_status_codes=allowed_status_codes,
+                kwargs=json_lib.dumps(kwargs),
+            )
+            return self.download(task)
+        except Exception as e:
+            log.exception(f"发生异常：{e}")
 
     def download(self, task: DownloadTask) -> DownloadResponse:
         """

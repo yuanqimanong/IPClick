@@ -1,33 +1,42 @@
 from dataclasses import dataclass, field
 from enum import Enum
 import json
-from typing import Any
+from typing import Any, Self
 import uuid
 
 from ipclick.dto.proto import task_pb2
 from ipclick.utils import json_serializer
 
 
-class Adapter(Enum):
-    # 协议
-    CURL_CFFI = task_pb2.CURL_CFFI
-    HTTPX = task_pb2.HTTPX
-    REQUESTS = task_pb2.REQUESTS
-    # 渲染
-    DRISSIONPAGE = task_pb2.DRISSIONPAGE
-    UC = task_pb2.UC
-    PLAYWRIGHT = task_pb2.PLAYWRIGHT
+class IPClickAdapter(Enum):
+    # 定义格式: (Protobuf枚举值, 内部识别名称)
+    CURL_CFFI = (task_pb2.CURL_CFFI, "curl_cffi")
+    HTTPX = (task_pb2.HTTPX, "httpx")
+    REQUESTS = (task_pb2.REQUESTS, "requests")
+    DRISSIONPAGE = (task_pb2.DRISSIONPAGE, "DrissionPage")
+    UC = (task_pb2.UC, "undetected_chromedriver")
+    PLAYWRIGHT = (task_pb2.PLAYWRIGHT, "playwright")
 
+    def __init__(self, pb_value: int, display_name: str):
+        self.pb_value = pb_value
+        self.display_name = display_name
 
-# 转换适配器枚举
-ADAPTER_MAP = {
-    0: "curl_cffi",
-    1: "httpx",
-    2: "requests",
-    3: "DrissionPage",
-    4: "undetected_chromedriver",
-    5: "playwright",
-}
+    @classmethod
+    def from_pb(cls, value: int) -> Self:
+        """从 Protobuf 的整型枚举值找回 Enum 成员"""
+        for member in cls:
+            if member.pb_value == value:
+                return member
+        # 默认返回或抛异常
+        return cls.CURL_CFFI
+
+    @classmethod
+    def from_str(cls, name: str) -> Self:
+        """从字符串找回 Enum 成员 (用于 SDK 参数输入等)"""
+        for member in cls:
+            if member.display_name.lower() == name.lower():
+                return member
+        return cls.CURL_CFFI
 
 
 class HttpMethod(Enum):
@@ -95,7 +104,7 @@ class DownloadTask:
     """下载任务"""
 
     uuid: str = ""
-    adapter: Adapter = Adapter.CURL_CFFI
+    adapter: IPClickAdapter = IPClickAdapter.CURL_CFFI
 
     # 协议
     method: HttpMethod = HttpMethod.GET
@@ -141,7 +150,7 @@ class DownloadTask:
             raise ValueError("Cannot specify multiple body types (data, json_data, files)")
 
         # 设置默认的浏览器伪装
-        if self.adapter == Adapter.CURL_CFFI and not self.impersonate:
+        if self.adapter == IPClickAdapter.CURL_CFFI and not self.impersonate:
             self.impersonate = "chrome"
 
         if not self.allowed_status_codes:
@@ -149,30 +158,38 @@ class DownloadTask:
 
     def to_protobuf(self):
         """转换为protobuf对象"""
-        return task_pb2.ReqTask(
-            uuid=str(self.uuid) or str(uuid.uuid4()),
-            adapter=ADAPTER_MAP.get(self.adapter, task_pb2.CURL_CFFI),
-            method=METHOD_MAP.get(self.method, task_pb2.GET),
-            url=self.url,
-            headers=self.headers,
-            cookies=self.cookies,
-            params=json.dumps(self.params, default=json_serializer) if self.params else None,
-            data=json.dumps(self.data, default=json_serializer) if self.data else None,
-            json=json.dumps(self.json, default=json_serializer) if self.json else None,
-            proxy=self.proxy,
-            timeout_seconds=self.timeout,
-            max_retries=self.max_retries,
-            retry_backoff_seconds=self.retry_backoff,
-            verify_ssl=self.verify,
-            allow_redirects=self.allow_redirects,
-            stream=self.stream,
-            impersonate=self.impersonate,
-            extensions=self.extensions,
-            automation_config=self.automation_config,
-            automation_script=self.automation_script,
-            allowed_status_codes=self.allowed_status_codes,
-            kwargs=self.kwargs,
-        )
+        try:
+            if isinstance(self.adapter, str):
+                adapter_member = IPClickAdapter.from_str(self.adapter)
+            else:
+                adapter_member = self.adapter or IPClickAdapter.CURL_CFFI
+
+            return task_pb2.ReqTask(
+                uuid=str(self.uuid) or str(uuid.uuid4()),
+                adapter=adapter_member.pb_value,
+                method=self.method.value,
+                url=self.url,
+                headers=self.headers,
+                cookies=self.cookies,
+                params=json.dumps(self.params, default=json_serializer) if self.params else None,
+                data=json.dumps(self.data, default=json_serializer) if self.data else None,
+                json=json.dumps(self.json, default=json_serializer) if self.json else None,
+                proxy=self.proxy,
+                timeout_seconds=self.timeout,
+                max_retries=self.max_retries,
+                retry_backoff_seconds=self.retry_backoff,
+                verify_ssl=self.verify,
+                allow_redirects=self.allow_redirects,
+                stream=self.stream,
+                impersonate=self.impersonate,
+                extensions=self.extensions,
+                automation_config=self.automation_config,
+                automation_script=self.automation_script,
+                allowed_status_codes=self.allowed_status_codes,
+                kwargs=self.kwargs,
+            )
+        except Exception as e:
+            raise Exception(f"转换 protobuf 失败：{e}")
 
 
 @dataclass
@@ -201,7 +218,7 @@ class DownloadResponse:
 
         return cls(
             request_uuid=pb_response.request_uuid,
-            adapter_type=ADAPTER_MAP[pb_response.adapter],
+            adapter_type=pb_response.adapter,
             request=pb_response.original_request,
             url=pb_response.effective_url,
             status_code=pb_response.status_code,

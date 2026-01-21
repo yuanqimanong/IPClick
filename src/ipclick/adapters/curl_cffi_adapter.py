@@ -1,8 +1,7 @@
-
 import json as json_lib
 from typing import Any, Dict, List, Optional
 
-from ipclick.adapters.base import Downloader, retry
+from ipclick.adapters.base import DownloaderAdapter, retry
 from ipclick.dto import Response
 
 
@@ -23,7 +22,7 @@ except ImportError:
     FAKE_UA_AVAILABLE = False
 
 
-class CurlCffiAdapter(Downloader):
+class CurlCffiAdapter(DownloaderAdapter):
     """
     curl_cffi适配器，支持浏览器指纹伪装
 
@@ -33,6 +32,8 @@ class CurlCffiAdapter(Downloader):
     - 更快的性能
     - 支持HTTP/2
     """
+
+    adapter_name: str = "curl_cffi"
 
     def __init__(self):
         if not CURL_CFFI_AVAILABLE:

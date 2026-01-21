@@ -5,9 +5,11 @@ from typing import Any
 from grpc import ServicerContext
 from typing_extensions import override
 
-from ipclick.adapters import create_adapter, get_adapter_info, get_default_adapter
+from ipclick import IPClickAdapter
+from ipclick.adapters.base import DownloaderAdapter
+from ipclick.adapters.registry import ADAPTER_CLASSES, get_default_adapter
 from ipclick.dto import Response
-from ipclick.dto.models import ADAPTER_MAP, METHOD_MAP
+from ipclick.dto.models import METHOD_MAP
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
 from ipclick.utils import json_hook
 from ipclick.utils.config_util import Settings
@@ -28,36 +30,17 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     def __init__(self, config: Settings):
         self.config: Settings = config
-
-        # 适配器缓存
-        self._adapters = {}
-
-        # 获取默认适配器
-        try:
-            self.default_adapter: str = get_default_adapter()
-        except RuntimeError as e:
-            log.error(f"No adapters available: {e}")
-            raise
-
         # 适配器配置
-        self.adapter_configs = {
+        self.adapter_config: dict[str, Any] = {
             "DOWNLOADER": self.config.get("DOWNLOADER", {}),
             "BROWSER": self.config.get("BROWSER", {}),
         }
 
-        # 记录初始化信息
-        log.info(f"TaskService initialized with default adapter: {self.default_adapter}")
-        self._log_adapter_info()
+        # 获取默认适配器
+        self.default_adapter: DownloaderAdapter = get_default_adapter()
 
-    def _log_adapter_info(self):
-        """记录适配器信息"""
-        try:
-            adapter_info = get_adapter_info()
-            log.info(f"Available adapters: {list(adapter_info.keys())}")
-            for name, info in adapter_info.items():
-                log.debug(f"  {name}: {info['class']} ({info['module']})")
-        except Exception as e:
-            log.warning(f"Could not get adapter info: {e}")
+        # 记录初始化信息
+        log.debug(f"TaskService initialized with default adapter: {self.default_adapter}")
 
     @override
     def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
@@ -75,11 +58,24 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         start_time = time.time()
 
         # 选择适配器
-        adapter_name = self._get_adapter_name(request.adapter)
-        adapter = self._get_adapter(adapter_name)
+        # adapter_member = IPClickAdapter.from_value(request.adapter)
+        # adapter_name = adapter_member.display_name
+        # if adapter_name == "unknown":
+        #     log.warning(
+        #         f"Unknown adapter value {request.adapter}, fallback to default: {self.default_adapter.adapter_name}"
+        #     )
+        #     adapter_name = self.default_adapter.adapter_name
+        adapter_member = IPClickAdapter.from_pb(request.adapter)
+        adapter = self._get_adapter(adapter_member.display_name)
+
+        # adapter = self._get_adapter(adapter_name)
+
+        # adapter_name = self._get_adapter_name(request.adapter)
+        # adapter_name = IPClickAdapter.from_value(request.adapter).name
+        # adapter = self._get_adapter(adapter_name)
 
         # 执行下载
-        response = self._execute_download(adapter, request)
+        response = self._execute_download(adapter(), request)
 
         # 构造gRPC响应
         grpc_response = self._build_grpc_response(request, response)
@@ -90,7 +86,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
         # 记录成功日志
         log.info(
-            f"Request {request.uuid} completed in {elapsed_ms}ms, status:  {grpc_response.status_code}, adapter: {adapter_name}"
+            f"Request {request.uuid} completed in {elapsed_ms}ms, status:  {grpc_response.status_code}, adapter: {adapter_member.display_name}"
         )
 
         return grpc_response
@@ -123,18 +119,18 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         Returns:
             Downloader: 适配器实例
         """
-        if adapter_name not in self._adapters:
+        if adapter_name not in ADAPTER_CLASSES:
             # 创建适配器实例
-            adapter = create_adapter(adapter_name)
+            adapter = ADAPTER_CLASSES[adapter_name]
 
             # TODO 应用配置
             # self._configure_adapter(adapter)
 
             # 缓存适配器
-            self._adapters[adapter_name] = adapter
+            # self._adapters[adapter_name] = adapter
             log.debug(f"Created adapter instance: {adapter_name}")
 
-        return self._adapters[adapter_name]
+        return ADAPTER_CLASSES[adapter_name]
 
     def _configure_adapter(self, adapter):
         """

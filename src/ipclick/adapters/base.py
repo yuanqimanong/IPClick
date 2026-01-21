@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-import logging
 from random import randint
 import time
 from typing import Any
@@ -18,9 +17,9 @@ def retry(max_retries_attr="max_retries", retry_delay_attr="retry_delay"):
 
     def decorator(func):
         def wrapper(self, *args, **kwargs):
-            max_retries = kwargs.get('max_retries') or getattr(self, max_retries_attr, 3)
-            retry_delay = kwargs.get('retry_delay') or getattr(self, retry_delay_attr, (1, 3))
-            url = args[0] if args else kwargs.get('url', 'unknown')
+            max_retries = kwargs.get("max_retries") or getattr(self, max_retries_attr, 3)
+            retry_delay = kwargs.get("retry_delay") or getattr(self, retry_delay_attr, (1, 3))
+            url = args[0] if args else kwargs.get("url", "unknown")
 
             last_exception = None
 
@@ -30,7 +29,7 @@ def retry(max_retries_attr="max_retries", retry_delay_attr="retry_delay"):
                     result = func(self, *args, **kwargs)
 
                     # 设置响应时间
-                    if hasattr(result, 'elapsed_ms') and result.elapsed_ms == 0:
+                    if hasattr(result, "elapsed_ms") and result.elapsed_ms == 0:
                         result.elapsed_ms = int((time.time() - start_time) * 1000)
 
                     return result
@@ -38,13 +37,13 @@ def retry(max_retries_attr="max_retries", retry_delay_attr="retry_delay"):
                 except Exception as e:
                     last_exception = e
 
-                    if attempt == max_retries or kwargs.get('max_retries') == 0:
+                    if attempt == max_retries or kwargs.get("max_retries") == 0:
                         # 最后一次尝试失败，返回错误响应
                         return Response.error_response(url, e)
 
                     # 计算退避延迟：指数退避 + 随机因子
-                    if kwargs.get('retry_delay') != 0.0:
-                        base_delay = min(2 ** attempt, 600)  # 最大600秒基础延迟
+                    if kwargs.get("retry_delay") != 0.0:
+                        base_delay = min(2**attempt, 600)  # 最大600秒基础延迟
                         if isinstance(retry_delay, tuple):
                             random_delay = randint(retry_delay[0], retry_delay[1])
                         else:
@@ -53,10 +52,9 @@ def retry(max_retries_attr="max_retries", retry_delay_attr="retry_delay"):
                         sleep_time = base_delay + random_delay
 
                         # 记录重试信息
-                        if hasattr(self, 'logger'):
+                        if hasattr(self, "logger"):
                             self.logger.warning(
-                                f"Download {url} failed, retrying {attempt + 1}/{max_retries} "
-                                f"in {sleep_time}s...  Error: {e}"
+                                f"Download {url} failed, retrying {attempt + 1}/{max_retries} in {sleep_time}s...  Error: {e}"
                             )
 
                         time.sleep(sleep_time)
@@ -69,8 +67,10 @@ def retry(max_retries_attr="max_retries", retry_delay_attr="retry_delay"):
     return decorator
 
 
-class Downloader(ABC):
+class DownloaderAdapter(ABC):
     """下载器抽象基类"""
+
+    adapter_name = "base_downloader_adapter"
 
     def __init__(self):
         self.proxy = None
@@ -79,33 +79,34 @@ class Downloader(ABC):
         self.timeout = 30
         self.verify_ssl = True
 
-        # 获取日志器
-        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-
     @abstractmethod
-    def download(self, url: str, *,
-                 # 协议
-                 method: str = "GET",
-                 headers:  dict[str, Any] | None = None,
-                 cookies:  dict[str, Any] |str| None = None,
-                 params:  dict[str, Any] | None = None,
-                 data: Any = None,
-                 json:  dict[str, Any] | None = None,
-                 files:  dict[str, Any] | None = None,
-                 proxy: str |None= None,
-                 timeout: float = 60,
-                 max_retries: int = 3,
-                 retry_delay: float = 2.0,
-                 verify: bool = True,
-                 allow_redirects: bool = True,
-                 stream: bool = False,
-                 impersonate:str|None = None,
-                 extensions:  dict[str, Any] | None = None,
-                 # 渲染
-                 automation_config: str|None = None,
-                 automation_script: str|None = None,
-                 allowed_status_codes: list[Any]|None = None,
-                 kwargs: str|None = None) -> Response:
+    def download(
+        self,
+        url: str,
+        *,
+        # 协议
+        method: str = "GET",
+        headers: dict[str, Any] | None = None,
+        cookies: dict[str, Any] | str | None = None,
+        params: dict[str, Any] | None = None,
+        data: Any = None,
+        json: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+        proxy: str | None = None,
+        timeout: float = 60,
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
+        verify: bool = True,
+        allow_redirects: bool = True,
+        stream: bool = False,
+        impersonate: str | None = None,
+        extensions: dict[str, Any] | None = None,
+        # 渲染
+        automation_config: str | None = None,
+        automation_script: str | None = None,
+        allowed_status_codes: list[Any] | None = None,
+        kwargs: str | None = None,
+    ) -> Response:
         """
         执行HTTP请求
 
