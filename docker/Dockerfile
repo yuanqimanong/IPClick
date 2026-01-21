@@ -41,8 +41,8 @@ RUN mkdir -p /app/data
 EXPOSE 9527
 
 # 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:9527/health || exit 1
+#HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+#    CMD curl -f http://localhost:9527/health || exit 1
 
 # 启动命令
 CMD ["ipclick", "run"]
