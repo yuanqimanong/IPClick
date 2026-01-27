@@ -1,5 +1,7 @@
 # 基础镜像
-FROM python:3.14-slim
+# FROM python:3.14-slim
+FROM 311288365115.dkr.ecr.ap-east-1.amazonaws.com/ratus/python:3.14-slim
+
 
 WORKDIR /app
 
