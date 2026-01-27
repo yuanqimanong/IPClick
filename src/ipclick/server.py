@@ -13,6 +13,7 @@ from ipclick.services import TaskService
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
 
+log.init(log_file='logs/ipclick')
 
 class ServerConfig(TypedDict, total=False):
     host: str
