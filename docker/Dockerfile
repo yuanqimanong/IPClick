@@ -2,6 +2,7 @@
 # FROM python:3.14-slim
 FROM 311288365115.dkr.ecr.ap-east-1.amazonaws.com/ratus/python:3.14-slim
 
+RUN cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 
 WORKDIR /app
 
