@@ -2,7 +2,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 import json
 from typing import Any, Self
-import uuid
+
+import uuid_utils as uuid
 
 from ipclick.dto.proto import task_pb2
 from ipclick.utils import json_serializer
@@ -165,7 +166,7 @@ class DownloadTask:
                 adapter_member = self.adapter or IPClickAdapter.CURL_CFFI
 
             return task_pb2.ReqTask(
-                uuid=str(self.uuid) or str(uuid.uuid4()),
+                uuid=str(self.uuid) or str(uuid.uuid7()),
                 adapter=adapter_member.pb_value,
                 method=self.method.value,
                 url=self.url,

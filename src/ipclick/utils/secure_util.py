@@ -33,11 +33,23 @@ class SecureUtil:
             >>> SecureUtil.md5({"key": "value"}, short=True)
             'ddce808de0032747'
         """
-        if isinstance(data, dict):
-            serialized = json.dumps(data, sort_keys=True, separators=(",", ":"))
-        else:
-            serialized = str(data)
+        result_cache: list[Any] = []
 
+        if not isinstance(data, list):
+            data_list = [data]
+        else:
+            data_list = data
+
+        for _d in data_list:
+            if isinstance(data, dict):
+                result = json.dumps(_d, sort_keys=True, separators=(",", ":"))
+            else:
+                result = str(_d)
+            result_cache.append(result)
+
+        serialized = "".join(result_cache)
         md5_hash = hashlib.md5()
         md5_hash.update(serialized.encode(encoding))
+        result_cache.append(md5_hash.hexdigest())
+
         return md5_hash.hexdigest()[8:24] if short else md5_hash.hexdigest()
