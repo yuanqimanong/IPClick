@@ -7,7 +7,7 @@ from ipclick.server import serve
 
 
 @click.group()
-@click.version_option(version="1.0.0", prog_name="IPClick")
+@click.version_option(version="0.1.3", prog_name="IPClick")
 def main():
     """IPClick - 分布式HTTP请求代理工具"""
     pass
