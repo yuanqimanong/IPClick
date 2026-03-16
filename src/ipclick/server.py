@@ -13,7 +13,9 @@ from ipclick.services import TaskService
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
 
-log.init(log_file='logs/ipclick')
+
+log.init(log_file="logs/ipclick")
+
 
 class ServerConfig(TypedDict, total=False):
     host: str
@@ -57,7 +59,12 @@ class IPClickServer:
                 ("grpc.http2.max_pings_without_data", 2),
                 ("grpc.http2.min_time_between_pings_ms", 10000),
                 ("grpc.http2.min_ping_interval_without_data_ms", 120000),
+                ("grpc.max_send_message_length", 500 * 1024 * 1024),  # 500MB
+                ("grpc.max_receive_message_length", 500 * 1024 * 1024),
+                ("grpc.max_concurrent_streams", 100),
+                ("grpc.enable_http_proxy", 0),
             ],
+            compression=grpc.Compression.Gzip,
         )
 
         try:

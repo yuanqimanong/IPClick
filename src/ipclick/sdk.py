@@ -108,7 +108,15 @@ class Downloader:
         pb_request = task.to_protobuf()
 
         try:
-            with grpc.insecure_channel(f"{self.host}:{self.port}") as channel:
+            with grpc.insecure_channel(
+                f"{self.host}:{self.port}",
+                options=[
+                    ("grpc.max_send_message_length", 500 * 1024 * 1024),
+                    ("grpc.max_receive_message_length", 500 * 1024 * 1024),
+                    ("grpc.enable_http_proxy", 0),
+                ],
+                compression=grpc.Compression.Gzip,
+            ) as channel:
                 stub = task_pb2_grpc.TaskServiceStub(channel)
                 pb_response = stub.Send(pb_request)
                 return DownloadResponse.from_protobuf(pb_response)
