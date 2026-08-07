@@ -1,6 +1,6 @@
 [project]
 name = "ipclick"
-version = "0.2.0"
+version = "0.2.1"
 description = "IPClick Tool"
 authors = [
     { name = "元气码农少女酱", email = "1276162429@qq.com" }
@@ -66,17 +66,36 @@ exclude = [
     "**/generated/**"
 ]
 pythonVersion = "3.11"
+
+# basedpyright 的退出码在有 warning 时也是 1，所以这里的取舍等同于 CI 门禁：
+# 保留能抓到真问题的规则，关掉那些只因第三方库没有类型标注而必然触发的。
+# curl_cffi / python-box / loguru / fake-useragent 都不发布完整类型信息，
+# 追这几条规则到零只能靠满屏 cast，收益为负。
 reportAny = false
 reportExplicitAny = false
 reportUnknownMemberType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownVariableType = "none"
+reportUnknownParameterType = "none"
+reportUnknownLambdaType = "none"
+# 相邻字符串字面量隐式拼接：本项目用它拆长日志文案，属于有意为之
+reportImplicitStringConcatenation = false
+# 要求所有未被消费的返回值写成 `_ = ...`，噪音大于收益
+reportUnusedCallResult = false
 
 [tool.ruff]
 # 代码格式化
 line-length = 120
 indent-width = 4
 target-version = "py311"
-# 生成的 protobuf 代码不参与 lint / format
-extend-exclude = ["src/ipclick/dto/proto/task_pb2*.py", "src/ipclick/dto/proto/*_pb2_grpc.py"]
+# 生成的 protobuf 代码不参与 lint / format。
+# 注意必须同时排除 .pyi：glob 的 "*_pb2*.py" 要求文件名以 .py 结尾，匹配不到
+# task_pb2.pyi。漏掉它会让 ruff format 改写生成文件，之后每次重新生成都产生
+# 差异，CI 的 "protobuf stubs are up to date" 检查就会一直失败。
+extend-exclude = [
+    "src/ipclick/dto/proto/*_pb2*.py",
+    "src/ipclick/dto/proto/*_pb2*.pyi",
+]
 
 [tool.ruff.format]
 # 格式化特定配置

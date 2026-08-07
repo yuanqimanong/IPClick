@@ -8,7 +8,7 @@ import sys
 from typing import Any, ClassVar, Protocol, TypeVar, cast
 
 from loguru import logger
-from typing_extensions import runtime_checkable
+from typing_extensions import override, runtime_checkable
 
 from ipclick.utils.path_util import PathUtil
 
@@ -71,7 +71,7 @@ class SQLiteAdapter(DatabaseAdapter):
         表包含时间戳、日志级别、消息、文件位置、线程/进程ID等信息。
         """
         cursor = self.conn.cursor()
-        cursor.execute(f"""
+        _ = cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS {self.table_name} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT,
@@ -87,6 +87,7 @@ class SQLiteAdapter(DatabaseAdapter):
         """)
         self.conn.commit()
 
+    @override
     def write(self, log_message: Any) -> None:
         """写入日志记录到 SQLite 数据库
 
@@ -108,7 +109,7 @@ class SQLiteAdapter(DatabaseAdapter):
         exception = str(record["exception"]) if record["exception"] else None
 
         with self.conn:
-            self.conn.execute(
+            _ = self.conn.execute(
                 f"""
                 INSERT INTO {self.table_name} (timestamp, level, message, file, line, function, process_id, thread_id, exception)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)

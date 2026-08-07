@@ -111,7 +111,7 @@ class IPClickServer:
     def _setup_signal_handlers(self):
         """设置信号处理器"""
 
-        def signal_handler(signum: int, frame: FrameType | None) -> None:
+        def signal_handler(signum: int, _frame: FrameType | None) -> None:
             signal_name = signal.Signals(signum).name
             log.info(f"Received signal {signal_name} ({signum}), shutting down...")
             self.stop()

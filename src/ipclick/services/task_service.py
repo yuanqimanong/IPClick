@@ -49,7 +49,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         }
 
         self._adapter_cache: dict[str, DownloaderAdapter] = {}
-        self._cache_lock = threading.Lock()
+        self._cache_lock: threading.Lock = threading.Lock()
 
         # 目标 URL 准入策略（SSRF 防护）
         self.url_policy: URLPolicy = URLPolicy.from_config(dict(self.config.get("SECURITY", {})))

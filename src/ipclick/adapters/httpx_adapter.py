@@ -1,24 +1,30 @@
 import threading
 from typing import Any
 
+from typing_extensions import override
+
 from ipclick.adapters.base import DownloaderAdapter, retry
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError
 from ipclick.utils.log_util import log
 
 
-try:
-    import httpx
-except ImportError:  # pragma: no cover - 取决于安装环境
-    httpx = None  # pyright: ignore[reportAssignmentType]
+# 可选依赖：缺失时降级为 None，由 __init__ 抛 AdapterError。
+_httpx: Any
+_user_agent_cls: Any
 
 try:
-    from fake_useragent import UserAgent
+    import httpx as _httpx
 except ImportError:  # pragma: no cover - 取决于安装环境
-    UserAgent = None  # pyright: ignore[reportAssignmentType]
+    _httpx = None
 
-HTTPX_AVAILABLE: bool = httpx is not None
-FAKE_UA_AVAILABLE: bool = UserAgent is not None
+try:
+    from fake_useragent import UserAgent as _user_agent_cls
+except ImportError:  # pragma: no cover - 取决于安装环境
+    _user_agent_cls = None
+
+HTTPX_AVAILABLE: bool = _httpx is not None
+FAKE_UA_AVAILABLE: bool = _user_agent_cls is not None
 
 
 # Client.request() 层面支持、且允许调用方通过 kwargs 透传的参数。
@@ -39,18 +45,18 @@ class HttpxAdapter(DownloaderAdapter):
     adapter_name: str = "httpx"
 
     def __init__(self):
-        if httpx is None:
+        if _httpx is None:
             raise AdapterError("httpx is not installed. Install it with: pip install httpx")
 
         super().__init__()
         # 按 (proxy, verify) 缓存 Client，以复用连接池
         self._clients: dict[tuple[str | None, bool], Any] = {}
-        self._clients_lock = threading.Lock()
+        self._clients_lock: threading.Lock = threading.Lock()
         # 是否读取环境变量里的代理配置，默认关闭（见 _get_client 的说明）
         self.trust_env: bool = False
 
         # User Agent生成器
-        self.ua_generator = UserAgent(platforms="desktop") if UserAgent is not None else None
+        self.ua_generator: Any = _user_agent_cls(platforms="desktop") if _user_agent_cls is not None else None
 
     def _get_client(self, proxy: str | None, verify: bool) -> Any:
         """取得（并缓存）一个 httpx.Client。
@@ -58,7 +64,6 @@ class HttpxAdapter(DownloaderAdapter):
         原实现走的是模块级 ``httpx.request()``，每次调用都新建一个 Client、
         建新连接、再丢弃——完全没有连接池可言。
         """
-        assert httpx is not None  # __init__ 已保证
         key = (proxy, verify)
         client = self._clients.get(key)
         if client is not None:
@@ -66,7 +71,7 @@ class HttpxAdapter(DownloaderAdapter):
 
         with self._clients_lock:
             if key not in self._clients:
-                self._clients[key] = httpx.Client(
+                self._clients[key] = _httpx.Client(
                     proxy=proxy,
                     verify=verify,
                     follow_redirects=True,
@@ -76,10 +81,11 @@ class HttpxAdapter(DownloaderAdapter):
                     # 设了 enable_http_proxy=0）。需要时可通过 kwargs 传
                     # trust_env=true 显式开启。
                     trust_env=bool(self.trust_env),
-                    limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+                    limits=_httpx.Limits(max_connections=100, max_keepalive_connections=20),
                 )
             return self._clients[key]
 
+    @override
     @retry()
     def download(
         self,
@@ -165,6 +171,7 @@ class HttpxAdapter(DownloaderAdapter):
             log.warning(f"httpx request failed for {url}: {e}")
             raise
 
+    @override
     def close(self) -> None:
         """关闭所有缓存的 Client"""
         with self._clients_lock:

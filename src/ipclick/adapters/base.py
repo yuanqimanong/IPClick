@@ -29,7 +29,7 @@ def _coerce_delay(value: Any, default: float) -> float:
         if isinstance(value, (tuple, list)):
             if len(value) != 2:
                 return default
-            low, high = float(value[0]), float(value[1])  # pyright: ignore[reportArgumentType]
+            low, high = float(value[0]), float(value[1])
             return uniform(low, high)
         return float(value)
     except (TypeError, ValueError):
@@ -129,7 +129,7 @@ def _backoff(attempt: int, base_delay: float) -> float:
 class DownloaderAdapter(ABC):
     """下载器抽象基类"""
 
-    adapter_name = "base_downloader_adapter"
+    adapter_name: str = "base_downloader_adapter"
 
     def __init__(self):
         self.proxy: str | None = None
