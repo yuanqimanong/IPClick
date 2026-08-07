@@ -1,0 +1,53 @@
+# Docker 构建上下文是仓库根目录，.dockerignore 必须放在这里才会生效
+# （放在 docker/ 下 Docker 根本不会读取）。
+
+# Git
+.git
+.gitignore
+.github
+
+# Python 缓存
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+.venv
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 测试与工具缓存
+tests/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# 构建产物
+dist/
+build/
+*.egg-info/
+
+# 运行时数据
+data/
+*.db
+*.log
+
+# 文档与示例（镜像里用不到）
+examples/
+docker/构建.md
+LICENSE
+
+# 本地配置
+.env
+ipclick.toml
+.ipclick.toml

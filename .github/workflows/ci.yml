@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 适配器默认不读环境代理，这里也确保 runner 上没有残留代理变量
+  NO_PROXY: "*"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Lint (ruff)
+        run: uv run ruff check src/ tests/
+
+      - name: Format check (ruff)
+        run: uv run ruff format --check src/ tests/
+
+      - name: Type check (basedpyright)
+        run: uv run basedpyright src/
+
+      - name: Tests
+        run: uv run pytest --cov=ipclick --cov-report=term-missing --cov-report=xml
+
+      - name: Verify protobuf stubs are up to date
+        run: |
+          uv run python src/ipclick/dto/proto/generate.py
+          git diff --exit-code -- src/ipclick/dto/proto/ \
+            || (echo "::error::task.proto 改动后未重新生成代码，请运行 uv run python src/ipclick/dto/proto/generate.py" && exit 1)
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build wheel and sdist
+        run: uv build
+
+      - name: Check package metadata
+        run: uv run --with twine twine check dist/*
+
+      - name: Verify package data is included
+        run: |
+          python - <<'PY'
+          import glob, zipfile, sys
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          required = [
+              "ipclick/configs/default_config.toml",
+              "ipclick/dto/proto/task_pb2.py",
+              "ipclick/py.typed",
+          ]
+          missing = [r for r in required if r not in names]
+          if missing:
+              sys.exit(f"wheel 缺少文件: {missing}")
+          print("wheel 内容完整")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -f docker/Dockerfile -t ipclick:ci .
+
+      - name: Smoke test the image
+        run: |
+          docker run --rm ipclick:ci ipclick --version
+          docker run --rm ipclick:ci ipclick config-info

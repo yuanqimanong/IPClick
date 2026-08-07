@@ -35,8 +35,22 @@ db_uri = "mysql://..."
 host = "[::]"
 # 监听端口
 port = 9527
-# 最大线程数
+# 最大线程数（每个进行中的请求占用一个线程）
 max_workers = 100
+
+# ================ 安全配置 [SECURITY] ================
+# 服务端会代替调用方请求任意 URL。若监听在公网或不可信网络，
+# 请务必打开 block_private_networks，否则本服务可被当作内网跳板（SSRF）。
+[SECURITY]
+# 允许的 URL 协议
+allowed_schemes = ["http", "https"]
+# 拦截云厂商实例元数据地址（169.254.169.254 等），无正当代理用途，建议保持开启
+block_metadata_endpoints = true
+# 拦截回环 / 私网 / 保留地址。默认关闭以兼容"本机代理本机服务"的用法，
+# 部署到不可信网络时应改为 true
+block_private_networks = false
+# 即便开启上面的拦截也放行的主机名或 IP
+allowlist = []
 
 # ------- 下载器配置 [DOWNLOADER] -------
 [DOWNLOADER]

@@ -9,9 +9,10 @@ from grpc import Server
 
 from ipclick.config_loader import load_config
 from ipclick.dto.proto import task_pb2_grpc
+from ipclick.exceptions import ConfigError
 from ipclick.services import TaskService
 from ipclick.utils.config_util import Settings
-from ipclick.utils.log_util import log
+from ipclick.utils.log_util import LogUtil, log
 
 
 class ServerConfig(TypedDict, total=False):
@@ -27,6 +28,8 @@ class IPClickServer:
 
     def __init__(self, config_path: str | None = None):
         self.config: Settings = load_config(config_path)
+        # 按配置里的 [LOG] 节初始化日志（此前这一节完全没被读取过）
+        LogUtil.init_from_config(dict(self.config.get("LOG", {})))
         self.server: Server | None = None
         self.task_service: TaskService | None = None
         log.info("IPClickServer initialized")
@@ -39,16 +42,23 @@ class IPClickServer:
             port: 服务端口（覆盖配置）
             host: 绑定地址（覆盖配置）
         """
-        server_config: ServerConfig = cast(ServerConfig, self.config["SERVER"])
+        server_config: ServerConfig = cast(ServerConfig, self.config.get("SERVER", {}))
 
         # 参数优先级：函数参数 > 配置文件 > 默认值
         server_host: str = host or server_config.get("host", "[::]")
-        server_port: int = port or server_config.get("port", 9527)
-        max_workers: int = port or server_config.get("max_workers", 10)
+        server_port: int = int(port or server_config.get("port", 9527))
+        # 注意：这里必须读 max_workers。此前误写成 `port or ...`，
+        # 于是 `ipclick run --port 9527` 会创建一个 9527 线程的线程池。
+        max_workers: int = int(server_config.get("max_workers", 10))
+        if max_workers < 1:
+            raise ConfigError(f"SERVER.max_workers 必须 >= 1，当前为 {max_workers}")
 
         # 创建gRPC服务器
         self.server = grpc.server(
-            futures.ThreadPoolExecutor(max_workers=max_workers),
+            futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ipclick-worker"),
+            # 每个 RPC 都会占用一个 worker 线程做阻塞 IO；不设上限时排队的请求
+            # 会在 gRPC 内部无限堆积，直到内存耗尽。
+            maximum_concurrent_rpcs=max_workers * 2,
             options=[
                 ("grpc.keepalive_time_ms", 60000),
                 ("grpc.keepalive_timeout_ms", 30000),
@@ -124,10 +134,16 @@ class IPClickServer:
         """
         if self.server:
             log.info(f"Stopping gRPC server (grace period: {grace_period}s)...")
-            _ = self.server.stop(grace=grace_period)
+            # server.stop() 立即返回一个 Event，必须 wait 才算真的优雅停机；
+            # 原来没等就往下走并 sys.exit(0)，在途请求会被直接掐断。
+            stopped = self.server.stop(grace=grace_period)
+            if not stopped.wait(timeout=grace_period + 5):
+                log.warning("部分请求在优雅停机期内未完成，强制退出")
+            self.server = None
 
         if self.task_service:
             self.task_service.cleanup()
+            self.task_service = None
 
         log.info("IPClick server stopped")
 

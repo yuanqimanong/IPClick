@@ -6,6 +6,7 @@ from typing import Any, Self
 import uuid_utils as uuid
 
 from ipclick.dto.proto import task_pb2
+from ipclick.exceptions import IPClickError, ValidationError
 from ipclick.utils import json_serializer
 
 
@@ -24,20 +25,29 @@ class IPClickAdapter(Enum):
 
     @classmethod
     def from_pb(cls, value: int) -> Self:
-        """从 Protobuf 的整型枚举值找回 Enum 成员"""
+        """从 Protobuf 的整型枚举值找回 Enum 成员
+
+        Raises:
+            ValueError: 枚举值未知。静默回退到 CURL_CFFI 会让调用方以为用了
+                自己指定的适配器，实际却换了一个，因此这里直接报错。
+        """
         for member in cls:
             if member.pb_value == value:
                 return member
-        # 默认返回或抛异常
-        return cls.CURL_CFFI
+        raise ValueError(f"未知的适配器枚举值: {value}")
 
     @classmethod
     def from_str(cls, name: str) -> Self:
-        """从字符串找回 Enum 成员 (用于 SDK 参数输入等)"""
+        """从字符串找回 Enum 成员 (用于 SDK 参数输入等)
+
+        Raises:
+            ValueError: 名称未知（含拼写错误）。
+        """
         for member in cls:
             if member.display_name.lower() == name.lower():
                 return member
-        return cls.CURL_CFFI
+        supported = ", ".join(m.display_name for m in cls)
+        raise ValueError(f"未知的适配器名称: {name!r}，可选值: {supported}")
 
 
 class HttpMethod(Enum):
@@ -51,17 +61,8 @@ class HttpMethod(Enum):
     TRACE = task_pb2.TRACE
 
 
-# 转换HTTP方法枚举
-METHOD_MAP = {
-    0: "GET",
-    1: "POST",
-    2: "PUT",
-    3: "DELETE",
-    4: "PATCH",
-    5: "HEAD",
-    6: "OPTIONS",
-    7: "TRACE",
-}
+# 转换HTTP方法枚举（由 HttpMethod 推导，避免与 proto 枚举各写一份而失步）
+METHOD_MAP: dict[int, str] = {member.value: member.name for member in HttpMethod}
 
 
 @dataclass
@@ -79,8 +80,12 @@ class ProxyConfig:
     tunnel_server: str | None = None
 
     def to_url(self) -> str | None:
-        """转换为代理URL"""
-        if not self.host:
+        """转换为代理URL
+
+        Returns:
+            代理 URL；当既没有 host 也没有 tunnel_server 时返回 None（表示不走代理）。
+        """
+        if not self.host and not self.tunnel_server:
             return None
 
         # 认证信息
@@ -105,7 +110,8 @@ class DownloadTask:
     """下载任务"""
 
     uuid: str = ""
-    adapter: IPClickAdapter = IPClickAdapter.CURL_CFFI
+    # 允许传适配器名字符串（如 "httpx"），to_protobuf() 会解析成枚举成员
+    adapter: IPClickAdapter | str = IPClickAdapter.CURL_CFFI
 
     # 协议
     method: HttpMethod = HttpMethod.GET
@@ -139,16 +145,21 @@ class DownloadTask:
     def __post_init__(self):
         """数据验证"""
         if not self.url:
-            raise ValueError("URL is required")
+            raise ValidationError("URL is required")
         if not self.url.startswith(("http://", "https://")):
-            raise ValueError("URL must start with http:// or https://")
+            raise ValidationError("URL must start with http:// or https://")
         if self.files:
             raise NotImplementedError("files is not supported.")
 
         # 不能同时指定多种请求体
         body_fields = [self.data, self.json, self.files]
         if sum(x is not None for x in body_fields) > 1:
-            raise ValueError("Cannot specify multiple body types (data, json_data, files)")
+            raise ValidationError("Cannot specify multiple body types (data, json, files)")
+
+        if self.max_retries < 0:
+            raise ValidationError("max_retries must be >= 0")
+        if self.timeout <= 0:
+            raise ValidationError("timeout must be > 0")
 
         # 设置默认的浏览器伪装
         if self.adapter == IPClickAdapter.CURL_CFFI and not self.impersonate:
@@ -157,7 +168,43 @@ class DownloadTask:
         if not self.allowed_status_codes:
             self.allowed_status_codes = [200, 404]
 
-    def to_protobuf(self):
+    @staticmethod
+    def _stringify_map(mapping: dict[str, Any] | None) -> dict[str, str] | None:
+        """protobuf 的 map<string, string> 只接受字符串值，这里统一转换。"""
+        if not mapping:
+            return None
+        return {str(k): v if isinstance(v, str) else json.dumps(v, default=json_serializer) for k, v in mapping.items()}
+
+    @staticmethod
+    def _cookies_to_map(cookies: dict[str, Any] | str | None) -> dict[str, str] | None:
+        """把 dict 或 ``"a=1; b=2"`` 形式的 cookie 串统一成 map<string, string>。"""
+        if not cookies:
+            return None
+        if isinstance(cookies, str):
+            parsed: dict[str, str] = {}
+            for item in cookies.split(";"):
+                name, sep, value = item.partition("=")
+                if sep:
+                    parsed[name.strip()] = value.strip()
+            return parsed or None
+        return DownloadTask._stringify_map(cookies)
+
+    def _proxy_to_str(self) -> str | None:
+        """把 ProxyConfig / str / bool 三种代理写法归一成 URL 字符串。
+
+        ``proxy=True`` 只在 SDK 层有意义（表示"用配置文件里的代理"），到了这里
+        已经应该被解析成具体配置；若仍是 True 说明调用方直接构造了 DownloadTask，
+        此时无从得知代理地址，明确报错好过静默不走代理。
+        """
+        if self.proxy is None or self.proxy is False:
+            return None
+        if self.proxy is True:
+            raise ValidationError("proxy=True 需要由 Downloader 解析配置文件后再构造 DownloadTask")
+        if isinstance(self.proxy, ProxyConfig):
+            return self.proxy.to_url()
+        return str(self.proxy)
+
+    def to_protobuf(self) -> "task_pb2.ReqTask":
         """转换为protobuf对象"""
         try:
             if isinstance(self.adapter, str):
@@ -167,15 +214,18 @@ class DownloadTask:
 
             return task_pb2.ReqTask(
                 uuid=str(self.uuid) or str(uuid.uuid7()),
-                adapter=adapter_member.pb_value,
+                # protobuf 生成的 stub 把枚举参数标成 AdapterType，运行时接受 int
+                adapter=adapter_member.pb_value,  # pyright: ignore[reportArgumentType]
                 method=self.method.value,
                 url=self.url,
-                headers=self.headers,
-                cookies=self.cookies,
+                headers=self._stringify_map(self.headers),
+                cookies=self._cookies_to_map(self.cookies),
                 params=json.dumps(self.params, default=json_serializer) if self.params else None,
-                data=json.dumps(self.data, default=json_serializer) if self.data else None,
-                json=json.dumps(self.json, default=json_serializer) if self.json else None,
-                proxy=self.proxy,
+                data=json.dumps(self.data, default=json_serializer) if self.data is not None else None,
+                json=json.dumps(self.json, default=json_serializer) if self.json is not None else None,
+                proxy=self._proxy_to_str(),
+                # 这些字段在 proto 里是 optional，显式传值即代表"已设置"，
+                # 服务端才能把"未设置"和"显式设为 0/false"区分开。
                 timeout_seconds=self.timeout,
                 max_retries=self.max_retries,
                 retry_backoff_seconds=self.retry_backoff,
@@ -183,34 +233,44 @@ class DownloadTask:
                 allow_redirects=self.allow_redirects,
                 stream=self.stream,
                 impersonate=self.impersonate,
-                extensions=self.extensions,
+                extensions=self._stringify_map(self.extensions),
                 automation_config=self.automation_config,
                 automation_script=self.automation_script,
                 allowed_status_codes=self.allowed_status_codes,
                 kwargs=self.kwargs,
             )
+        except ValidationError:
+            raise
         except Exception as e:
-            raise Exception(f"转换 protobuf 失败：{e}")
+            raise ValidationError(f"转换 protobuf 失败：{e}") from e
 
 
 @dataclass
 class DownloadResponse:
     """下载响应封装"""
 
-    request_uuid: str
-    adapter_type: str
-    request: Any
-    url: str
-    status_code: int
-    headers: dict[str, str]
-    content: bytes
-    text: str
+    request_uuid: str = ""
+    adapter_type: str = ""
+    request: Any = None
+    url: str = ""
+    status_code: int = -1
+    headers: dict[str, str] = field(default_factory=dict)
+    content: bytes = b""
+    text: str = ""
 
-    elapsed_ms: int
+    elapsed_ms: int = 0
     error: str | None = None
 
+    @staticmethod
+    def _adapter_name(pb_value: int) -> str:
+        """protobuf 传来的是枚举整数，对外统一暴露适配器名称。"""
+        try:
+            return IPClickAdapter.from_pb(pb_value).display_name
+        except ValueError:
+            return str(pb_value)
+
     @classmethod
-    def from_protobuf(cls, pb_response):
+    def from_protobuf(cls, pb_response: "task_pb2.TaskResp") -> "DownloadResponse":
         """从protobuf响应创建对象"""
         try:
             text = pb_response.content.decode("utf-8", errors="ignore")
@@ -219,7 +279,7 @@ class DownloadResponse:
 
         return cls(
             request_uuid=pb_response.request_uuid,
-            adapter_type=pb_response.adapter,
+            adapter_type=cls._adapter_name(pb_response.adapter),
             request=pb_response.original_request,
             url=pb_response.effective_url,
             status_code=pb_response.status_code,
@@ -231,37 +291,60 @@ class DownloadResponse:
         )
 
     @classmethod
-    def from_response(cls, response, request_uuid: str = ""):
+    def from_response(cls, response: Any, request_uuid: str = "", adapter_type: str = "") -> "DownloadResponse":
         """从统一Response对象创建"""
-        from ..dto.response import Response
+        from ipclick.dto.response import Response
 
-        if isinstance(response, Response):
-            return cls(
-                request_uuid=request_uuid,
-                status_code=response.status_code,
-                headers=response.headers or {},
-                content=response.content or b"",
-                text=response.text or "",
-                url=response.url,
-                elapsed_ms=response.elapsed_ms,
-                error=str(response.exception) if response.exception else None,
-            )
-        else:
-            raise ValueError("Expected Response object")
+        if not isinstance(response, Response):
+            raise TypeError(f"Expected Response object, got {type(response).__name__}")
 
-    def json(self) -> dict[str, Any]:
+        return cls(
+            request_uuid=request_uuid,
+            adapter_type=adapter_type,
+            request=None,
+            status_code=response.status_code,
+            headers=response.headers or {},
+            content=response.content or b"",
+            text=response.text or "",
+            url=response.url,
+            elapsed_ms=response.elapsed_ms,
+            error=str(response.exception) if response.exception else None,
+        )
+
+    @classmethod
+    def from_error(
+        cls, error: str, url: str = "", request_uuid: str = "", adapter_type: str = ""
+    ) -> "DownloadResponse":
+        """构造一个表示本地失败（如连不上服务端）的响应。
+
+        状态码 -1 与适配器侧的 ``Response.error_response`` 保持一致。
+        """
+        return cls(
+            request_uuid=request_uuid,
+            adapter_type=adapter_type,
+            url=url,
+            status_code=-1,
+            error=error,
+        )
+
+    def json(self) -> Any:
         """解析JSON响应"""
         try:
             return json.loads(self.text)
         except json.JSONDecodeError as e:
-            raise ValueError(f"Response is not valid JSON: {e}")
+            raise ValueError(f"Response is not valid JSON: {e}") from e
 
     def is_success(self) -> bool:
         """判断请求是否成功"""
         return 200 <= self.status_code < 300 and not self.error
 
-    def raise_for_status(self):
+    @property
+    def ok(self) -> bool:
+        """``is_success()`` 的属性别名，与 ``dto.response.Response.ok`` 对齐。"""
+        return self.is_success()
+
+    def raise_for_status(self) -> None:
         """如果状态码表示错误，抛出异常"""
         if not self.is_success():
             error_msg = self.error or f"HTTP {self.status_code} Error"
-            raise Exception(f"Request failed:  {error_msg}")
+            raise IPClickError(f"Request failed: {error_msg}")

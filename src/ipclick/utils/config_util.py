@@ -35,7 +35,7 @@ class ConfigUtil:
         Returns:
             来自所有有效文件的合并 Settings 对象。
         """
-        log.debug(f"load path ==> {repr(path)}")
+        log.debug(f"load path ==> {path!r}")
         file_paths = [path] if isinstance(path, (str, Path)) else path
 
         setting_config_list: list[Settings] = []
@@ -45,7 +45,7 @@ class ConfigUtil:
                 log.debug(f"配置文件 {file_path} 不存在")
                 continue
             try:
-                with open(path, "r", encoding=encoding) as f:
+                with open(path, encoding=encoding) as f:
                     config = tomllib.loads(f.read())
                     try:
                         setting = Settings(config)

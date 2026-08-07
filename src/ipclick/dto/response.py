@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 import json as json_module
-from typing import Any, Dict, Optional
+from typing import Any
+
+from ipclick.exceptions import RequestError
 
 
 @dataclass
@@ -13,11 +15,11 @@ class Response:
 
     url: str
     status_code: int
-    content: Optional[bytes] = None
-    text: Optional[str] = None
-    headers: Optional[Dict[str, str]] = None
-    raw_response: Optional[Any] = None
-    exception: Optional[Exception] = None
+    content: bytes | None = None
+    text: str | None = None
+    headers: dict[str, str] | None = None
+    raw_response: Any | None = None
+    exception: Exception | None = None
     elapsed_ms: int = 0
 
     def __post_init__(self):
@@ -58,12 +60,12 @@ class Response:
         """判断是否为服务端错误"""
         return 500 <= self.status_code < 600
 
-    def json(self) -> Dict[str, Any]:
+    def json(self) -> Any:
         """
         解析JSON响应
 
         Returns:
-            Dict:  解析后的JSON数据
+            解析后的JSON数据（对象/数组/标量）
 
         Raises:
             ValueError: 当响应不是有效JSON时
@@ -74,14 +76,15 @@ class Response:
         try:
             return json_module.loads(self.text)
         except json_module.JSONDecodeError as e:
-            raise ValueError(f"Response is not valid JSON: {e}")
+            raise ValueError(f"Response is not valid JSON: {e}") from e
 
-    def raise_for_status(self):
+    def raise_for_status(self) -> None:
         """
         如果响应状态码表示错误，抛出异常
 
         Raises:
-            Exception: 当状态码表示错误或存在异常时
+            RequestError: 当状态码表示错误时。
+            Exception: 当适配器已捕获到底层异常时，原样抛出该异常。
         """
         if self.exception:
             raise self.exception
@@ -90,11 +93,12 @@ class Response:
             error_msg = f"HTTP {self.status_code} Error for url: {self.url}"
             if self.text:
                 error_msg += f"\nResponse: {self.text[:200]}"
-            raise Exception(error_msg)
+            raise RequestError(error_msg)
 
-    def get_content_type(self) -> Optional[str]:
+    def get_content_type(self) -> str | None:
         """获取内容类型"""
-        return self.headers.get("content-type") or self.headers.get("Content-Type")
+        headers = self.headers or {}
+        return headers.get("content-type") or headers.get("Content-Type")
 
     def get_encoding(self) -> str:
         """获取编码类型"""
@@ -128,7 +132,7 @@ class Response:
 
     @classmethod
     def success_response(
-        cls, url: str, content: bytes = b"", status_code: int = 200, headers: Optional[Dict[str, str]] = None
+        cls, url: str, content: bytes = b"", status_code: int = 200, headers: dict[str, str] | None = None
     ) -> "Response":
         """
         创建成功响应
@@ -152,7 +156,7 @@ class Response:
             exception=None,
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
         return {
             "url": self.url,

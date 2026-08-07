@@ -1,19 +1,31 @@
 import json
+import threading
 import time
 from typing import Any
 
+import grpc
 from grpc import ServicerContext
 from typing_extensions import override
 
-from ipclick import IPClickAdapter
 from ipclick.adapters.base import DownloaderAdapter
-from ipclick.adapters.registry import ADAPTER_CLASSES, get_adapter, get_default_adapter
-from ipclick.dto import Response
-from ipclick.dto.models import METHOD_MAP
+from ipclick.adapters.registry import get_adapter, get_default_adapter
+from ipclick.dto.models import METHOD_MAP, IPClickAdapter
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
+from ipclick.dto.response import Response
+from ipclick.exceptions import AdapterError, URLNotAllowedError
 from ipclick.utils import json_hook
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
+from ipclick.utils.url_util import URLPolicy, validate_url
+
+
+# proto 未设置这些字段时服务端采用的默认值
+_DEFAULT_TIMEOUT = 60.0
+_DEFAULT_MAX_RETRIES = 3
+_DEFAULT_RETRY_BACKOFF = 2.0
+_DEFAULT_VERIFY_SSL = True
+_DEFAULT_ALLOW_REDIRECTS = True
+_DEFAULT_STREAM = False
 
 
 class TaskService(task_pb2_grpc.TaskServiceServicer):
@@ -37,11 +49,46 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         }
 
         self._adapter_cache: dict[str, DownloaderAdapter] = {}
+        self._cache_lock = threading.Lock()
+
+        # 目标 URL 准入策略（SSRF 防护）
+        self.url_policy: URLPolicy = URLPolicy.from_config(dict(self.config.get("SECURITY", {})))
+
         # 获取默认适配器
         self.default_adapter: DownloaderAdapter = get_default_adapter()
+        self._adapter_cache[self.default_adapter.adapter_name] = self.default_adapter
 
         # 记录初始化信息
-        log.debug(f"TaskService initialized with default adapter: {self.default_adapter}")
+        log.debug(f"TaskService initialized with default adapter: {self.default_adapter.adapter_name}")
+        if self.url_policy.block_private_networks:
+            log.info("已启用内网地址拦截")
+        else:
+            log.warning(
+                "内网地址拦截未启用；若服务端对不受信任的调用方开放，请设置 [SECURITY].block_private_networks = true"
+            )
+
+    # ------------------------------------------------------------------ #
+    # 适配器
+    # ------------------------------------------------------------------ #
+
+    def _get_cached_adapter(self, name: str) -> DownloaderAdapter:
+        """按名称取适配器，并缓存实例。
+
+        原实现只读不写这个缓存，于是每个请求都要新建一次适配器（含
+        ``UserAgent()`` 生成器），``cleanup()`` 也永远无事可做。
+        """
+        adapter = self._adapter_cache.get(name)
+        if adapter is not None:
+            return adapter
+
+        with self._cache_lock:
+            if name not in self._adapter_cache:
+                self._adapter_cache[name] = get_adapter(name)
+            return self._adapter_cache[name]
+
+    # ------------------------------------------------------------------ #
+    # RPC
+    # ------------------------------------------------------------------ #
 
     @override
     def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
@@ -56,31 +103,58 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             task_pb2.TaskResp: gRPC响应对象
         """
         log.info(f"Received request: {request.uuid} for URL: {request.url}")
-        start_time = time.time()
+        start_time = time.monotonic()
+        adapter_name = "unknown"
 
-        # 选择适配器
-        adapter_member = IPClickAdapter.from_pb(request.adapter)
-        if adapter_member.display_name not in self._adapter_cache:
-            adapter = get_adapter(adapter_member.display_name)
-        else:
-            adapter = self._adapter_cache[adapter_member.display_name]
+        try:
+            adapter_member = IPClickAdapter.from_pb(request.adapter)
+            adapter_name = adapter_member.display_name
+            adapter = self._get_cached_adapter(adapter_name)
 
-        # 执行下载
-        response = self._execute_download(adapter, request)
+            validate_url(request.url, self.url_policy)
 
-        # 构造gRPC响应
-        grpc_response = self._build_grpc_response(request, response)
+            response = self._execute_download(adapter, request)
+            grpc_response = self._build_grpc_response(request, response)
 
-        # 设置响应时间
-        elapsed_ms = int((time.time() - start_time) * 1000)
+        except URLNotAllowedError as e:
+            log.warning(f"Request {request.uuid} rejected: {e}")
+            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+            context.set_details(str(e))
+            grpc_response = self._build_error_response(request, str(e))
+        except (AdapterError, ValueError) as e:
+            log.warning(f"Request {request.uuid} invalid: {e}")
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            grpc_response = self._build_error_response(request, str(e))
+        except Exception as e:
+            # 任何未预期的异常都不应该让 RPC 以 UNKNOWN + 堆栈的形式返回，
+            # 调用方拿不到结构化信息，服务端也可能泄漏内部路径。
+            log.exception(f"Request {request.uuid} failed unexpectedly: {e}")
+            grpc_response = self._build_error_response(request, f"内部错误: {type(e).__name__}")
+
+        elapsed_ms = int((time.monotonic() - start_time) * 1000)
         grpc_response.response_time_ms = elapsed_ms
 
-        # 记录成功日志
         log.info(
-            f"Request {request.uuid} completed in {elapsed_ms}ms, status:  {grpc_response.status_code}, adapter: {adapter_member.display_name}"
+            f"Request {request.uuid} completed in {elapsed_ms}ms, "
+            f"status: {grpc_response.status_code}, adapter: {adapter_name}"
         )
-
         return grpc_response
+
+    # ------------------------------------------------------------------ #
+    # 下载
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _decode_body(raw: str, field_name: str) -> Any:
+        """请求体是 JSON 字符串；解析失败时原样透传字符串而不是直接报错。"""
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            log.debug(f"{field_name} 不是合法 JSON，按原始字符串处理")
+            return raw
 
     def _execute_download(self, adapter: DownloaderAdapter, request: task_pb2.ReqTask) -> Response:
         """
@@ -93,88 +167,53 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         Returns:
             Response: 统一响应对象
         """
-        # 转换HTTP方法
         method = METHOD_MAP.get(request.method, "GET")
 
-        # 处理请求头
         headers = dict(request.headers) if request.headers else None
         cookies = dict(request.cookies) if request.cookies else None
-        params = json.loads(request.params, object_hook=json_hook) if request.params else None
-        # 处理请求体
-        data = json.loads(request.data) if request.data else None
-        json_data = json.loads(request.json) if request.json else None
-
         extensions = dict(request.extensions) if request.extensions else None
 
-        # 构建下载参数
-        download_kwargs = {
+        params = json.loads(request.params, object_hook=json_hook) if request.params else None
+        data = self._decode_body(request.data, "data")
+        json_data = self._decode_body(request.json, "json")
+
+        # optional 字段：用 HasField 区分"未设置"与"显式设为 0/false"。
+        # 这一步是 verify_ssl 默认被关掉那个问题的根因修复。
+        download_kwargs: dict[str, Any] = {
             "method": method,
             "headers": headers,
             "cookies": cookies,
             "params": params,
             "data": data,
             "json": json_data,
-            "proxy": request.proxy,
-            "timeout": request.timeout_seconds,
-            "max_retries": request.max_retries,
-            "retry_delay": request.retry_backoff_seconds,
-            "verify": request.verify_ssl,
-            "allow_redirects": request.allow_redirects,
-            "stream": request.stream,
-            "impersonate": request.impersonate,
+            "proxy": request.proxy or None,
+            "timeout": request.timeout_seconds if request.HasField("timeout_seconds") else _DEFAULT_TIMEOUT,
+            "max_retries": request.max_retries if request.HasField("max_retries") else _DEFAULT_MAX_RETRIES,
+            "retry_delay": (
+                request.retry_backoff_seconds if request.HasField("retry_backoff_seconds") else _DEFAULT_RETRY_BACKOFF
+            ),
+            "verify": request.verify_ssl if request.HasField("verify_ssl") else _DEFAULT_VERIFY_SSL,
+            "allow_redirects": (
+                request.allow_redirects if request.HasField("allow_redirects") else _DEFAULT_ALLOW_REDIRECTS
+            ),
+            "stream": request.stream if request.HasField("stream") else _DEFAULT_STREAM,
+            "impersonate": request.impersonate or None,
             "extensions": extensions,
-            "automation_config": request.automation_config,
-            "automation_script": request.automation_script,
-            "kwargs": request.kwargs,
+            "automation_config": request.automation_config or None,
+            "automation_script": request.automation_script or None,
+            "allowed_status_codes": list(request.allowed_status_codes) or None,
+            "kwargs": request.kwargs or None,
         }
 
-        # 构建并验证下载参数
-        download_kwargs = self._validate_and_convert_params(download_kwargs)
+        # timeout 为 0 会让适配器立刻超时，这里兜底成默认值
+        if not download_kwargs["timeout"] or download_kwargs["timeout"] <= 0:
+            download_kwargs["timeout"] = _DEFAULT_TIMEOUT
 
-        # 执行下载
         return adapter.download(request.url, **download_kwargs)
 
-    @staticmethod
-    def _validate_and_convert_params(params: dict[str, Any]) -> dict[str, Any]:
-        """
-        验证并转换参数类型以符合适配器方法的要求
-        """
-        validated_params: dict[str, Any] = {}
-
-        for key, value in params.items():
-            if value is None:
-                validated_params[key] = None
-                continue
-
-            # 根据参数名称确定期望的类型
-            if key == "method":
-                validated_params[key] = str(value) if value is not None else None
-            elif key in ["headers", "cookies", "params", "data", "json", "extensions"]:
-                # 这些应该是字典类型
-                if isinstance(value, dict):
-                    validated_params[key] = value
-                elif value is not None:
-                    # 如果不是字典但不为None，则尝试转换或抛出错误
-                    raise TypeError(f"Parameter '{key}' must be a dict, got {type(value)}")
-                else:
-                    validated_params[key] = None
-            elif key in ["timeout", "retry_delay"]:
-                # 这些应该是浮点数
-                validated_params[key] = float(value) if value is not None else None
-            elif key in ["max_retries"]:
-                # 这些应该是整数
-                validated_params[key] = int(value) if value is not None else None
-            elif key in ["verify", "allow_redirects", "stream"]:
-                # 这些应该是布尔值
-                validated_params[key] = bool(value) if value is not None else None
-            elif key in ["proxy", "impersonate", "automation_config", "automation_script", "kwargs"]:
-                # 这些应该是字符串
-                validated_params[key] = str(value) if value is not None else None
-            else:
-                # 对于其他参数，保持原值
-                validated_params[key] = value
-
-        return validated_params
+    # ------------------------------------------------------------------ #
+    # 响应
+    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _build_grpc_response(request: task_pb2.ReqTask, response: Response) -> task_pb2.TaskResp:
@@ -183,7 +222,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
         Args:
             request: 原始gRPC请求
-            response:  统一响应对象
+            response: 统一响应对象
 
         Returns:
             task_pb2.TaskResp: gRPC响应对象
@@ -191,7 +230,8 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         return task_pb2.TaskResp(
             request_uuid=request.uuid,
             adapter=request.adapter,
-            original_request=request,
+            # 不回传 original_request：它含代理账号密码等凭证，且会让每个响应
+            # 白白多带一份完整请求体。
             effective_url=response.url,
             status_code=response.status_code,
             response_headers=response.headers or {},
@@ -200,7 +240,22 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             response_time_ms=response.elapsed_ms,
         )
 
-    def cleanup(self):
+    @staticmethod
+    def _build_error_response(request: task_pb2.ReqTask, message: str) -> task_pb2.TaskResp:
+        """构建一个表示失败的响应（状态码 -1，与适配器侧保持一致）。"""
+        return task_pb2.TaskResp(
+            request_uuid=request.uuid,
+            adapter=request.adapter,
+            effective_url=request.url,
+            status_code=-1,
+            error_message=message,
+        )
+
+    # ------------------------------------------------------------------ #
+    # 生命周期
+    # ------------------------------------------------------------------ #
+
+    def cleanup(self) -> None:
         """
         清理资源
 
@@ -208,12 +263,15 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         """
         log.info("Cleaning up TaskService resources...")
 
-        for name, adapter in self._adapter_cache.items():
-            try:
-                adapter.close()
-                log.debug(f"Closed adapter: {name}")
-            except Exception as e:
-                log.warning(f"Error closing adapter {name}: {e}")
+        with self._cache_lock:
+            for name, adapter in self._adapter_cache.items():
+                try:
+                    adapter.close()
+                    log.debug(f"Closed adapter: {name}")
+                except Exception as e:
+                    log.warning(f"Error closing adapter {name}: {e}")
+            self._adapter_cache.clear()
 
-        ADAPTER_CLASSES.clear()
+        # 注意：不要清空 registry.ADAPTER_CLASSES。那是模块级的类型注册表，
+        # 清掉之后同一进程内再也造不出任何适配器（例如测试里起第二个服务）。
         log.info("TaskService cleanup completed")

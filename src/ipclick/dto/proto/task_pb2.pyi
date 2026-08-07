@@ -1,9 +1,11 @@
-from google.protobuf.internal import containers as _containers
-from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
+from collections.abc import Iterable as _Iterable
+from collections.abc import Mapping as _Mapping
+from typing import ClassVar as _ClassVar
+
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from collections.abc import Iterable as _Iterable, Mapping as _Mapping
-from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
+from google.protobuf.internal import containers as _containers
+from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -26,6 +28,7 @@ class HttpMethod(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     HEAD: _ClassVar[HttpMethod]
     OPTIONS: _ClassVar[HttpMethod]
     TRACE: _ClassVar[HttpMethod]
+
 CURL_CFFI: AdapterType
 HTTPX: AdapterType
 REQUESTS: AdapterType
@@ -42,28 +45,54 @@ OPTIONS: HttpMethod
 TRACE: HttpMethod
 
 class ReqTask(_message.Message):
-    __slots__ = ("uuid", "adapter", "method", "url", "headers", "cookies", "params", "data", "json", "proxy", "timeout_seconds", "max_retries", "retry_backoff_seconds", "verify_ssl", "allow_redirects", "stream", "impersonate", "extensions", "automation_config", "automation_script", "allowed_status_codes", "kwargs")
+    __slots__ = (
+        "adapter",
+        "allow_redirects",
+        "allowed_status_codes",
+        "automation_config",
+        "automation_script",
+        "cookies",
+        "data",
+        "extensions",
+        "headers",
+        "impersonate",
+        "json",
+        "kwargs",
+        "max_retries",
+        "method",
+        "params",
+        "proxy",
+        "retry_backoff_seconds",
+        "stream",
+        "timeout_seconds",
+        "url",
+        "uuid",
+        "verify_ssl",
+    )
     class HeadersEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
         VALUE_FIELD_NUMBER: _ClassVar[int]
         key: str
         value: str
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+        def __init__(self, key: str | None = ..., value: str | None = ...) -> None: ...
+
     class CookiesEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
         VALUE_FIELD_NUMBER: _ClassVar[int]
         key: str
         value: str
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+        def __init__(self, key: str | None = ..., value: str | None = ...) -> None: ...
+
     class ExtensionsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
         VALUE_FIELD_NUMBER: _ClassVar[int]
         key: str
         value: str
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+        def __init__(self, key: str | None = ..., value: str | None = ...) -> None: ...
+
     UUID_FIELD_NUMBER: _ClassVar[int]
     ADAPTER_FIELD_NUMBER: _ClassVar[int]
     METHOD_FIELD_NUMBER: _ClassVar[int]
@@ -108,17 +137,52 @@ class ReqTask(_message.Message):
     automation_script: str
     allowed_status_codes: _containers.RepeatedScalarFieldContainer[int]
     kwargs: str
-    def __init__(self, uuid: _Optional[str] = ..., adapter: _Optional[_Union[AdapterType, str]] = ..., method: _Optional[_Union[HttpMethod, str]] = ..., url: _Optional[str] = ..., headers: _Optional[_Mapping[str, str]] = ..., cookies: _Optional[_Mapping[str, str]] = ..., params: _Optional[str] = ..., data: _Optional[str] = ..., json: _Optional[str] = ..., proxy: _Optional[str] = ..., timeout_seconds: _Optional[float] = ..., max_retries: _Optional[int] = ..., retry_backoff_seconds: _Optional[float] = ..., verify_ssl: bool = ..., allow_redirects: bool = ..., stream: bool = ..., impersonate: _Optional[str] = ..., extensions: _Optional[_Mapping[str, str]] = ..., automation_config: _Optional[str] = ..., automation_script: _Optional[str] = ..., allowed_status_codes: _Optional[_Iterable[int]] = ..., kwargs: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self,
+        uuid: str | None = ...,
+        adapter: AdapterType | str | None = ...,
+        method: HttpMethod | str | None = ...,
+        url: str | None = ...,
+        headers: _Mapping[str, str] | None = ...,
+        cookies: _Mapping[str, str] | None = ...,
+        params: str | None = ...,
+        data: str | None = ...,
+        json: str | None = ...,
+        proxy: str | None = ...,
+        timeout_seconds: float | None = ...,
+        max_retries: int | None = ...,
+        retry_backoff_seconds: float | None = ...,
+        verify_ssl: bool | None = ...,
+        allow_redirects: bool | None = ...,
+        stream: bool | None = ...,
+        impersonate: str | None = ...,
+        extensions: _Mapping[str, str] | None = ...,
+        automation_config: str | None = ...,
+        automation_script: str | None = ...,
+        allowed_status_codes: _Iterable[int] | None = ...,
+        kwargs: str | None = ...,
+    ) -> None: ...
 
 class TaskResp(_message.Message):
-    __slots__ = ("request_uuid", "adapter", "original_request", "effective_url", "status_code", "response_headers", "content", "error_message", "response_time_ms")
+    __slots__ = (
+        "adapter",
+        "content",
+        "effective_url",
+        "error_message",
+        "original_request",
+        "request_uuid",
+        "response_headers",
+        "response_time_ms",
+        "status_code",
+    )
     class ResponseHeadersEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
         VALUE_FIELD_NUMBER: _ClassVar[int]
         key: str
         value: str
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+        def __init__(self, key: str | None = ..., value: str | None = ...) -> None: ...
+
     REQUEST_UUID_FIELD_NUMBER: _ClassVar[int]
     ADAPTER_FIELD_NUMBER: _ClassVar[int]
     ORIGINAL_REQUEST_FIELD_NUMBER: _ClassVar[int]
@@ -137,4 +201,15 @@ class TaskResp(_message.Message):
     content: bytes
     error_message: str
     response_time_ms: int
-    def __init__(self, request_uuid: _Optional[str] = ..., adapter: _Optional[_Union[AdapterType, str]] = ..., original_request: _Optional[_Union[ReqTask, _Mapping]] = ..., effective_url: _Optional[str] = ..., status_code: _Optional[int] = ..., response_headers: _Optional[_Mapping[str, str]] = ..., content: _Optional[bytes] = ..., error_message: _Optional[str] = ..., response_time_ms: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        request_uuid: str | None = ...,
+        adapter: AdapterType | str | None = ...,
+        original_request: ReqTask | _Mapping | None = ...,
+        effective_url: str | None = ...,
+        status_code: int | None = ...,
+        response_headers: _Mapping[str, str] | None = ...,
+        content: bytes | None = ...,
+        error_message: str | None = ...,
+        response_time_ms: int | None = ...,
+    ) -> None: ...

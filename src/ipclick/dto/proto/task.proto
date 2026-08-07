@@ -1,5 +1,5 @@
-// python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. --pyi_out=. task.proto
-// from . import task_pb2 as task__pb2
+// 修改本文件后请运行：uv run python src/ipclick/dto/proto/generate.py
+// （该脚本会调用 protoc 并把生成代码里的顶层导入改成包内相对导入）
 
 syntax = "proto3";
 
@@ -50,12 +50,15 @@ message ReqTask {
   string data = 8;  // 二进制体
   string json = 9;  // JSON
   string proxy = 10;  // 代理信息
-  float timeout_seconds = 11;  // 超时时间（秒）
-  int32 max_retries = 12;  // 重试次数
-  float retry_backoff_seconds = 13;  // 重试间隔（秒，支持指数退避扩展）
-  bool verify_ssl = 14;  // 是否验证 SSL（默认 true）
-  bool allow_redirects = 15;  // 是否跟随重定向（默认 true）
-  bool stream = 16;  // 是否流式传输（默认 false）
+  // 以下字段使用 optional（显式存在性）。proto3 的隐式默认值会让 "未设置" 和
+  // "显式设为 0/false" 无法区分——曾导致未设置的 verify_ssl 在服务端变成
+  // false（静默关闭证书校验）、未设置的 timeout_seconds 变成 0。
+  optional float timeout_seconds = 11;  // 超时时间（秒，未设置时服务端用默认值）
+  optional int32 max_retries = 12;  // 重试次数（0 表示显式不重试）
+  optional float retry_backoff_seconds = 13;  // 重试间隔（秒，支持指数退避扩展）
+  optional bool verify_ssl = 14;  // 是否验证 SSL（未设置时服务端按 true 处理）
+  optional bool allow_redirects = 15;  // 是否跟随重定向（未设置时服务端按 true 处理）
+  optional bool stream = 16;  // 是否流式传输（未设置时服务端按 false 处理）
 
   string impersonate = 17; // curl_cffi专用
   map<string, string> extensions = 18;  // 扩展信息（e.g., "ja3_fingerprint": "value"）

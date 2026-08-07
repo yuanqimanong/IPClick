@@ -1,20 +1,25 @@
 from ipclick.adapters.base import DownloaderAdapter
 from ipclick.adapters.curl_cffi_adapter import CurlCffiAdapter
 from ipclick.adapters.httpx_adapter import HttpxAdapter
-from ipclick.utils.log_util import log
+from ipclick.exceptions import AdapterError
 
 
-ADAPTER_CLASSES = {
-    "curl_cffi": CurlCffiAdapter,
-    "httpx": HttpxAdapter,
+# 已实现的适配器。IPClickAdapter 枚举里还列了 requests / DrissionPage /
+# undetected_chromedriver / playwright，那些尚未实现，请求到会明确报错。
+ADAPTER_CLASSES: dict[str, type[DownloaderAdapter]] = {
+    CurlCffiAdapter.adapter_name: CurlCffiAdapter,
+    HttpxAdapter.adapter_name: HttpxAdapter,
 }
 
 # 可选：列表形式（如果只需要顺序列表）
-ADAPTER_LIST = list(ADAPTER_CLASSES.values())
+ADAPTER_LIST: list[type[DownloaderAdapter]] = list(ADAPTER_CLASSES.values())
+
+DEFAULT_ADAPTER_NAME = CurlCffiAdapter.adapter_name
 
 
 def get_default_adapter() -> DownloaderAdapter:
-    return ADAPTER_LIST[0]()
+    """创建默认适配器实例（curl_cffi）。"""
+    return get_adapter(DEFAULT_ADAPTER_NAME)
 
 
 def get_adapter(adapter_name: str) -> DownloaderAdapter:
@@ -22,17 +27,23 @@ def get_adapter(adapter_name: str) -> DownloaderAdapter:
     获取适配器实例
 
     Args:
-        adapter_name:  适配器名称
+        adapter_name: 适配器名称
 
     Returns:
-        Downloader: 适配器实例
+        DownloaderAdapter: 适配器实例
+
+    Raises:
+        AdapterError: 适配器未实现，或其依赖库未安装。
     """
-    if adapter_name not in ADAPTER_CLASSES:
-        raise RuntimeError(f"下载器适配器 {adapter_name} 尚未支持")
+    adapter_class = ADAPTER_CLASSES.get(adapter_name)
+    if adapter_class is None:
+        supported = ", ".join(sorted(ADAPTER_CLASSES))
+        raise AdapterError(f"下载器适配器 {adapter_name!r} 尚未支持，当前可用: {supported}")
 
-        # TODO 应用配置
-        # self._configure_adapter(adapter)
+    return adapter_class()
 
-        log.debug(f"Created adapter instance: {adapter_name}")
 
-    return ADAPTER_CLASSES[adapter_name]()
+def register_adapter(adapter_class: type[DownloaderAdapter]) -> None:
+    """注册自定义适配器，便于在不改动本包的前提下扩展。"""
+    ADAPTER_CLASSES[adapter_class.adapter_name] = adapter_class
+    ADAPTER_LIST[:] = list(ADAPTER_CLASSES.values())

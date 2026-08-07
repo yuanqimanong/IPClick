@@ -1,9 +1,11 @@
+from collections.abc import Callable
+import contextlib
 import functools
 from pathlib import Path
 import sqlite3
 from sqlite3 import Connection
 import sys
-from typing import Any, Callable, ClassVar, Protocol, TypeVar, cast
+from typing import Any, ClassVar, Protocol, TypeVar, cast
 
 from loguru import logger
 from typing_extensions import runtime_checkable
@@ -50,11 +52,16 @@ class SQLiteAdapter(DatabaseAdapter):
             db_path: SQLite 数据库文件路径
             table_name: 存储日志的表名，默认为 'logs'
         """
+        # 表名会被拼进 SQL，不能来自不受信任的输入
+        if not table_name.isidentifier():
+            raise ValueError(f"非法的表名: {table_name!r}（只允许标识符字符）")
+
         self.db_path: str = db_path
         self.table_name: str = table_name
+        # 之前算出了 sql_path 却仍用原始 db_path 建连接，相对路径的解析等于白做
         sql_path = PathUtil.resolve_path(db_path)
         PathUtil.ensure_parent_dir(sql_path)
-        self.conn: Connection = sqlite3.connect(db_path, check_same_thread=False, timeout=10.0)
+        self.conn: Connection = sqlite3.connect(str(sql_path), check_same_thread=False, timeout=10.0)
         self._create_table()
 
     def _create_table(self):
@@ -64,7 +71,7 @@ class SQLiteAdapter(DatabaseAdapter):
         表包含时间戳、日志级别、消息、文件位置、线程/进程ID等信息。
         """
         cursor = self.conn.cursor()
-        cursor.execute(f"""  
+        cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS {self.table_name} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT,
@@ -153,9 +160,6 @@ def ensure_configured(func: F) -> F:
     return cast(F, wrapper)
 
 
-logger.remove()
-
-
 class LogUtil:
     """日志工具类
 
@@ -179,6 +183,11 @@ class LogUtil:
     _configurations: ClassVar[dict[str, dict[str, Any]]] = {}
     _default_logger_name: ClassVar[str] = "default"
     _depth: ClassVar[int] = 2
+    # 只移除本类自己注册的 handler。作为库，不能在 import 时 logger.remove()
+    # 把宿主应用配置好的 loguru handler 一并清掉。
+    _own_handler_ids: ClassVar[set[int]] = set()
+    # loguru 自带的默认 handler 是否已摘除（见 _drop_loguru_default_handler）
+    _dropped_default_handler: ClassVar[bool] = False
 
     def __init__(self, logger_name: str | None = None):
         """创建日志器实例
@@ -198,7 +207,7 @@ class LogUtil:
         log_file: str | Path | None = None,
         base_dir: Path | None = None,
         rotation: str = "10 MB",
-        retention: str = "30 days",
+        retention: str | int = "30 days",  # str 表示时间跨度，int 表示保留的文件个数
         adapter: DatabaseAdapter | None = None,
         **kwargs: Any,
     ) -> None:
@@ -227,10 +236,11 @@ class LogUtil:
         )
         level = level.upper()
 
+        cls._drop_loguru_default_handler()
+
         # 如果已经存在这个日志器的配置，先移除旧的handler
         if logger_name in cls._configurations:
-            for handler_id in cls._configurations[logger_name]["handler_ids"]:
-                logger.remove(handler_id)
+            cls._remove_handlers(cls._configurations[logger_name]["handler_ids"])
 
         handler_ids: list[int] = []
 
@@ -272,11 +282,58 @@ class LogUtil:
             handler_ids.append(adapter_handler)
 
         # 保存配置
+        cls._own_handler_ids.update(handler_ids)
         cls._configurations[logger_name] = {
             "handler_ids": handler_ids,
             "level": level,
             "adapter": adapter,
         }
+
+    @classmethod
+    def _drop_loguru_default_handler(cls) -> None:
+        """移除 loguru 自带的默认 stderr handler（id 0），只做一次。
+
+        loguru 在 import 时会自动装一个 DEBUG 级别的 stderr handler。如果不摘掉，
+        我们再 add 一个就会每条日志打印两遍，而且 DEBUG 会绕过这里设置的级别。
+
+        注意这跟"库在 import 时 logger.remove() 清空所有 handler"是两回事：
+        那样会连宿主应用自己配的 handler 一起干掉；这里只在调用方主动初始化
+        IPClick 日志时，摘掉 loguru 那个自动添加的默认项。约定俗成地，
+        自行配置过 loguru 的应用都已经先 remove() 过了，此时 id 0 并不存在。
+        """
+        if cls._dropped_default_handler:
+            return
+        cls._dropped_default_handler = True
+        with contextlib.suppress(ValueError):
+            logger.remove(0)
+
+    @classmethod
+    def _remove_handlers(cls, handler_ids: list[int]) -> None:
+        """移除本类注册过的 handler，忽略已被外部移除的。"""
+        for handler_id in handler_ids:
+            with contextlib.suppress(ValueError):  # 可能已被外部移除
+                logger.remove(handler_id)
+            cls._own_handler_ids.discard(handler_id)
+
+    @classmethod
+    def init_from_config(cls, log_config: dict[str, Any] | None, *, logger_name: str = "default") -> None:
+        """按配置文件的 ``[LOG]`` 节初始化日志。
+
+        原先 ``[LOG]`` 里的 level / output / rotation 从来没被读取过，改配置不生效。
+        """
+        config = dict(log_config or {})
+        output = str(config.get("output", "stdout"))
+        rotation_config = dict(config.get("rotation", {}))
+        max_size = rotation_config.get("max_size", 100)
+
+        cls.init(
+            level=str(config.get("level", "INFO")),
+            logger_name=logger_name,
+            log_file=None if output in ("stdout", "stderr", "") else output,
+            rotation=f"{max_size} MB",
+            # max_backups 是"保留几个历史文件"，loguru 的 retention 传 int 正是此意
+            retention=int(rotation_config.get("max_backups", 5)),
+        )
 
     @classmethod
     def remove_logger(cls, logger_name: str) -> None:
@@ -286,8 +343,7 @@ class LogUtil:
             logger_name: 要移除的日志器名称
         """
         if logger_name in cls._configurations:
-            for handler_id in cls._configurations[logger_name]["handler_ids"]:
-                logger.remove(handler_id)
+            cls._remove_handlers(cls._configurations[logger_name]["handler_ids"])
             del cls._configurations[logger_name]
 
     @classmethod

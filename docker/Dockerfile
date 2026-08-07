@@ -1,48 +1,62 @@
-# 基础镜像
-FROM python:3.14-slim
+# 构建：docker build -f docker/Dockerfile -t ipclick:latest .
+# 注意上下文是仓库根目录，不是 docker/ 目录。
+
+# ============================ 构建阶段 ============================
+FROM python:3.13-slim AS builder
 
 WORKDIR /app
 
-# 环境变量：
-# 1. 优化 Python 运行
-# 2. 将虚拟环境路径加入 PATH，确保能直接运行 ipclick 命令
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:$PATH"
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
 
-# 安装系统依赖
-# curl-cffi 等库可能需要编译环境
+# curl-cffi 等库可能需要编译环境（只存在于构建阶段，不进最终镜像）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     libffi-dev \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 uv：使用官方镜像复制二进制文件是最佳实践
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /bin/uv
 
-# 复制项目依赖定义文件
-# 包含 uv.lock 以确保依赖版本一致
+# 先只复制依赖定义，让依赖层能被 Docker 缓存复用
 COPY pyproject.toml uv.lock README.md ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev
 
-# 安装依赖（利用 Docker 缓存）
-# --frozen: 严格依照 lock 文件
-# --no-install-project: 仅安装依赖，不安装项目本身
-# --no-dev: 生产环境不需要开发依赖
-RUN uv sync --frozen --no-install-project --no-dev
-
-# 复制源代码
+# 再复制源码并安装项目本身
 COPY src/ ./src/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
 
-# 安装项目本身
-RUN uv sync --frozen --no-dev
+# ============================ 运行阶段 ============================
+FROM python:3.13-slim AS runtime
 
-# 创建数据目录
-RUN mkdir -p /app/data
+WORKDIR /app
 
-# 暴露端口
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/.venv/bin:$PATH"
+
+# 以非 root 用户运行
+RUN groupadd --system --gid 1000 ipclick \
+    && useradd --system --uid 1000 --gid ipclick --create-home ipclick
+
+# 只搬运虚拟环境和源码，编译工具链留在构建阶段
+COPY --from=builder --chown=ipclick:ipclick /app/.venv /app/.venv
+COPY --from=builder --chown=ipclick:ipclick /app/src /app/src
+
+# 配置目录（可通过 -v 挂载 config.toml 进来）
+RUN mkdir -p /home/ipclick/.ipclick /app/data \
+    && chown -R ipclick:ipclick /home/ipclick/.ipclick /app/data
+
+USER ipclick
+
 EXPOSE 9527
 
-# 启动命令
+# gRPC 服务没有 HTTP 健康检查端点，这里用一次 TCP 连接探活
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import socket,sys; s=socket.create_connection(('127.0.0.1',9527),3); s.close()" || exit 1
+
 CMD ["ipclick", "run"]

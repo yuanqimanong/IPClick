@@ -1,26 +1,36 @@
-import json as json_lib
-from typing import Any, List, Optional
+import threading
+from typing import TYPE_CHECKING, Any
 
 from ipclick.adapters.base import DownloaderAdapter, retry
-from ipclick.dto import Response
+from ipclick.dto.response import Response
+from ipclick.exceptions import AdapterError
 from ipclick.utils.log_util import log
 
 
+if TYPE_CHECKING:
+    from curl_cffi.requests import ProxySpec
+
 try:
     import curl_cffi.requests
-    from curl_cffi.requests.impersonate import DEFAULT_CHROME
-
-    CURL_CFFI_AVAILABLE = True
-except ImportError:
-    CURL_CFFI_AVAILABLE = False
-    DEFAULT_CHROME = None
+    from curl_cffi.requests import impersonate as _impersonate_mod
+except ImportError:  # pragma: no cover - 取决于安装环境
+    curl_cffi = None  # pyright: ignore[reportAssignmentType]
+    _impersonate_mod = None
 
 try:
     from fake_useragent import UserAgent
+except ImportError:  # pragma: no cover - 取决于安装环境
+    UserAgent = None  # pyright: ignore[reportAssignmentType]
 
-    FAKE_UA_AVAILABLE = True
-except ImportError:
-    FAKE_UA_AVAILABLE = False
+DEFAULT_CHROME: str | None = getattr(_impersonate_mod, "DEFAULT_CHROME", None)
+CURL_CFFI_AVAILABLE: bool = curl_cffi is not None
+FAKE_UA_AVAILABLE: bool = UserAgent is not None
+
+
+_SUPPORTED_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
+
+# 允许调用方通过 kwargs 透传给 curl_cffi 的参数
+_PASSTHROUGH_KWARGS = frozenset({"ja3", "akamai", "default_headers", "http_version", "interface", "cert"})
 
 
 class CurlCffiAdapter(DownloaderAdapter):
@@ -37,39 +47,61 @@ class CurlCffiAdapter(DownloaderAdapter):
     adapter_name: str = "curl_cffi"
 
     def __init__(self):
-        if not CURL_CFFI_AVAILABLE:
-            raise ImportError("curl_cffi is not installed. Install it with: pip install curl-cffi")
+        if curl_cffi is None:
+            raise AdapterError("curl_cffi is not installed. Install it with: pip install curl-cffi")
 
         super().__init__()
 
-        # HTTP方法映射
-        self.method_mapping = {
-            "GET": curl_cffi.requests.get,
-            "POST": curl_cffi.requests.post,
-            "PUT": curl_cffi.requests.put,
-            "DELETE": curl_cffi.requests.delete,
-            "PATCH": curl_cffi.requests.patch,
-            "HEAD": curl_cffi.requests.head,
-            "OPTIONS": curl_cffi.requests.options,
-        }
-
         # curl_cffi特有配置
-        self.impersonate = DEFAULT_CHROME
+        self.impersonate: str | None = DEFAULT_CHROME
         self.ja3 = None
         self.akamai = None
-        self.session = None
+
+        # 按 (proxy, verify, impersonate) 缓存 Session，以复用连接
+        self._sessions: dict[tuple[str | None, bool, str | None], Any] = {}
+        self._sessions_lock = threading.Lock()
+        # 是否读取环境变量里的代理配置，默认关闭：代理应由调用方显式指定，
+        # 而不是取决于服务端所在机器的 HTTP_PROXY/ALL_PROXY
+        self.trust_env: bool = False
 
         # User Agent生成器
-        if FAKE_UA_AVAILABLE:
-            self.ua_generator = UserAgent(platforms="desktop")
-        else:
-            self.ua_generator = None
+        self.ua_generator = UserAgent(platforms="desktop") if UserAgent is not None else None
 
-    def get_session(self, **kwargs):
-        """获取或创建会话"""
-        if self.session is None:
-            self.session = curl_cffi.requests.Session(**kwargs)
-        return self.session
+    def _get_session(self, proxy: str | None, verify: bool, impersonate: str | None) -> Any:
+        """取得（并缓存）一个 curl_cffi Session。
+
+        原实现调用模块级的 ``curl_cffi.requests.get/post/...``，每次请求都要
+        重新建连并重做 TLS 握手；``get_session()`` 虽然写了却从没被调用过。
+        """
+        assert curl_cffi is not None  # __init__ 已保证
+        key = (proxy, verify, impersonate)
+        session = self._sessions.get(key)
+        if session is not None:
+            return session
+
+        with self._sessions_lock:
+            if key not in self._sessions:
+                self._sessions[key] = curl_cffi.requests.Session(
+                    proxies=self._build_proxies(proxy),
+                    verify=verify,
+                    impersonate=impersonate or DEFAULT_CHROME,
+                    trust_env=bool(self.trust_env),
+                )
+            return self._sessions[key]
+
+    def _build_proxies(self, proxy: str | None) -> "ProxySpec | None":
+        """构造 curl_cffi 的 proxies 参数。
+
+        libcurl 会自己读环境变量里的 http_proxy/https_proxy，Session 上的
+        ``trust_env=False`` 并不能阻止它（实测 proxies=None 和 proxies={} 都
+        仍然走环境代理）。只有显式传空字符串才能真正关掉，否则"不指定代理"
+        会静默变成"走服务端所在机器的环境代理"。
+        """
+        if proxy:
+            return {"http": proxy, "https": proxy}
+        if self.trust_env:
+            return None
+        return {"http": "", "https": ""}
 
     @retry()
     def download(
@@ -94,43 +126,41 @@ class CurlCffiAdapter(DownloaderAdapter):
         extensions: dict[str, Any] | None = None,
         automation_config: str | None = None,
         automation_script: str | None = None,
-        allowed_status_codes: Optional[List[int]] = None,
+        allowed_status_codes: list[int] | None = None,
         kwargs: str | None = None,
     ) -> Response:
         """
         使用curl_cffi执行HTTP请求
         """
-        kwargs_dict = json_lib.loads(kwargs)
         method = method.upper()
+        if method not in _SUPPORTED_METHODS:
+            raise AdapterError(f"Unsupported HTTP method: {method}")
 
-        # 设置代理
-        proxies = None
-        if proxy:
-            proxies = {"http": proxy, "https": proxy}
+        # 以前这里是无条件 json.loads(kwargs)，kwargs 为空串时直接抛
+        # JSONDecodeError，而且解析结果压根没被用到。
+        extra = self.parse_extra_kwargs(kwargs)
+
+        request_kwargs: dict[str, Any] = {
+            "headers": headers,
+            "cookies": cookies,
+            "params": params,
+            "data": data,
+            "json": json,
+            "timeout": timeout or self.timeout,
+            "allow_redirects": allow_redirects,
+            "stream": stream,
+        }
+        for key in _PASSTHROUGH_KWARGS:
+            if key in extra:
+                request_kwargs[key] = extra[key]
+
+        request_kwargs = {k: v for k, v in request_kwargs.items() if v is not None}
+
+        session = self._get_session(proxy, verify, impersonate)
 
         try:
-            # 获取请求方法
-            request_func = self.method_mapping.get(method)
-            if not request_func:
-                raise ValueError(f"Unsupported HTTP method: {method}")
+            curl_cffi_resp = session.request(method, url, **request_kwargs)
 
-            # 执行请求
-            curl_cffi_resp = request_func(
-                url=url,
-                headers=headers,
-                cookies=cookies,
-                params=params,
-                data=data,
-                json=json,
-                proxies=proxies,
-                timeout=timeout,
-                verify=verify,
-                allow_redirects=allow_redirects,
-                stream=stream,
-                impersonate=impersonate or DEFAULT_CHROME,
-            )
-
-            # 转换响应
             return Response(
                 url=str(curl_cffi_resp.url),
                 status_code=curl_cffi_resp.status_code,
@@ -141,17 +171,19 @@ class CurlCffiAdapter(DownloaderAdapter):
             )
 
         except Exception as e:
-            log.exception(f"curl_cffi request failed for {url}: {e}")
+            # 不打完整堆栈：retry 会重试多次，每次一份 traceback 会淹没日志。
+            log.warning(f"curl_cffi request failed for {url}: {e}")
             raise
 
-    def close(self):
-        """关闭会话"""
-        if self.session:
-            try:
-                self.session.close()
-            except:
-                pass
-            self.session = None
+    def close(self) -> None:
+        """关闭所有缓存的 Session"""
+        with self._sessions_lock:
+            for session in self._sessions.values():
+                try:
+                    session.close()
+                except Exception as e:
+                    log.debug(f"关闭 curl_cffi session 失败: {e}")
+            self._sessions.clear()
 
 
 def is_available() -> bool:
