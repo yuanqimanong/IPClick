@@ -3,6 +3,7 @@ import threading
 from typing import Any
 
 import grpc
+from typing_extensions import override
 
 from ipclick.config_loader import load_config
 from ipclick.dto.models import DownloadResponse, DownloadTask, HttpMethod, IPClickAdapter, ProxyConfig
@@ -54,8 +55,8 @@ class Downloader:
 
         self._channel: grpc.Channel | None = None
         self._stub: task_pb2_grpc.TaskServiceStub | None = None
-        self._lock = threading.Lock()
-        self._closed = False
+        self._lock: threading.Lock = threading.Lock()
+        self._closed: bool = False
 
         # 配置里含代理密码、db_uri 等机密，只打印结构不打印内容
         log.debug(f"Downloader 已加载配置，目标服务端 {self.host}:{self.port}，配置节: {sorted(self.config.keys())}")
@@ -292,11 +293,12 @@ class _LazyDownloader:
     改成首次真正使用时才构造。
     """
 
-    __slots__ = ()
+    __slots__: tuple[str, ...] = ()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(get_downloader(), name)
 
+    @override
     def __repr__(self) -> str:
         return "<ipclick.downloader (lazy)>"
 

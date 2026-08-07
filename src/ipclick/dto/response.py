@@ -2,6 +2,8 @@ from dataclasses import dataclass
 import json as json_module
 from typing import Any
 
+from typing_extensions import override
+
 from ipclick.exceptions import RequestError
 
 
@@ -168,10 +170,12 @@ class Response:
             "exception": str(self.exception) if self.exception else None,
         }
 
+    @override
     def __str__(self) -> str:
         """字符串表示"""
         return f"<Response [{self.status_code}] {self.url}>"
 
+    @override
     def __repr__(self) -> str:
         """详细字符串表示"""
         return f"Response(url={self.url!r}, status_code={self.status_code}, elapsed_ms={self.elapsed_ms}, ok={self.ok})"

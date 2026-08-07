@@ -51,16 +51,18 @@ def config_info(config: Path | None):
         # 配置节名是大写的（[SERVER]/[DOWNLOADER]/...）。此前这里读的是小写的
         # server/client/workers，永远取不到值，于是原样打印一串假的默认值。
         server = dict(cfg.get("SERVER", {}))
-        downloader_cfg = dict(cfg.get("DOWNLOADER", {}))
         proxy = dict(cfg.get("PROXY", {}))
         security = dict(cfg.get("SECURITY", {}))
+        log_cfg = dict(cfg.get("LOG", {}))
 
+        # 只展示真正生效的配置节。[DOWNLOADER]/[CLUSTER]/[BROWSER]/[MONITOR]/[GENERAL]
+        # 目前没有消费方，把它们打印出来会让人误以为改了就生效。
         click.echo("Current configuration:")
         click.echo(f"  Server host:  {server.get('host', '[::]')}")
         click.echo(f"  Server port:  {server.get('port', 9527)}")
         click.echo(f"  Max workers:  {server.get('max_workers', 10)}")
-        click.echo(f"  Connect timeout:  {downloader_cfg.get('connect_timeout', 10)}s")
-        click.echo(f"  Download timeout: {downloader_cfg.get('download_timeout', 300)}s")
+        click.echo(f"  Log level:    {log_cfg.get('level', 'info')}")
+        click.echo(f"  Log output:   {log_cfg.get('output', 'stdout')}")
 
         # 只显示代理是否配置，不打印账号密码
         proxy_host = proxy.get("host") or proxy.get("tunnel_server")
@@ -72,11 +74,7 @@ def config_info(config: Path | None):
 
         nodes = cfg.get("CLUSTER", {}).get("nodes", [])
         if nodes:
-            click.echo(f"  Cluster nodes: {len(nodes)}")
-            for i, node in enumerate(nodes, 1):
-                click.echo(f"    {i}. {node.get('id', '?')} @ {node.get('address', '?')}")
-        else:
-            click.echo("  Cluster nodes: None configured")
+            click.echo(f"  Cluster nodes: {len(nodes)} （⚠️ 集群尚未实现，此项仅为预留配置）")
 
     except Exception as e:
         click.echo(f"Error loading config: {e}", err=True)

@@ -15,8 +15,8 @@ ISO_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
 
 # 自定义JSON反序列化器
-def json_hook(obj: Any):
-    def json_deserializer(value):
+def json_hook(obj: dict[str, Any]) -> dict[str, Any]:
+    def json_deserializer(value: Any) -> Any:
         if isinstance(value, str):
             try:
                 # 处理带/不带微秒与时区的情况，优先用 fromisoformat（Py3.7+）

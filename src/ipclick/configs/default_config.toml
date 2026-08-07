@@ -1,5 +1,6 @@
 # ================ SDK配置 [CLIENT] ================
 # -------------- 基础配置 [GENERAL] --------------
+# ⚠️ 尚未实现：本节配置当前没有任何消费方，修改不会生效（详见 README「尚未实现 / 已知限制」）
 [GENERAL]
 # 程序运行模式: "standalone" (单机) | "cluster" (多机器/集群)
 mode = "standalone"
@@ -20,6 +21,7 @@ country_code = ''
 tunnel_server = ''
 
 # ------- 集群配置 [CLUSTER] -------
+# ⚠️ 尚未实现：本节配置当前没有任何消费方，修改不会生效（详见 README「尚未实现 / 已知限制」）
 [CLUSTER]
 # 负载均衡策略 (round_robin/random/weight)
 load_balancer = "round_robin"
@@ -53,6 +55,8 @@ block_private_networks = false
 allowlist = []
 
 # ------- 下载器配置 [DOWNLOADER] -------
+# ⚠️ 尚未实现：本节配置当前没有任何消费方，修改不会生效（详见 README「尚未实现 / 已知限制」）
+# 超时与重试请按请求传参：downloader.get(url, timeout=..., max_retries=..., retry_backoff=...)
 [DOWNLOADER]
 # 连接超时（秒）
 connect_timeout = 10
@@ -85,6 +89,7 @@ temp_dir = "/tmp/downloads"     # 分块临时存储目录
 auto_clean = true               # 下载完成后清除临时文件
 
 # ------- 浏览器渲染配置 [BROWSER] -------
+# ⚠️ 尚未实现：本节配置当前没有任何消费方，修改不会生效（详见 README「尚未实现 / 已知限制」）
 [BROWSER]
 # 启用浏览器渲染引擎
 enabled = true
@@ -127,6 +132,7 @@ level = "strict"    # strict/moderate/off
 
 
 # ================ 监控配置 [MONITOR] ================
+# ⚠️ 尚未实现：本节配置当前没有任何消费方，修改不会生效（详见 README「尚未实现 / 已知限制」）
 [MONITOR]
 health_check = true
 

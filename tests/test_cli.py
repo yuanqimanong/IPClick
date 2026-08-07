@@ -73,6 +73,22 @@ class TestConfigInfo:
         result = runner.invoke(main, ["config-info", "--config", str(cfg)])
         assert "Block private networks: True" in result.output
 
+    def test_does_not_print_unimplemented_config(self, runner: CliRunner, tmp_path: Path):
+        """[DOWNLOADER] 目前没有消费方，打印它会让人以为改了就生效。"""
+        cfg = tmp_path / "c.toml"
+        cfg.write_text("[DOWNLOADER]\nconnect_timeout = 999\ndownload_timeout = 888\n", encoding="utf-8")
+        result = runner.invoke(main, ["config-info", "--config", str(cfg)])
+        assert result.exit_code == 0
+        assert "999" not in result.output
+        assert "888" not in result.output
+
+    def test_cluster_nodes_marked_unimplemented(self, runner: CliRunner):
+        """默认配置里有一个预留节点，必须标注尚未实现。"""
+        result = runner.invoke(main, ["config-info"])
+        assert result.exit_code == 0
+        if "Cluster nodes" in result.output:
+            assert "尚未实现" in result.output
+
     def test_works_without_config_file(self, runner: CliRunner):
         result = runner.invoke(main, ["config-info"])
         assert result.exit_code == 0

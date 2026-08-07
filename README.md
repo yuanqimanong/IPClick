@@ -320,6 +320,47 @@ docker run -d -p 9527:9527 --name ipclick -v /你的路径/:/home/ipclick/.ipcli
 | `ValidationError`   | 任务参数校验失败（同时继承 `ValueError`） |
 | `URLNotAllowedError`| 目标 URL 被安全策略拒绝        |
 
+## 🚧 尚未实现 / 已知限制
+
+为免误导，这里如实列出**当前还没有实现**的部分。配置文件里出现但落在本节的项，
+改了不会有任何效果。
+
+### 配置节：仅 4 个真正生效
+
+| 配置节 | 状态 |
+|---|---|
+| `[SERVER]` `[PROXY]` `[LOG]` `[SECURITY]` | ✅ 生效 |
+| `[GENERAL]` | ❌ `mode` / `debug` 无消费方 |
+| `[CLUSTER]` | ❌ `load_balancer` / `nodes` / `db_uri` 无消费方 |
+| `[DOWNLOADER]` | ❌ `connect_timeout` / `download_timeout` / `retry.*` / `concurrency.*` / `rate_limit.*` / `chunk.*` / `storage.*` 全部无消费方 |
+| `[BROWSER]` | ❌ 无消费方 |
+| `[MONITOR]` | ❌ `health_check` 无消费方 |
+
+> 超时与重试目前只能**按请求**传参（`timeout` / `max_retries` / `retry_backoff`），
+> 配置文件里的对应项不生效。
+
+### 功能
+
+- **分布式 / 集群**：尽管项目定位是"分布式"，目前客户端只连**单个** `host:port`。
+  没有节点池、负载均衡、故障转移或服务发现。`[CLUSTER]` 是预留配置。
+- **服务端鉴权**：gRPC 使用 `insecure_channel`，**没有任何鉴权**。任何能连到端口的
+  调用方都能使用本服务。部署到非可信网络时，请自行用防火墙 / 网络策略限制来源，
+  并开启 `[SECURITY].block_private_networks`。
+- **适配器**：`IPClickAdapter` 枚举列出 6 种，实际只实现 **`curl_cffi`** 和 **`httpx`**。
+  请求 `requests` / `DrissionPage` / `undetected_chromedriver` / `playwright` 会抛
+  `AdapterError`。
+- **浏览器渲染**：`automation_config` / `automation_script` 字段贯穿了整条调用链，
+  但末端没有任何消费方，属于预留接口。
+- **流式下载**：`stream` 参数目前不改变行为。响应体经由单个 protobuf 消息整体传输
+  （上限 500MB），大文件会完整驻留内存，不适合下载超大文件。
+- **文件上传**：`files` 参数会抛 `NotImplementedError`。
+- **批量请求**：一次 RPC 只处理一个 URL，没有批量 / 流式接口。
+- **异步客户端**：只有同步 `Downloader`，没有 `grpc.aio` 版本。
+- **Cookie 持久化**：请求之间不共享 cookie jar，每次请求相互独立。
+- **客户端重试**：重试只发生在服务端适配器内部；客户端到服务端这一跳失败不会重试。
+- **可观测性**：没有 metrics，也没有实现 gRPC 标准健康检查协议。Docker 的
+  healthcheck 只是探测端口 TCP 可连。
+
 ## 🛠️ 开发
 
 ```bash

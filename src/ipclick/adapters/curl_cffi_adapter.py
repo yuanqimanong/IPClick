@@ -1,6 +1,8 @@
 import threading
 from typing import TYPE_CHECKING, Any
 
+from typing_extensions import override
+
 from ipclick.adapters.base import DownloaderAdapter, retry
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError
@@ -10,21 +12,27 @@ from ipclick.utils.log_util import log
 if TYPE_CHECKING:
     from curl_cffi.requests import ProxySpec
 
+# 可选依赖：缺失时降级为 None，由 __init__ 抛 AdapterError。
+# 标成 Any 是为了让"模块或 None"这种运行时形态不必到处写 type: ignore。
+_curl_cffi: Any
+_impersonate_mod: Any
+_user_agent_cls: Any
+
 try:
-    import curl_cffi.requests
+    import curl_cffi.requests as _curl_cffi
     from curl_cffi.requests import impersonate as _impersonate_mod
 except ImportError:  # pragma: no cover - 取决于安装环境
-    curl_cffi = None  # pyright: ignore[reportAssignmentType]
+    _curl_cffi = None
     _impersonate_mod = None
 
 try:
-    from fake_useragent import UserAgent
+    from fake_useragent import UserAgent as _user_agent_cls
 except ImportError:  # pragma: no cover - 取决于安装环境
-    UserAgent = None  # pyright: ignore[reportAssignmentType]
+    _user_agent_cls = None
 
 DEFAULT_CHROME: str | None = getattr(_impersonate_mod, "DEFAULT_CHROME", None)
-CURL_CFFI_AVAILABLE: bool = curl_cffi is not None
-FAKE_UA_AVAILABLE: bool = UserAgent is not None
+CURL_CFFI_AVAILABLE: bool = _curl_cffi is not None
+FAKE_UA_AVAILABLE: bool = _user_agent_cls is not None
 
 
 _SUPPORTED_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
@@ -47,25 +55,25 @@ class CurlCffiAdapter(DownloaderAdapter):
     adapter_name: str = "curl_cffi"
 
     def __init__(self):
-        if curl_cffi is None:
+        if _curl_cffi is None:
             raise AdapterError("curl_cffi is not installed. Install it with: pip install curl-cffi")
 
         super().__init__()
 
         # curl_cffi特有配置
         self.impersonate: str | None = DEFAULT_CHROME
-        self.ja3 = None
-        self.akamai = None
+        self.ja3: str | None = None
+        self.akamai: str | None = None
 
         # 按 (proxy, verify, impersonate) 缓存 Session，以复用连接
         self._sessions: dict[tuple[str | None, bool, str | None], Any] = {}
-        self._sessions_lock = threading.Lock()
+        self._sessions_lock: threading.Lock = threading.Lock()
         # 是否读取环境变量里的代理配置，默认关闭：代理应由调用方显式指定，
         # 而不是取决于服务端所在机器的 HTTP_PROXY/ALL_PROXY
         self.trust_env: bool = False
 
         # User Agent生成器
-        self.ua_generator = UserAgent(platforms="desktop") if UserAgent is not None else None
+        self.ua_generator: Any = _user_agent_cls(platforms="desktop") if _user_agent_cls is not None else None
 
     def _get_session(self, proxy: str | None, verify: bool, impersonate: str | None) -> Any:
         """取得（并缓存）一个 curl_cffi Session。
@@ -73,7 +81,6 @@ class CurlCffiAdapter(DownloaderAdapter):
         原实现调用模块级的 ``curl_cffi.requests.get/post/...``，每次请求都要
         重新建连并重做 TLS 握手；``get_session()`` 虽然写了却从没被调用过。
         """
-        assert curl_cffi is not None  # __init__ 已保证
         key = (proxy, verify, impersonate)
         session = self._sessions.get(key)
         if session is not None:
@@ -81,7 +88,7 @@ class CurlCffiAdapter(DownloaderAdapter):
 
         with self._sessions_lock:
             if key not in self._sessions:
-                self._sessions[key] = curl_cffi.requests.Session(
+                self._sessions[key] = _curl_cffi.Session(
                     proxies=self._build_proxies(proxy),
                     verify=verify,
                     impersonate=impersonate or DEFAULT_CHROME,
@@ -103,6 +110,7 @@ class CurlCffiAdapter(DownloaderAdapter):
             return None
         return {"http": "", "https": ""}
 
+    @override
     @retry()
     def download(
         self,
@@ -175,6 +183,7 @@ class CurlCffiAdapter(DownloaderAdapter):
             log.warning(f"curl_cffi request failed for {url}: {e}")
             raise
 
+    @override
     def close(self) -> None:
         """关闭所有缓存的 Session"""
         with self._sessions_lock:
