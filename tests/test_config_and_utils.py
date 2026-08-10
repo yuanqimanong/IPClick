@@ -71,6 +71,17 @@ class TestLoadConfigPrecedence:
         assert "SERVER" in cfg
         assert "SECURITY" in cfg  # 0.2.0 新增的安全配置节
 
+    def test_shipped_proxy_default_is_empty(self):
+        """回归：随包分发的默认配置里预置了 127.0.0.1:7890（作者本机的 Clash），
+        会让所有用户的 proxy=True 都指向他们自己机器的该端口。"""
+        from ipclick.config_loader.loader import load_config
+        from ipclick.dto.models import ProxyConfig
+
+        load_config.cache_clear()
+        proxy = dict(load_config().get("PROXY", {}))
+        assert not proxy.get("host"), f"默认配置不应预置代理地址，实际为 {proxy.get('host')!r}"
+        assert ProxyConfig(**proxy).to_url() is None
+
     def test_security_defaults(self):
         from ipclick.config_loader.loader import load_config
 

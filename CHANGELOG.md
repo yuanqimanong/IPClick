@@ -2,6 +2,29 @@
 
 本文件记录 IPClick 的重要变更。版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.2] - 2026-08-07
+
+首个发布到 PyPI 的 0.2.x 版本（0.2.0 / 0.2.1 仅有 GitHub Release）。
+本版修复的三项都会被永久固化进 PyPI 页面或分发包，因此在上传前先行修正。
+
+### 修复
+
+- **`stream=True` 在默认适配器上静默丢弃整个响应体**。curl_cffi 在
+  `stream=True` 时返回未消费的流式响应，随后读取 `.content` 得到 `b''`，
+  而 `status_code` 仍是 200、`exception` 仍是 `None` —— 调用方完全无从察觉。
+  服务端本就要把响应体整个塞进一条 protobuf 消息，没有真正的流式通路，
+  故与 httpx 适配器保持一致：忽略该参数（README「尚未实现」已如此声明）。
+  该问题自 0.1.3 起就存在。
+- **`DownloadResponse.raise_for_status()` 抛的异常类型与文档不符**。实际抛基类
+  `IPClickError`，而 README 文档写的是 `RequestError`；后者是前者的**子类**，
+  于是按文档写 `except RequestError:` 的代码根本捕获不到。改为抛 `RequestError`。
+- **随包分发的默认配置预置了作者本机的代理地址**（`127.0.0.1:7890`，Clash 默认端口）。
+  这会让所有用户的 `proxy=True` 指向他们自己机器的该端口 —— 可能是完全不相干的服务。
+  改为留空，此时 `proxy=True` 会打警告并直连。
+- README 中 `LICENSE` 的相对链接改为绝对地址。README 会作为 `long_description`
+  打进 wheel 的 METADATA，即 PyPI 项目页正文；PyPI 独立渲染该页面，相对链接会 404，
+  且版本一经上传不可修改。
+
 ## [0.2.1] - 2026-08-07
 
 ### 修复

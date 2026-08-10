@@ -163,6 +163,23 @@ class TestAdapterBehaviour:
         assert resp.status_code == -1
         assert resp.exception is not None
 
+    def test_stream_true_does_not_silently_drop_the_body(self, adapter, http_server: str):
+        """回归：curl_cffi 在 stream=True 时返回未消费的流式响应，读 .content 得到 b''，
+        而 status_code 仍是 200、exception 仍是 None——调用方完全无从察觉响应体已丢失。
+        两个适配器都必须忽略该参数（真正的流式传输见 README「尚未实现」）。"""
+        resp = adapter.download(f"{http_server}/x", method="GET", stream=True, kwargs="{}")
+        assert resp.status_code == 200
+        assert resp.content, "stream=True 时响应体被静默丢弃"
+        assert resp.json()["path"] == "/x"
+
+    def test_stream_matches_non_stream(self, adapter, http_server: str):
+        a = adapter.download(f"{http_server}/x", method="GET", stream=False, kwargs="{}")
+        b = adapter.download(f"{http_server}/x", method="GET", stream=True, kwargs="{}")
+        # 回显里含随机 User-Agent，只比对稳定字段
+        assert a.status_code == b.status_code
+        assert (a.json()["method"], a.json()["path"]) == (b.json()["method"], b.json()["path"])
+        assert len(b.content) > 0
+
     def test_user_agent_fallback_without_generator(self, adapter, http_server: str):
         """回归：httpx 适配器 fallback 到不存在的 self.user_agent，必 AttributeError。"""
         adapter.ua_generator = None

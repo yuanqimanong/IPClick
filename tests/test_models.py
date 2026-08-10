@@ -186,3 +186,15 @@ class TestDownloadResponse:
     def test_invalid_json_raises_value_error(self):
         with pytest.raises(ValueError, match="not valid JSON"):
             DownloadResponse(status_code=200, text="<html>").json()
+
+    def test_raise_for_status_raises_documented_subclass(self):
+        """回归：抛的是基类 IPClickError，而 README 文档写的是 RequestError。
+        RequestError 是 IPClickError 的子类，所以按文档写 `except RequestError:`
+        的用户代码根本捕获不到。"""
+        from ipclick.exceptions import RequestError
+
+        with pytest.raises(RequestError):
+            DownloadResponse(status_code=500, error="boom").raise_for_status()
+
+    def test_raise_for_status_silent_on_success(self):
+        DownloadResponse(status_code=200).raise_for_status()

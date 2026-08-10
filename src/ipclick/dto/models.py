@@ -6,7 +6,7 @@ from typing import Any, Self
 import uuid_utils as uuid
 
 from ipclick.dto.proto import task_pb2
-from ipclick.exceptions import IPClickError, ValidationError
+from ipclick.exceptions import RequestError, ValidationError
 from ipclick.utils import json_serializer
 
 
@@ -344,7 +344,13 @@ class DownloadResponse:
         return self.is_success()
 
     def raise_for_status(self) -> None:
-        """如果状态码表示错误，抛出异常"""
+        """如果状态码表示错误，抛出异常
+
+        Raises:
+            RequestError: 请求失败。注意必须抛子类而不是基类 IPClickError——
+                README 文档写的是 RequestError，而基类实例并不会被
+                ``except RequestError:`` 捕获。
+        """
         if not self.is_success():
             error_msg = self.error or f"HTTP {self.status_code} Error"
-            raise IPClickError(f"Request failed: {error_msg}")
+            raise RequestError(f"Request failed: {error_msg}")

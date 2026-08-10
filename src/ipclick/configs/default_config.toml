@@ -8,10 +8,13 @@ mode = "standalone"
 debug = false
 
 # ------- 代理配置 [PROXY] -------
+# 供 downloader.get(url, proxy=True) 使用。默认留空表示"未配置代理"，
+# 此时 proxy=True 会打一条警告并直连——不要在这里预置某台机器的本地代理地址，
+# 否则所有用户的 proxy=True 都会指向他们自己的 127.0.0.1:7890（可能是别的服务）。
 [PROXY]
 scheme = 'http'
-host = '127.0.0.1'
-port = 7890
+host = ''
+port = 0
 # 三方隧道代理
 auth_key = ''
 auth_password = ''

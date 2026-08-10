@@ -156,7 +156,12 @@ class CurlCffiAdapter(DownloaderAdapter):
             "json": json,
             "timeout": timeout or self.timeout,
             "allow_redirects": allow_redirects,
-            "stream": stream,
+            # 不转发 stream：curl_cffi 在 stream=True 时返回未消费的流式响应，
+            # 我们随后读 .content 得到的是 b''，而 status_code 仍是 200、
+            # exception 仍是 None——调用方完全无从察觉整个响应体已经丢失。
+            # 服务端本来就要把响应体整个塞进一条 protobuf 消息，没有真正的流式
+            # 通路可言（见 README「尚未实现」），所以这里与 httpx 适配器保持一致：
+            # 忽略该参数，等真正支持 server-streaming RPC 时再一并实现。
         }
         for key in _PASSTHROUGH_KWARGS:
             if key in extra:
