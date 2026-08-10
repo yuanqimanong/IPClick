@@ -19,6 +19,7 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 - **自动重试**：内置请求重试机制，支持指数退避 + 抖动，并可按状态码重试
 - **令牌鉴权**：gRPC 标准 Bearer 令牌，支持环境变量注入与多令牌轮换
 - **健康检查**：实现 `grpc.health.v1` 标准协议，K8s 探针与服务网格开箱即用
+- **Prometheus 指标**：请求量 / 延迟 / 重试 / 拒绝等指标，可选依赖、优雅降级
 - **SSRF 防护**：服务端对目标 URL 做协议白名单与内网/元数据地址拦截
 - **命令行工具**：提供便捷的 CLI 工具，支持快速启动服务和查看配置
 - **Docker 支持**：多阶段构建、非 root 运行的镜像
@@ -297,6 +298,45 @@ from ipclick.health import check_health
 healthy, status = check_health("10.0.0.1:9527", timeout=3)
 ```
 
+### Prometheus 指标
+
+需要可选依赖：
+
+```bash
+pip install "ipclick[metrics]"
+```
+
+```toml
+[MONITOR]
+metrics_enabled = true
+metrics_port = 9528
+metrics_host = "0.0.0.0"   # 只允许本机抓取则改成 127.0.0.1
+```
+
+指标走**独立 HTTP 端口**（Prometheus 生态惯例），不复用 gRPC 端口。
+默认关闭 —— 指标端点通常比业务端口设防更少，应由部署方显式决定是否开、开在哪。
+
+| 指标 | 类型 | 标签 |
+|---|---|---|
+| `ipclick_requests_total` | Counter | `adapter` `method` `outcome` |
+| `ipclick_request_duration_seconds` | Histogram | `adapter` |
+| `ipclick_response_bytes` | Histogram | `adapter` |
+| `ipclick_requests_in_flight` | Gauge | — |
+| `ipclick_retries_total` | Counter | `adapter` `reason` |
+| `ipclick_rejected_total` | Counter | `reason` |
+| `ipclick_build_info` | Info | `version` |
+
+`outcome` 取值为 `2xx` / `3xx` / `4xx` / `5xx` / `failure`（`failure` 表示连接层
+失败，压根没拿到 HTTP 响应）。`reason` 取值为 `unauthenticated` /
+`url_not_allowed` / `invalid_argument` / `internal_error` / `exception` /
+`status_code`。
+
+> **指标标签里不含目标 URL 或主机名，这是刻意的。** 爬虫场景下目标是无界的，
+> 用它做标签会让 Prometheus 的时间序列数量爆炸；而且指标端点往往设防更少，
+> 把抓取目标暴露在那里等于公开业务意图。需要按站点分析请走日志，不要走指标。
+
+未安装 `prometheus_client` 时所有埋点降级为无操作，功能不受任何影响。
+
 ### 安全配置
 
 服务端会代替调用方请求任意 URL。**若监听在公网或不可信网络，请开启内网拦截**，
@@ -443,11 +483,11 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 
 | 配置节 | 状态 |
 |---|---|
-| `[SERVER]` `[PROXY]` `[LOG]` `[SECURITY]` `[DOWNLOADER]` | ✅ 生效 |
+| `[SERVER]` `[PROXY]` `[LOG]` `[SECURITY]` `[DOWNLOADER]` `[MONITOR]` | ✅ 生效 |
 | `[GENERAL]` | ⚠️ `debug` 生效；`mode` 待集群支持（P4） |
 | `[CLUSTER]` | ❌ `load_balancer` / `nodes` / `db_uri` 无消费方（P4） |
 | `[BROWSER]` | ❌ 无消费方（P5） |
-| `[MONITOR]` | ⚠️ `health_check` 生效；metrics 相关待 P2-3 |
+| `[MONITOR]` | ✅ 生效 |
 
 > `[DOWNLOADER]` 的限速（`rate_limit`）、分块下载（`chunk`）、临时存储（`storage`）
 > 依赖真正的流式传输通路，已从默认配置移除，待流式下载实现后再引入（P3）。
@@ -471,14 +511,14 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 - **异步客户端**：只有同步 `Downloader`，没有 `grpc.aio` 版本。
 - **Cookie 持久化**：请求之间不共享 cookie jar，每次请求相互独立。
 - **客户端重试**：重试只发生在服务端适配器内部；客户端到服务端这一跳失败不会重试。
-- **可观测性**：已实现 gRPC 标准健康检查；Prometheus metrics 尚未提供（P2-3）。
+
 
 ## 🗺️ 路线图
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **P1** 打通存量 | `[DOWNLOADER]` 生效、参数错误不再伪装成网络失败、`NO_PROXY` 处理、`[GENERAL].debug` | ✅ 已完成 |
-| **P2** 安全与可运维 | 服务端 token 鉴权 ✅、gRPC 标准健康检查 ✅、Prometheus metrics | 进行中 |
+| **P2** 安全与可运维 | 服务端 token 鉴权 ✅、gRPC 标准健康检查 ✅、Prometheus metrics ✅ | ✅ 已完成 |
 | **P3** 能力扩展 | 异步客户端、批量 RPC、真流式下载（连带限速 / 分块） | 计划中 |
 | **P4** 集群 | 节点池、负载均衡、健康探测、故障转移（依赖 P2 的健康检查） | 计划中 |
 | **P5** 适配器 | `requests`、`playwright` / `DrissionPage` / `undetected_chromedriver`（连带 `[BROWSER]` 与浏览器渲染） | 计划中 |

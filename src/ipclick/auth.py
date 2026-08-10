@@ -27,6 +27,7 @@ from typing import Any
 import grpc
 from typing_extensions import override
 
+from ipclick.metrics import get_metrics
 from ipclick.utils.log_util import log
 
 
@@ -163,6 +164,7 @@ class TokenAuthInterceptor(grpc.ServerInterceptor):
 
         # 只记方法名，绝不记令牌本身（哪怕是错误的那个）
         log.warning(f"拒绝未通过鉴权的调用: {method}")
+        get_metrics().record_rejected("unauthenticated")
         return self._deny
 
 

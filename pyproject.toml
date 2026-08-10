@@ -22,6 +22,11 @@ dependencies = [
     "typing-extensions>=4.15.0,<5.0.0",
 ]
 
+[project.optional-dependencies]
+# Prometheus 指标为可选：未安装时所有埋点降级为无操作，功能不受影响。
+# 安装：pip install "ipclick[metrics]"
+metrics = ["prometheus-client>=0.26.0,<1.0.0"]
+
 [project.urls]
 "Homepage" = "https://github.com/yuanqimanong/IPClick"
 "Repository" = "https://github.com/yuanqimanong/IPClick"

@@ -43,7 +43,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen --all-groups
+        run: uv sync --frozen --all-groups --all-extras
 
       - name: Lint / format / types / tests
         run: |

@@ -141,6 +141,15 @@ level = "strict"    # strict/moderate/off
 # 关闭后探活会收到 UNIMPLEMENTED。
 health_check = true
 
+# Prometheus 指标端点。需要可选依赖：pip install "ipclick[metrics]"
+# 默认关闭：指标端点通常比业务端口设防更少，应由部署方显式决定是否开、开在哪。
+metrics_enabled = false
+metrics_port = 9528
+# 容器内 Prometheus 从外部抓取，所以默认监听所有网卡；
+# 若只允许本机抓取（如通过 sidecar），改成 127.0.0.1
+metrics_host = "0.0.0.0"
+
+
 # ================ 日志配置 [LOG] ================
 [LOG]
 # 日志级别 (debug/info/warn/error)

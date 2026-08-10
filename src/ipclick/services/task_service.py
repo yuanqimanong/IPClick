@@ -14,6 +14,7 @@ from ipclick.dto.models import METHOD_MAP, IPClickAdapter
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, URLNotAllowedError
+from ipclick.metrics import Metrics, get_metrics
 from ipclick.utils import json_hook
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
@@ -49,6 +50,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
         self._adapter_cache: dict[str, DownloaderAdapter] = {}
         self._cache_lock: threading.Lock = threading.Lock()
+        self._metrics: Metrics = get_metrics()
 
         # 目标 URL 准入策略（SSRF 防护）
         self.url_policy: URLPolicy = URLPolicy.from_config(dict(self.config.get("SECURITY", {})))
@@ -108,33 +110,50 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         """
         log.info(f"Received request: {request.uuid} for URL: {request.url}")
         start_time = time.monotonic()
-        adapter_name = "unknown"
+        method_name = METHOD_MAP.get(request.method, "GET")
 
+        # 适配器名必须在进入 track_request 之前解析：上下文管理器在进入时就
+        # 固定了标签值，放在 try 里面赋值的话所有指标都会记成 "unknown"。
+        # 枚举值非法时用 "unknown" 是正确的——下面的 from_pb 会抛错并记为拒绝。
         try:
-            adapter_member = IPClickAdapter.from_pb(request.adapter)
-            adapter_name = adapter_member.display_name
-            adapter = self._get_cached_adapter(adapter_name)
+            adapter_name = IPClickAdapter.from_pb(request.adapter).display_name
+        except ValueError:
+            adapter_name = "unknown"
 
-            validate_url(request.url, self.url_policy)
+        # 注意：指标标签里绝不放 URL 或目标主机——爬虫场景下那是无界基数，
+        # 会把 Prometheus 撑爆，同时也等于在指标端点上公开抓取目标。
+        with self._metrics.track_request(adapter_name, method_name) as metric_ctx:
+            try:
+                adapter_member = IPClickAdapter.from_pb(request.adapter)
+                adapter_name = adapter_member.display_name
+                adapter = self._get_cached_adapter(adapter_name)
 
-            response = self._execute_download(adapter, request)
-            grpc_response = self._build_grpc_response(request, response)
+                validate_url(request.url, self.url_policy)
 
-        except URLNotAllowedError as e:
-            log.warning(f"Request {request.uuid} rejected: {e}")
-            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-            context.set_details(str(e))
-            grpc_response = self._build_error_response(request, str(e))
-        except (AdapterError, ValueError) as e:
-            log.warning(f"Request {request.uuid} invalid: {e}")
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            grpc_response = self._build_error_response(request, str(e))
-        except Exception as e:
-            # 任何未预期的异常都不应该让 RPC 以 UNKNOWN + 堆栈的形式返回，
-            # 调用方拿不到结构化信息，服务端也可能泄漏内部路径。
-            log.exception(f"Request {request.uuid} failed unexpectedly: {e}")
-            grpc_response = self._build_error_response(request, f"内部错误: {type(e).__name__}")
+                response = self._execute_download(adapter, request)
+                grpc_response = self._build_grpc_response(request, response)
+
+            except URLNotAllowedError as e:
+                log.warning(f"Request {request.uuid} rejected: {e}")
+                self._metrics.record_rejected("url_not_allowed")
+                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                context.set_details(str(e))
+                grpc_response = self._build_error_response(request, str(e))
+            except (AdapterError, ValueError) as e:
+                log.warning(f"Request {request.uuid} invalid: {e}")
+                self._metrics.record_rejected("invalid_argument")
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(str(e))
+                grpc_response = self._build_error_response(request, str(e))
+            except Exception as e:
+                # 任何未预期的异常都不应该让 RPC 以 UNKNOWN + 堆栈的形式返回，
+                # 调用方拿不到结构化信息，服务端也可能泄漏内部路径。
+                log.exception(f"Request {request.uuid} failed unexpectedly: {e}")
+                self._metrics.record_rejected("internal_error")
+                grpc_response = self._build_error_response(request, f"内部错误: {type(e).__name__}")
+
+            metric_ctx["status_code"] = grpc_response.status_code
+            metric_ctx["size"] = len(grpc_response.content)
 
         elapsed_ms = int((time.monotonic() - start_time) * 1000)
         grpc_response.response_time_ms = elapsed_ms

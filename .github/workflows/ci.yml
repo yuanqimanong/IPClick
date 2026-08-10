@@ -34,7 +34,8 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --frozen --all-groups
+        # --all-extras：装上可选的 metrics 依赖，否则相关测试会被整体跳过
+        run: uv sync --frozen --all-groups --all-extras
 
       - name: Lint (ruff)
         run: uv run ruff check src/ tests/

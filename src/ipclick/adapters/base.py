@@ -7,6 +7,7 @@ from typing import Any
 
 from ipclick.adapters.settings import DEFAULT_RETRY_STATUS_CODES, AdapterSettings
 from ipclick.dto.response import Response
+from ipclick.metrics import get_metrics
 from ipclick.utils.log_util import log
 
 
@@ -91,6 +92,7 @@ def retry(max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_
                         and not (allowed and status in allowed)
                     ):
                         sleep_time = _backoff(attempt, base_delay, exponent, max_backoff)
+                        get_metrics().record_retry(getattr(self, "adapter_name", "unknown"), "status_code")
                         log.warning(
                             f"Download {url} returned {status}, "
                             f"retrying {attempt + 1}/{max_retries} in {sleep_time:.1f}s..."
@@ -107,6 +109,7 @@ def retry(max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_
                         return Response.error_response(url, e)
 
                     sleep_time = _backoff(attempt, base_delay, exponent, max_backoff)
+                    get_metrics().record_retry(getattr(self, "adapter_name", "unknown"), "exception")
                     # 原来这行日志裹在 `if hasattr(self, "logger")` 里，而适配器
                     # 从来没有 logger 属性，等于重试全程静默。
                     log.warning(

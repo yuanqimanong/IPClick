@@ -12,6 +12,7 @@ from ipclick.config_loader import load_config
 from ipclick.dto.proto import task_pb2_grpc
 from ipclick.exceptions import ConfigError
 from ipclick.health import HealthReporter
+from ipclick.metrics import get_metrics
 from ipclick.services import TaskService
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import LogUtil, log
@@ -38,9 +39,9 @@ class IPClickServer:
         )
         self.server: Server | None = None
         self.task_service: TaskService | None = None
-        self.health: HealthReporter = HealthReporter(
-            enabled=bool(dict(self.config.get("MONITOR", {})).get("health_check", True))
-        )
+        monitor_config = dict(self.config.get("MONITOR", {}))
+        self.health: HealthReporter = HealthReporter(enabled=bool(monitor_config.get("health_check", True)))
+        self._monitor_config: dict[str, object] = monitor_config
         log.info("IPClickServer initialized")
 
     def start(self, host: str | None = None, port: int | None = None) -> None:
@@ -102,6 +103,10 @@ class IPClickServer:
             if bound_port == 0:
                 raise RuntimeError(f"Failed to bind to address {listen_addr}")
 
+            # 指标端点走独立 HTTP 端口（Prometheus 生态惯例），在 gRPC 之前起，
+            # 这样即便业务端口起不来也能看到进程状态
+            self._start_metrics_server()
+
             # 启动服务器
             self.server.start()
             # 只有真正 start() 之后才宣告可服务，避免上游在还没监听时就打流量进来
@@ -131,6 +136,14 @@ class IPClickServer:
             log.exception(f"Failed to start server: {e}")
             self.stop()
             raise
+
+    def _start_metrics_server(self) -> None:
+        """按 [MONITOR] 配置启动 Prometheus 指标端点。"""
+        if not bool(self._monitor_config.get("metrics_enabled", False)):
+            return
+        port = int(self._monitor_config.get("metrics_port", 9528) or 9528)  # pyright: ignore[reportArgumentType]
+        host = str(self._monitor_config.get("metrics_host", "0.0.0.0") or "0.0.0.0")
+        get_metrics().start_http_server(port, host)
 
     def _setup_signal_handlers(self):
         """设置信号处理器"""
