@@ -59,6 +59,16 @@ P3 扩展传输能力，P4 做集群，P5 补齐适配器，P6 加限流与可�
 - CI 增加 `playwright install --with-deps chromium`，让浏览器渲染用例在 CI 上
   真的跑起来，而不是静默 skip。
 
+### 新增（P7）
+
+- **TLS / mTLS**（`[SECURITY.tls]`）：链路加密与双向证书认证。四个建连点全覆盖
+  ——同步客户端、异步客户端、服务端绑定、集群健康探活。默认关闭以兼容旧部署，
+  监听非回环地址却没开时会打显著告警。
+  `require_client_cert` 却不配 `ca_file` 是硬错误，不静默降级。
+- **断点续传**（`ipclick.resume`）：`download_to_file()` / `iter_resumable()`，
+  中断后用 HTTP Range 接着下。带 `If-Range` 校验，资源变了就丢掉重来而不是把两个
+  版本拼在一起；服务端不支持 Range 时退化成整体重下。
+
 ### 新增（P6）
 
 - **按 host 的并发与 QPS 限制**（`[DOWNLOADER.concurrency]` /

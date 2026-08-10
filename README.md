@@ -22,6 +22,7 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 - **自动重试**：内置请求重试机制，支持指数退避 + 抖动，并可按状态码重试
 - **按 host 限流**：服务端按目标域名严格限制并发数与 QPS，避免把单个站点打爆
 - **流式下载**：大文件分片传输，服务端与客户端都不需要把整个响应体驻留内存
+- **断点续传**：中断后用 HTTP Range 接着下，`If-Range` 保证不会拼接两个版本
 - **批量请求**：一次 RPC 处理多个任务，结果按完成顺序流式返回
 - **异步客户端**：基于 `grpc.aio` 的 `AsyncDownloader`，与同步版接口对应
 - **令牌鉴权**：gRPC 标准 Bearer 令牌，支持环境变量注入与多令牌轮换
@@ -216,6 +217,35 @@ with downloader.stream("https://example.com/big.zip") as resp:
 
 > 流式路径**不做重试** —— 重试要么得缓存已发出的分片、要么让调用方看到重复数据，
 > 两者都不可接受。流式请求失败就是失败，由调用方决定是否重来。
+
+### 断点续传
+
+`stream()` 中途断了要从头再来。大文件抓取里这最疼——下到 90% 断线，前面全白费。
+`download_to_file()` 在流式通路上做 Range 续传：
+
+```python
+from ipclick import Downloader
+from ipclick.resume import download_to_file
+
+with Downloader() as d:
+    result = download_to_file(
+        d, "https://example.com/big.zip", "big.zip",
+        max_attempts=5,
+        chunk_callback=lambda done, total: print(f"{done}/{total}"),
+    )
+    print(result.total_bytes, f"（发了 {result.attempts} 次请求）")
+```
+
+不落盘的版本是 `iter_resumable()`，直接产出分片。
+
+**它为什么不只是"断了带 Range 重来"**：如果目标文件在两次请求之间变了，那样会把
+新版本的后半段接到旧版本的前半段上，拼出一个既不是旧版也不是新版、而且**校验不
+出来**的文件——比下载失败严重得多。所以每次续传都带 `If-Range`（ETag，没有就用
+Last-Modified）：资源没变服务端回 206 接着写，变了回 200 就丢掉重来。
+
+服务端不支持 Range（没有 `Accept-Ranges: bytes`）时自动退化成整体重下，不会悄悄
+产出损坏文件。`iter_resumable()` 遇到资源变化会直接抛错——分片已经交给调用方了
+收不回来，继续下去只会让它拿到两个版本的混合体。
 
 ### 批量请求
 
