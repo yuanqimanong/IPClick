@@ -4,8 +4,8 @@
 
 ## [未发布]
 
-P1–P5 五个阶段的开发成果。P1 让存量配置真正生效，P2 补安全与可运维，
-P3 扩展传输能力，P4 做集群，P5 补齐适配器。
+P1–P6 六个阶段的开发成果。P1 让存量配置真正生效，P2 补安全与可运维，
+P3 扩展传输能力，P4 做集群，P5 补齐适配器，P6 加限流与可插拔浏览器引擎。
 
 ### 新增
 
@@ -58,6 +58,34 @@ P3 扩展传输能力，P4 做集群，P5 补齐适配器。
   "没装"和"没实现"的处理方式完全不同。
 - CI 增加 `playwright install --with-deps chromium`，让浏览器渲染用例在 CI 上
   真的跑起来，而不是静默 skip。
+
+### 新增（P6）
+
+- **按 host 的并发与 QPS 限制**（`[DOWNLOADER.concurrency]` /
+  `[DOWNLOADER.rate_limit]`）。并发用信号量（硬上限），速率用令牌桶（允许突发），
+  都按 host 独立计数，默认关闭。对 `Send` / `SendStream` / `SendBatch` 都生效；
+  流式请求的额度持有到整条流结束。空闲 host 条目会回收——爬虫会碰到无穷多域名，
+  只增不减就是一条稳定的内存泄漏。
+  超时抛 `HostLimitTimeout`（gRPC `RESOURCE_EXHAUSTED`），不伪装成网络故障。
+  ⚠️ 服务端是一请求一线程，排队会占 worker 线程，README 已写明取舍。
+- **浏览器引擎可插拔**，新增三个引擎，共四个：
+  - `camoufox`（Firefox，自带完整指纹伪装）
+  - `patchright`（Chromium，Playwright 的反检测分支）
+  - `playwright`（原版）
+  - `DrissionPage`（CDP 直连本机 Chrome）
+
+  前三个都产出 `playwright.async_api.Browser`，共用同一套线程模型、上下文隔离与
+  资源拦截；DrissionPage 是另一套 API，单独实现但对外契约一致。
+- **`[BROWSER].engine` 与平台默认**。`auto`（默认）在 Windows 上选 DrissionPage、
+  在 Linux/macOS 上选 Camoufox。新增 protobuf 枚举 `CAMOUFOX` / `PATCHRIGHT` /
+  `BROWSER`，其中 `BROWSER` 表示"渲染就行，引擎由服务端定"。
+
+### 修复（P6）
+
+- **camoufox 下不再强行覆盖 viewport / User-Agent**。它自己生成一整套自洽指纹，
+  再盖一层只会自相矛盾，反而比不伪装更容易被识别。
+- **DrissionPage 的按请求代理改为报错而非静默忽略**。它的代理是浏览器进程级的，
+  启动后改不了；默默忽略等于让请求从错误的出口 IP 发出去。
 
 ### 修复
 

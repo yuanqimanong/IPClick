@@ -13,7 +13,8 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 
 - **多适配器支持**：内置 `curl_cffi`、`httpx`、`requests`、`playwright` 适配器，并可注册自定义适配器
 - **浏览器指纹伪装**：基于 `curl_cffi` 实现浏览器指纹模拟，有效绕过反爬检测
-- **浏览器渲染**：`playwright` 适配器起真实浏览器执行 JS，拿到渲染后的 DOM
+- **浏览器渲染**：起真实浏览器执行 JS，四个引擎可选（camoufox / patchright /
+  playwright / DrissionPage），默认按平台挑
 - **集群与故障转移**：多节点客户端，支持轮询 / 随机 / 加权均衡、健康探测与自动换节点
 - **gRPC 通信**：使用 gRPC 协议进行高效的客户端-服务端通信
 - **连接复用**：客户端复用 gRPC channel，服务端复用适配器与 HTTP 连接池
@@ -42,19 +43,25 @@ pip install ipclick
 可选功能按需安装：
 
 ```bash
-pip install "ipclick[metrics]"    # Prometheus 指标
-pip install "ipclick[requests]"   # requests 适配器
-pip install "ipclick[browser]"    # playwright 浏览器渲染适配器
-pip install "ipclick[all]"        # 以上全部
+pip install "ipclick[metrics]"      # Prometheus 指标
+pip install "ipclick[requests]"     # requests 适配器
+pip install "ipclick[camoufox]"     # 浏览器渲染：Firefox 反检测（Linux/macOS 默认）
+pip install "ipclick[drissionpage]" # 浏览器渲染：CDP 直连（Windows 默认）
+pip install "ipclick[patchright]"   # 浏览器渲染：Chromium 反检测
+pip install "ipclick[browser]"      # 浏览器渲染：原版 playwright
+pip install "ipclick[all]"          # 以上全部
 ```
 
-`browser` 还需要一个浏览器内核。二选一：
+浏览器引擎装完 Python 包之后还要准备浏览器本体：
 
 ```bash
-playwright install chromium
+python -m camoufox fetch        # camoufox：下载它自己的 Firefox
+patchright install chromium     # patchright
+playwright install chromium     # playwright
+# DrissionPage 用本机已装的 Chrome/Chromium，不用额外下载
 ```
 
-或复用系统已有的（省掉约 150MB 下载），在配置里指向它：
+playwright / patchright 也可以复用系统已有的浏览器（省掉约 150MB 下载）：
 
 ```toml
 [BROWSER]
@@ -262,17 +269,21 @@ from ipclick import IPClickAdapter, downloader
 response = downloader.get("https://httpbin.org/get", adapter=IPClickAdapter.HTTPX)
 ```
 
-| 适配器 | 指纹伪装 | HTTP/2 | JS 渲染 | 安装 |
-|---|---|---|---|---|
-| `curl_cffi`（默认） | ✅ | ✅ | ❌ | 内置 |
-| `httpx` | ❌ | ✅ | ❌ | 内置 |
-| `requests` | ❌ | ❌ | ❌ | `ipclick[requests]` |
-| `playwright` | 真实浏览器 | ✅ | ✅ | `ipclick[browser]` |
+| 适配器 | 反检测 | JS 渲染 | 安装 |
+|---|---|---|---|
+| `curl_cffi`（默认） | TLS 指纹伪装 | ❌ | 内置 |
+| `httpx` | ❌ | ❌ | 内置 |
+| `requests` | ❌ | ❌ | `ipclick[requests]` |
+| `browser` | 由服务端引擎决定 | ✅ | 见下 |
+| `camoufox` | Firefox + 完整指纹伪装 | ✅ | `ipclick[camoufox]` |
+| `patchright` | Chromium，Playwright 反检测分支 | ✅ | `ipclick[patchright]` |
+| `playwright` | ❌（原版，最稳） | ✅ | `ipclick[browser]` |
+| `DrissionPage` | Chromium，CDP 直连 | ✅ | `ipclick[drissionpage]` |
 
 ### 浏览器渲染
 
-页面内容全靠 JS 生成时，HTTP 适配器拿到的 HTML 里什么都没有。`playwright`
-适配器会起一个真实浏览器把页面跑完，返回渲染后的 DOM：
+页面内容全靠 JS 生成时，HTTP 适配器拿到的 HTML 里什么都没有。浏览器适配器会起
+一个真实浏览器把页面跑完，返回渲染后的 DOM：
 
 ```python
 from ipclick import Downloader, IPClickAdapter
@@ -280,12 +291,54 @@ from ipclick import Downloader, IPClickAdapter
 with Downloader() as d:
     resp = d.get(
         "https://example.com/spa",
-        adapter=IPClickAdapter.PLAYWRIGHT,
+        # BROWSER = "渲染就行，引擎由服务端定"
+        adapter=IPClickAdapter.BROWSER,
         # 声明式的等待与渲染选项
         automation_config='{"wait_for_selector": "#content", "scroll_to_bottom": true}',
     )
     print(resp.text)          # 渲染后的 DOM
 ```
+
+#### 引擎选择
+
+四个引擎。前三个都走 Playwright API，共用同一套渲染代码；DrissionPage 走 CDP
+直连，是另一套实现，但对外契约一致。
+
+| 引擎 | 内核 | 特点 | 额外准备 |
+|---|---|---|---|
+| `camoufox` | Firefox | 反检测最彻底，自带完整指纹伪装 | `python -m camoufox fetch` |
+| `patchright` | Chromium | Playwright 反检测分支，API 全兼容 | `patchright install chromium` |
+| `playwright` | 三种内核 | 原版，最稳、行为最可预期 | `playwright install chromium` |
+| `DrissionPage` | Chromium | CDP 直连本机 Chrome，不额外下浏览器 | 本机已装 Chrome/Chromium |
+
+`[BROWSER].engine` 决定 `adapter=BROWSER` 用哪个，默认 `auto` **按平台选**：
+
+- **Windows** → `DrissionPage`（基本都装了 Chrome，最省事）
+- **Linux / macOS** → `camoufox`（自带 Firefox，无头服务器上更好伺候）
+
+```toml
+[BROWSER]
+engine = "auto"     # 或 camoufox / patchright / playwright / drissionpage
+```
+
+客户端也可以直接点名某个引擎（`adapter=IPClickAdapter.CAMOUFOX` 等），这时
+`[BROWSER].engine` 不生效——点名就是点名。
+
+各引擎的差异，挑要紧的说：
+
+- **camoufox 自己管指纹**。它会生成一整套自洽的 UA / 屏幕 / 字体 / WebGL 指纹，
+  所以 `[BROWSER].user_agent` 和 `viewport` 对它无效（强行覆盖只会和它给的指纹
+  自相矛盾，反而更容易被认出来）。要调就用它认识的 `locale` / `humanize` / `geoip`。
+- **camoufox 更吃内存**。Firefox 加一整套扩展，单个 context 的开销明显高于
+  Chromium 系。内存 ≤4GB 的机器建议把 `max_pages` 设成 1~2，否则会开始换页，
+  请求从几秒变成几分钟。
+- **DrissionPage 不支持按请求指定代理**。它的代理是浏览器进程级的，启动后改不了，
+  所以请求里带 `proxy=` 会直接抛 `ValidationError` 而不是被默默忽略——对一个代理
+  服务来说，从错误的出口 IP 发出去比报错严重得多。要用代理请配
+  `[BROWSER.proxy].gateway`，或换 camoufox / patchright / playwright。
+- **DrissionPage 的隔离弱一些**。它没有 BrowserContext，同一浏览器里所有 tab 共享
+  profile。这里用 `--incognito` 启动、每请求一个用完即关的 tab、并在关闭前清一次
+  cookie，但仍不如 Playwright 的 context 干净。
 
 `automation_config` 支持的键：
 
@@ -410,16 +463,19 @@ IPClick/
 │       ├── auth.py              # 服务端令牌鉴权拦截器
 │       ├── health.py            # grpc.health.v1 健康检查
 │       ├── metrics.py           # Prometheus 指标（可选依赖）
+│       ├── limiter.py           # 按 host 的并发与 QPS 闸门
 │       ├── exceptions.py        # 异常层次
 │       ├── py.typed             # 类型标注标记
 │       ├── adapters/            # 下载器适配器
 │       │   ├── base.py          # 适配器基类与重试装饰器
 │       │   ├── settings.py      # [DOWNLOADER] 配置
 │       │   ├── browser_settings.py  # [BROWSER] 配置
+│       │   ├── browser_engines.py   # 引擎选择与启动（含平台默认）
 │       │   ├── curl_cffi_adapter.py
 │       │   ├── httpx_adapter.py
 │       │   ├── requests_adapter.py
-│       │   ├── playwright_adapter.py
+│       │   ├── browser_adapter.py   # playwright / patchright / camoufox
+│       │   ├── drission_adapter.py  # DrissionPage（CDP 直连）
 │       │   └── registry.py      # 适配器注册表
 │       ├── cluster/             # 集群客户端
 │       │   ├── node.py          # 节点模型与 [CLUSTER] 配置
@@ -722,8 +778,8 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 | `[GENERAL]` | ⚠️ `debug` 生效；`mode` 无消费方 |
 | `[CLUSTER]` | ⚠️ `load_balancer` / `nodes` / 阈值生效；`db_uri` 无消费方 |
 
-> `[DOWNLOADER]` 的限速（`rate_limit`）、分块下载（`chunk`）、临时存储（`storage`）
-> 依赖真正的流式传输通路，已从默认配置移除，待流式下载实现后再引入（P3）。
+> `[DOWNLOADER]` 的分块下载（`chunk`）、临时存储（`storage`）尚未实现，已从默认
+> 配置移除。限速（`rate_limit`）已在 P6 实现，见「按 host 限流」。
 
 ### 功能
 
@@ -732,10 +788,8 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 - **传输加密 / mTLS**：已支持令牌鉴权，但 gRPC 仍是 `insecure_channel`（明文）。
   令牌在不受信任的网络上会被窃听，请在 TLS 终端（如 nginx / service mesh）之后部署，
   或等待后续的 mTLS 支持。
-- **适配器**：`IPClickAdapter` 枚举列出 6 种，已实现 4 种——`curl_cffi`、`httpx`、
-  `requests`、`playwright`。`DrissionPage` 与 `undetected_chromedriver` 未实现，
-  请求到会抛 `AdapterError`：两者都基于 selenium + chromedriver，能力与 `playwright`
-  高度重叠，主要卖点是反检测规避，收益不足以抵消维护成本。
+- **`undetected_chromedriver` 未实现**：它基于 selenium + chromedriver，能力与
+  patchright / camoufox 高度重叠，收益不足以抵消维护成本。请求到会抛 `AdapterError`。
 - **分块下载与临时存储**：`[DOWNLOADER]` 里的 `chunk` / `storage` 尚未实现。
   流式通路已经就绪，这两项可以在其上实现，但目前还没做。
 - **限流只在单机内生效**：`per_host_max_concurrent` / `per_host_qps` 是每个服务端
@@ -758,7 +812,8 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 | **P3** 能力扩展 | 异步客户端 ✅、批量 RPC ✅、真流式下载 ✅（限速 / 分块仍待做） | ✅ 已完成 |
 | **P4** 集群 | 节点池 ✅、负载均衡 ✅、健康探测 ✅、故障转移 ✅、只读状态页 ✅ | ✅ 已完成 |
 | **P5** 适配器 | `requests` ✅、`playwright` ✅（连带 `[BROWSER]` 与浏览器渲染） | ✅ 已完成 |
-| **P6** 待定 | mTLS、服务发现、限速 / 分块下载、Cookie 持久化 | 计划中 |
+| **P6** 限流与引擎 | 按 host 并发 / QPS 限制 ✅、浏览器引擎可插拔（camoufox / patchright / DrissionPage）✅ | ✅ 已完成 |
+| **P7** 待定 | mTLS、服务发现、分块下载、Cookie 持久化 | 计划中 |
 
 ## 🛠️ 开发
 

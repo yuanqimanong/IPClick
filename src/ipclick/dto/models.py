@@ -18,6 +18,12 @@ class IPClickAdapter(Enum):
     DRISSIONPAGE = (task_pb2.DRISSIONPAGE, "DrissionPage")
     UC = (task_pb2.UC, "undetected_chromedriver")
     PLAYWRIGHT = (task_pb2.PLAYWRIGHT, "playwright")
+    CAMOUFOX = (task_pb2.CAMOUFOX, "camoufox")
+    PATCHRIGHT = (task_pb2.PATCHRIGHT, "patchright")
+    #: "用浏览器渲染就行，引擎由服务端定"。服务端按 [BROWSER].engine 解析，
+    #: 默认按平台选：Windows -> DrissionPage，Linux/macOS -> Camoufox。
+    #: 客户端不必关心服务端装了哪个内核。
+    BROWSER = (task_pb2.BROWSER, "browser")
 
     def __init__(self, pb_value: int, display_name: str):
         self.pb_value = pb_value

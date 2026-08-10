@@ -1,18 +1,21 @@
-"""playwright 浏览器渲染适配器。
+"""浏览器渲染适配器（Playwright 系）。
 
-``IPClickAdapter`` 枚举一直声明着 ``playwright``，但从来没有实现。这里把它补上，
-同时让 ``[BROWSER]`` 配置节第一次真正有消费方。
+覆盖三个引擎——``playwright`` / ``patchright`` / ``camoufox``。它们拉起浏览器的
+方式不同（见 :mod:`ipclick.adapters.browser_engines`），但拿到的都是同一种
+``playwright.async_api.Browser``，所以下面这套线程模型、上下文隔离、资源拦截
+完全共用。DrissionPage 是另一套 API，单独在
+:mod:`ipclick.adapters.drission_adapter`。
 
 **它解决的问题**：curl_cffi / httpx / requests 拿到的是服务端返回的原始 HTML。
-对于内容全靠 JS 渲染出来的页面，那份 HTML 里什么都没有。这个适配器起一个真正的
-浏览器把页面跑完，返回渲染后的 DOM。
+对于内容全靠 JS 渲染出来的页面，那份 HTML 里什么都没有。这里起一个真正的浏览器
+把页面跑完，返回渲染后的 DOM。
 
 **代价**：一次请求几百毫秒到几秒，每个页面几十上百 MB 内存。能用 HTTP 适配器
 解决的就别用它。
 
 线程模型
 --------
-playwright 的同步 API 绑定创建它的线程，而 gRPC 服务端的请求落在线程池里的任意
+Playwright 的同步 API 绑定创建它的线程，而 gRPC 服务端的请求落在线程池里的任意
 线程上——直接用同步 API 必然出问题。这里改用异步 API，跑在一个专属线程的事件
 循环上：所有请求都跨线程投递到那个循环，浏览器实例始终只被一个线程碰。
 顺带的好处是多个页面能在同一个循环里并发渲染，而不是被串行化。
@@ -33,26 +36,18 @@ from dataclasses import dataclass
 import json as jsonlib
 import threading
 from typing import Any
-from urllib.parse import urlencode, urlparse, urlunparse
 
 from typing_extensions import override
 
+from ipclick.adapters import browser_engines
 from ipclick.adapters.base import DownloaderAdapter, retry
 from ipclick.adapters.browser_settings import BLOCKABLE_RESOURCES, WAIT_UNTIL_CHOICES, BrowserSettings
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError
 from ipclick.utils.log_util import log
+from ipclick.utils.url_util import merge_query_params
 
-
-_async_playwright: Any
-
-try:
-    from playwright.async_api import async_playwright as _async_playwright
-except ImportError:  # pragma: no cover - 取决于安装环境
-    _async_playwright = None
-
-PLAYWRIGHT_AVAILABLE: bool = _async_playwright is not None
 
 #: 浏览器导航只能是 GET。其余方法请走 HTTP 适配器。
 _SUPPORTED_METHODS = frozenset({"GET"})
@@ -68,8 +63,9 @@ class _BrowserWorker:
     实例化适配器都不会拉起一个进程。
     """
 
-    def __init__(self, settings: BrowserSettings):
+    def __init__(self, settings: BrowserSettings, engine: str):
         self._settings: BrowserSettings = settings
+        self._engine: str = engine
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._start_lock: threading.Lock = threading.Lock()
@@ -103,7 +99,7 @@ class _BrowserWorker:
                 ready.set()
                 loop.run_forever()
 
-            self._thread = threading.Thread(target=run, name="ipclick-playwright", daemon=True)
+            self._thread = threading.Thread(target=run, name=f"ipclick-{self._engine}", daemon=True)
             self._thread.start()
             ready.wait()
             self._loop = created["loop"]
@@ -118,33 +114,10 @@ class _BrowserWorker:
             if self._browser is not None:
                 return self._browser
 
-            s = self._settings
-            args = list(s.args)
-            if s.no_sandbox:
-                args += ["--no-sandbox", "--disable-dev-shm-usage"]
-
-            launch: dict[str, Any] = {"headless": s.headless}
-            if args:
-                launch["args"] = args
-            if s.executable_path:
-                launch["executable_path"] = s.executable_path
-
-            # 这里刻意**不**设启动级代理。playwright 文档里那个
-            # proxy={"server": "per-context"} 的写法是给旧版 chromium 的：现在
-            # 每个 context 单独设代理已经能直接生效，而一旦设了那个占位值，
-            # 没配代理的 context 会去连一个叫 "per-context" 的代理，
-            # 于是所有直连请求全部 ERR_PROXY_CONNECTION_FAILED。
-
-            self._playwright = await _async_playwright().start()
-            try:
-                self._browser = await getattr(self._playwright, s.kind).launch(**launch)
-            except Exception as e:
-                await self._playwright.stop()
-                self._playwright = None
-                raise AdapterError(f"浏览器启动失败（{s.kind}）：{e}") from e
-
-            self._semaphore = asyncio.Semaphore(s.max_pages)
-            log.info(f"playwright 浏览器已启动：{s.kind}, headless={s.headless}, 页面上限 {s.max_pages}")
+            launched = await browser_engines.launch(self._engine, self._settings)
+            self._playwright = launched.driver
+            self._browser = launched.browser
+            self._semaphore = asyncio.Semaphore(self._settings.max_pages)
             return self._browser
 
     def run(self, make_coro: Any, timeout: float) -> Any:
@@ -174,7 +147,7 @@ class _BrowserWorker:
         try:
             asyncio.run_coroutine_threadsafe(shutdown(), loop).result(timeout=_SHUTDOWN_TIMEOUT)
         except Exception as e:
-            log.warning(f"关闭 playwright 浏览器失败: {e}")
+            log.warning(f"关闭 {self._engine} 浏览器失败: {e}")
 
         loop.call_soon_threadsafe(loop.stop)
         if self._thread is not None:
@@ -292,8 +265,12 @@ class _RenderPlan:
     script: str | None = None
 
 
-class PlaywrightAdapter(DownloaderAdapter):
-    """基于 playwright 的浏览器渲染适配器。
+class BrowserAdapter(DownloaderAdapter):
+    """走 Playwright API 的浏览器渲染适配器（playwright / patchright / camoufox）。
+
+    三个引擎的差别只在"怎么把浏览器拉起来"，见
+    :mod:`ipclick.adapters.browser_engines`；拉起来之后拿到的都是同一种
+    ``playwright.async_api.Browser``，线程模型、上下文隔离、资源拦截全部共用。
 
     与 HTTP 适配器的差异（都是浏览器本身的限制，不是没写）：
 
@@ -302,23 +279,31 @@ class PlaywrightAdapter(DownloaderAdapter):
     - ``stream=True`` 无意义：渲染必须等页面跑完才有结果。
     """
 
-    adapter_name: str = "playwright"
+    adapter_name: str = "browser"
+
+    #: 子类固定用哪个引擎；None 表示听 [BROWSER].engine 的（含平台默认）
+    engine: str | None = None
 
     def __init__(
         self,
         settings: AdapterSettings | None = None,
         browser_settings: BrowserSettings | None = None,
     ):
-        if _async_playwright is None:
-            raise AdapterError('playwright is not installed. Install it with: pip install "ipclick[browser]"')
-
         resolved = browser_settings or BrowserSettings()
         if not resolved.enabled:
             raise AdapterError("浏览器渲染已被关闭（[BROWSER].enabled = false）")
 
+        engine = self.engine or browser_engines.resolve_engine(resolved.engine)
+        if engine not in browser_engines.PLAYWRIGHT_FAMILY:
+            # 只有 registry 绕过 get_adapter 直接实例化才会走到这里
+            raise AdapterError(f"{type(self).__name__} 不支持引擎 {engine!r}")
+        if not browser_engines.is_available(engine):
+            raise AdapterError(f"浏览器引擎 {engine!r} 不可用：{browser_engines.INSTALL_HINTS.get(engine, '缺少依赖')}")
+
         super().__init__(settings)
         self.browser_settings: BrowserSettings = resolved
-        self._worker: _BrowserWorker = _BrowserWorker(self.browser_settings)
+        self.resolved_engine: str = engine
+        self._worker: _BrowserWorker = _BrowserWorker(self.browser_settings, engine)
 
     # ------------------------------------------------------------------ #
     # 参数解析
@@ -372,11 +357,17 @@ class PlaywrightAdapter(DownloaderAdapter):
         else:
             raise ValidationError("block_resources 必须是数组")
 
-        context_options: dict[str, Any] = {
-            "viewport": s.viewport,
-            "ignore_https_errors": not verify,
-            "user_agent": s.user_agent or self._get_user_agent(),
-        }
+        context_options: dict[str, Any] = {"ignore_https_errors": not verify}
+        if self.resolved_engine in browser_engines.FINGERPRINT_MANAGED:
+            # camoufox 这类引擎自己生成一整套自洽的指纹（UA、屏幕、字体、WebGL…）。
+            # 在 context 上再盖一层 viewport / User-Agent 只会和它给出的指纹自相
+            # 矛盾——navigator.userAgent 说 Firefox、屏幕尺寸却对不上——反而比不
+            # 伪装更容易被识别。要改就去 [BROWSER] 里配 locale 等它认识的项。
+            if s.user_agent:
+                log.debug(f"{self.resolved_engine} 自带指纹伪装，忽略 [BROWSER].user_agent")
+        else:
+            context_options["viewport"] = s.viewport
+            context_options["user_agent"] = s.user_agent or self._get_user_agent()
         if headers:
             context_options["extra_http_headers"] = {k: str(v) for k, v in headers.items()}
 
@@ -390,7 +381,7 @@ class PlaywrightAdapter(DownloaderAdapter):
         page_timeout = timeout if timeout and timeout > 0 else s.page_load_timeout
 
         return _RenderPlan(
-            url=_with_params(url, params),
+            url=merge_query_params(url, params),
             context_options=context_options,
             cookies=_normalize_cookies(cookies, url),
             block_resources=block_resources,
@@ -477,14 +468,25 @@ class PlaywrightAdapter(DownloaderAdapter):
         self._worker.close()
 
 
-def _with_params(url: str, params: dict[str, Any] | None) -> str:
-    """把 params 合并进 URL 的 query。浏览器导航没有单独的 params 参数。"""
-    if not params:
-        return url
-    parsed = urlparse(url)
-    extra = urlencode({k: v for k, v in params.items() if v is not None}, doseq=True)
-    query = f"{parsed.query}&{extra}" if parsed.query else extra
-    return urlunparse(parsed._replace(query=query))
+class PlaywrightAdapter(BrowserAdapter):
+    """原版 Playwright。最稳、行为最可预期，没有反检测处理。"""
+
+    adapter_name: str = "playwright"
+    engine: str | None = "playwright"
+
+
+class PatchrightAdapter(BrowserAdapter):
+    """Playwright 的反检测分支，API 完全兼容。需要 ``patchright install chromium``。"""
+
+    adapter_name: str = "patchright"
+    engine: str | None = "patchright"
+
+
+class CamoufoxAdapter(BrowserAdapter):
+    """基于 Firefox 的反检测浏览器，自带指纹伪装。需要 ``python -m camoufox fetch``。"""
+
+    adapter_name: str = "camoufox"
+    engine: str | None = "camoufox"
 
 
 def _normalize_cookies(cookies: dict[str, Any] | str | None, url: str) -> list[dict[str, Any]]:
@@ -504,9 +506,18 @@ def _normalize_cookies(cookies: dict[str, Any] | str | None, url: str) -> list[d
     return [{"name": str(k), "value": str(v), "url": url} for k, v in pairs.items()]
 
 
-def is_available() -> bool:
-    """检查 playwright 是否可用"""
-    return PLAYWRIGHT_AVAILABLE
+#: 引擎名 -> 适配器类。registry 据此按需注册。
+ENGINE_ADAPTERS: dict[str, type[BrowserAdapter]] = {
+    "playwright": PlaywrightAdapter,
+    "patchright": PatchrightAdapter,
+    "camoufox": CamoufoxAdapter,
+}
 
 
-__all__ = ["PLAYWRIGHT_AVAILABLE", "PlaywrightAdapter", "is_available"]
+__all__ = [
+    "ENGINE_ADAPTERS",
+    "BrowserAdapter",
+    "CamoufoxAdapter",
+    "PatchrightAdapter",
+    "PlaywrightAdapter",
+]

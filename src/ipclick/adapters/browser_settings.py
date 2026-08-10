@@ -53,6 +53,11 @@ class BrowserSettings:
 
     enabled: bool = True
 
+    #: 渲染引擎：auto / camoufox / patchright / playwright / drissionpage。
+    #: auto 按平台选（Windows -> drissionpage，Linux/macOS -> camoufox），
+    #: 解析逻辑在 browser_engines.resolve_engine（放在那边是为了避免循环导入）。
+    engine: str = "auto"
+
     # 内核与启动
     kind: str = "chromium"
     headless: bool = True
@@ -92,6 +97,17 @@ class BrowserSettings:
     proxy_gateway: str | None = None
     proxy_bypass: tuple[str, ...] = field(default_factory=tuple)
 
+    # ---- 仅 camoufox ----
+    #: 伪装的语言环境，如 "zh-CN"。留空则由 camoufox 自行生成。
+    locale: str | None = None
+    #: 模拟人类的鼠标移动。True 用默认时长，也可以给一个秒数上限。
+    #: 会显著拖慢每次请求，默认关闭。
+    humanize: bool | float = False
+    #: 让时区 / 语言 / 经纬度与代理出口 IP 对上。
+    #: 只有配置级代理（proxy_gateway）能生效——请求级代理是在 context 上设的，
+    #: 那时指纹早就生成完了。
+    geoip: bool = False
+
     @property
     def viewport(self) -> dict[str, int]:
         return {"width": self.viewport_width, "height": self.viewport_height}
@@ -123,8 +139,16 @@ class BrowserSettings:
             _as_str_tuple(blocked, BLOCKABLE_RESOURCES) if blocked is not None else defaults.block_resources
         )
 
+        humanize_raw = config.get("humanize", defaults.humanize)
+        if isinstance(humanize_raw, bool):
+            humanize: bool | float = humanize_raw
+        else:
+            humanize = _as_float(humanize_raw, 0.0)
+            humanize = humanize if humanize > 0 else False
+
         return cls(
             enabled=bool(config.get("enabled", defaults.enabled)),
+            engine=str(config.get("engine", defaults.engine)).strip().lower() or defaults.engine,
             kind=kind,
             headless=bool(config.get("headless", defaults.headless)),
             executable_path=executable,
@@ -141,6 +165,9 @@ class BrowserSettings:
             allow_scripts=bool(config.get("allow_scripts", defaults.allow_scripts)),
             proxy_gateway=gateway,
             proxy_bypass=_as_str_tuple(proxy.get("bypass_list")),
+            locale=str(config.get("locale") or "").strip() or None,
+            humanize=humanize,
+            geoip=bool(config.get("geoip", defaults.geoip)),
         )
 
 

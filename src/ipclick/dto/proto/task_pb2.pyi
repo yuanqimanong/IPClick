@@ -15,6 +15,9 @@ class AdapterType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     DRISSIONPAGE: _ClassVar[AdapterType]
     UC: _ClassVar[AdapterType]
     PLAYWRIGHT: _ClassVar[AdapterType]
+    CAMOUFOX: _ClassVar[AdapterType]
+    PATCHRIGHT: _ClassVar[AdapterType]
+    BROWSER: _ClassVar[AdapterType]
 
 class HttpMethod(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -32,6 +35,9 @@ REQUESTS: AdapterType
 DRISSIONPAGE: AdapterType
 UC: AdapterType
 PLAYWRIGHT: AdapterType
+CAMOUFOX: AdapterType
+PATCHRIGHT: AdapterType
+BROWSER: AdapterType
 GET: HttpMethod
 POST: HttpMethod
 PUT: HttpMethod

@@ -15,8 +15,14 @@ enum AdapterType {
   HTTPX = 1;
   REQUESTS = 2;
   DRISSIONPAGE = 3;
-  UC = 4; // undetected-chromedriver
+  UC = 4; // undetected-chromedriver（未实现）
   PLAYWRIGHT = 5;
+  CAMOUFOX = 6;   // 基于 Firefox 的反检测浏览器，Playwright API 兼容
+  PATCHRIGHT = 7; // Playwright 的反检测分支，API 完全兼容
+  // "用浏览器渲染，具体引擎由服务端决定"。引擎取自 [BROWSER].engine，
+  // 默认按平台选：Windows -> DrissionPage，Linux/macOS -> Camoufox。
+  // 客户端不必关心服务端装了哪个内核。
+  BROWSER = 8;
 }
 
 // HTTP 方法枚举

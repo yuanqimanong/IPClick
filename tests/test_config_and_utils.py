@@ -100,9 +100,10 @@ class TestRegistry:
         assert get_default_adapter().adapter_name == "curl_cffi"
 
     def test_unimplemented_adapter_raises_adapter_error(self):
-        """枚举里宣称支持 6 种适配器，尚未实现的那些要给出清楚的报错。"""
+        """枚举里还留着 undetected_chromedriver，但没实现——要给出清楚的报错，
+        而不是静默回退到别的适配器。"""
         with pytest.raises(AdapterError, match="尚未支持"):
-            get_adapter("DrissionPage")
+            get_adapter("undetected_chromedriver")
 
     def test_error_lists_available_adapters(self):
         with pytest.raises(AdapterError, match="curl_cffi"):

@@ -270,7 +270,7 @@ class TestServerSideErrorMapping:
         server.start()
         try:
             with Downloader(host="127.0.0.1", port=port) as d, pytest.raises(AdapterError, match="尚未支持"):
-                d.get("http://example.com/x", adapter="DrissionPage", max_retries=0)
+                d.get("http://example.com/x", adapter="undetected_chromedriver", max_retries=0)
         finally:
             server.stop(grace=0).wait(timeout=5)
             service.cleanup()

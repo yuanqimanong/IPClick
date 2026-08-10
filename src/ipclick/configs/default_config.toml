@@ -134,10 +134,25 @@ per_host_burst = 0
 # 需要额外安装：pip install "ipclick[browser]"，再 playwright install chromium
 # （或把 executable_path 指向系统已有的浏览器，省掉那 150MB 下载）。
 [BROWSER]
-# 总开关。关掉后即使装了 playwright，请求 adapter = "playwright" 也会被拒绝——
+# 总开关。关掉后即使装了引擎，请求浏览器适配器也会被拒绝——
 # 浏览器渲染又重又是更大的攻击面，不需要时应该能一键关死。
 enabled = true
-# 内核：chromium / firefox / webkit
+
+# 渲染引擎。客户端请求 adapter = "browser"（通用）时用这里的设置决定引擎；
+# 客户端也可以直接点名 camoufox / patchright / playwright / DrissionPage。
+#   auto         按平台选：Windows -> drissionpage，Linux/macOS -> camoufox
+#   camoufox     Firefox 内核，反检测最彻底，自带指纹伪装
+#                pip install "ipclick[camoufox]" && python -m camoufox fetch
+#   patchright   Playwright 的反检测分支，API 完全兼容
+#                pip install "ipclick[patchright]" && patchright install chromium
+#   playwright   原版，最稳、行为最可预期，无反检测处理
+#                pip install "ipclick[browser]" && playwright install chromium
+#   drissionpage CDP 直连本机 Chrome，不额外下浏览器；Windows 上最省事
+#                pip install "ipclick[drissionpage]"
+engine = "auto"
+
+# 内核：chromium / firefox / webkit。只对 playwright / patchright 有意义
+# （camoufox 固定 Firefox，drissionpage 固定 Chromium）。
 browser = "chromium"
 # 无头模式（无 GUI 界面）
 headless = true
@@ -159,12 +174,25 @@ wait_until = "load"
 # 可选值：image media font stylesheet script xhr fetch websocket other
 block_resources = ["image", "media", "font"]
 # 同时打开的页面上限。无头浏览器每个页面几十上百 MB，不设上限很容易把机器打满。
+# ⚠️ camoufox 是 Firefox 加一整套扩展，单个 context 的内存开销明显高于 Chromium 系。
+#    内存紧张的机器（≤4GB）用 camoufox 时建议设成 1~2，否则会开始换页——请求
+#    从几秒变成几分钟，看起来像卡死。
 max_pages = 4
 # 是否允许请求携带 automation_script（在页面里执行任意 JS）。
 # ⚠️ 默认关闭。页面内的 JS 会自己发请求，[SECURITY] 那套 URL 策略（禁云元数据、
 # 禁内网）对它完全不起作用——放开它等于把 SSRF 防线让开一整条。
 # 只有在确认调用方全部可信时才打开。
 allow_scripts = false
+# ---- 以下三项只对 camoufox 生效 ----
+# 伪装的语言环境，如 "zh-CN"。留空则由 camoufox 自行生成。
+locale = ""
+# 模拟人类的鼠标移动。true 用默认时长，也可以写一个秒数上限（如 1.5）。
+# 会显著拖慢每次请求，默认关闭。
+humanize = false
+# 让时区 / 语言 / 经纬度与代理出口 IP 对上。只有下面的 gateway 能生效——
+# 按请求指定的代理是在 context 上设的，那时指纹早已生成完毕。
+geoip = false
+
 # 代理网关（覆盖系统代理）
 [BROWSER.proxy]
 gateway = ""                     # 例如 "http://127.0.0.1:8080"

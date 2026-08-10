@@ -15,7 +15,8 @@ IPClick 服务端会代替调用方去请求任意 URL。若服务端监听在 0
 from dataclasses import dataclass, field
 import ipaddress
 import socket
-from urllib.parse import urlsplit
+from typing import Any
+from urllib.parse import urlencode, urlparse, urlsplit, urlunparse
 
 from ipclick.exceptions import URLNotAllowedError
 
@@ -150,4 +151,23 @@ def validate_url(url: str, policy: URLPolicy | None = None) -> None:
             )
 
 
-__all__ = ["DEFAULT_ALLOWED_SCHEMES", "URLPolicy", "validate_url"]
+def merge_query_params(url: str, params: dict[str, Any] | None) -> str:
+    """把 params 合并进 URL 的 query。
+
+    浏览器导航没有单独的 params 参数，只能自己拼进 URL。注意是**合并**不是覆盖：
+    直接替换 query 会把 URL 里原有的参数弄丢。
+    """
+    if not params:
+        return url
+    parsed = urlparse(url)
+    extra = urlencode({k: v for k, v in params.items() if v is not None}, doseq=True)
+    query = f"{parsed.query}&{extra}" if parsed.query else extra
+    return urlunparse(parsed._replace(query=query))
+
+
+__all__ = [
+    "DEFAULT_ALLOWED_SCHEMES",
+    "URLPolicy",
+    "merge_query_params",
+    "validate_url",
+]
