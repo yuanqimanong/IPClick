@@ -9,6 +9,7 @@ from collections.abc import Iterable, Iterator
 import threading
 from typing import Any
 
+from ipclick.cluster.discovery import create_discovery
 from ipclick.cluster.node import ClusterConfig, NodeState
 from ipclick.cluster.pool import NodePool
 from ipclick.dto.models import DownloadResponse, DownloadTask, HttpMethod
@@ -45,7 +46,14 @@ class ClusterDownloader(ClientBase):
         self.cluster_config: ClusterConfig = cluster_config or ClusterConfig.from_config(
             dict(self.config.get("CLUSTER", {}))
         )
-        self.pool: NodePool = NodePool(self.cluster_config, start_probing=start_probing, tls=self.tls)
+        discovery, discovery_config = create_discovery(dict(self.config.get("CLUSTER", {})), self.cluster_config.nodes)
+        self.pool: NodePool = NodePool(
+            self.cluster_config,
+            start_probing=start_probing,
+            tls=self.tls,
+            discovery=discovery,
+            discovery_config=discovery_config,
+        )
 
         self._config_path: str | None = config_path
         self._token: str | None = token

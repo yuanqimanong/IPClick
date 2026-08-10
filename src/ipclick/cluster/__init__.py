@@ -20,6 +20,7 @@ from ipclick.cluster.balancer import (
     create_balancer,
 )
 from ipclick.cluster.client import ClusterDownloader
+from ipclick.cluster.discovery import DiscoveryConfig, DnsDiscovery, StaticDiscovery, create_discovery
 from ipclick.cluster.node import ClusterConfig, Node, NodeState, NodeStatus
 from ipclick.cluster.pool import NodePool
 from ipclick.cluster.status_page import StatusPageServer, render_page
@@ -28,6 +29,8 @@ from ipclick.cluster.status_page import StatusPageServer, render_page
 __all__ = [
     "ClusterConfig",
     "ClusterDownloader",
+    "DiscoveryConfig",
+    "DnsDiscovery",
     "LoadBalancer",
     "Node",
     "NodePool",
@@ -35,8 +38,10 @@ __all__ = [
     "NodeStatus",
     "RandomBalancer",
     "RoundRobinBalancer",
+    "StaticDiscovery",
     "StatusPageServer",
     "WeightedBalancer",
     "create_balancer",
+    "create_discovery",
     "render_page",
 ]

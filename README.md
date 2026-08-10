@@ -544,6 +544,21 @@ region = "cn-east"
 故障转移只在 `TransportError`（这个节点有问题）时发生。参数错误、鉴权失败换个
 节点还是一样的结果，直接上抛，不浪费尝试次数。
 
+**节点发现**（可选）：节点列表默认写死在配置里，扩缩容要改配置重启每一个客户端。
+换成 DNS 发现就不用了：
+
+```toml
+[CLUSTER.discovery]
+mode = "dns"
+dns_name = "ipclick.default.svc.cluster.local"   # K8s headless Service / Consul DNS
+port = 9527
+refresh_interval = 30
+```
+
+解析出的每条 A/AAAA 记录就是一个节点，后台随探活一起定期重解析。刷新时按地址
+复用已有节点的健康状态——直接重建会把连续计数清零，那样"连续 2 次失败才摘除"
+永远达不到，熔断和恢复双双失效。DNS 解析失败时沿用上一次的列表，不会把集群摘空。
+
 **只读状态页**（可选）：
 
 ```python
@@ -892,8 +907,9 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 
 ### 功能
 
-- **服务发现**：集群的节点列表来自静态配置，改了要重启。没有 DNS / etcd / Consul
-  之类的动态发现，`[CLUSTER].db_uri` 仍是预留配置。
+- **服务发现只支持 DNS**：`[CLUSTER.discovery]` 支持 `static` 与 `dns`。
+  etcd / Consul 的原生 API 没接（Consul 可以用它的 DNS 接口），
+  `[CLUSTER].db_uri` 仍是预留配置。
 - **`undetected_chromedriver` 未实现**：它基于 selenium + chromedriver，能力与
   patchright / camoufox 高度重叠，收益不足以抵消维护成本。请求到会抛 `AdapterError`。
 - **分块下载与临时存储**：`[DOWNLOADER]` 里的 `chunk` / `storage` 尚未实现。

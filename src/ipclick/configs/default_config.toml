@@ -43,6 +43,17 @@ nodes = [
     # { id = "node-101", address = "192.168.1.101:9527", region = "us-east-1", zone = "1a", weight = 100 },
 ]
 
+# ------- 节点发现 [CLUSTER.discovery] -------
+# 节点列表从哪来：
+#   static  上面的 nodes（默认）。扩缩容要改配置重启客户端。
+#   dns     解析一个域名，每条 A/AAAA 记录就是一个节点，后台定期重解析。
+#           K8s 的 headless Service、Consul DNS、云内网负载均衡域名都能直接用。
+[CLUSTER.discovery]
+mode = "static"
+dns_name = ""            # 例如 "ipclick.default.svc.cluster.local"
+port = 9527              # 解析出来的地址统一用这个端口
+refresh_interval = 30    # 重新解析间隔（秒）；0 = 只在启动时解析一次
+
 # ------- 集群状态页 [CLUSTER.status_page] -------
 # 只读页面：节点列表、健康状态、请求统计。不提供任何变更操作——
 # 运维变更请改配置文件，网页改配置等于再开一个高价值攻击面。
