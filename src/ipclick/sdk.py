@@ -17,6 +17,7 @@ from ipclick.exceptions import (
     TransportError,
     ValidationError,
 )
+from ipclick.limiter import HostLimitTimeout
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
 from ipclick.utils.secure_util import SecureUtil
@@ -218,6 +219,10 @@ class ClientBase:
         # 改参数没用，得改服务端部署，所以也不该伪装成一次网络抖动。
         if code is grpc.StatusCode.FAILED_PRECONDITION:
             return AdapterError(f"服务端无法处理该请求：{details}")
+        # 服务端的按 host 限流生效了。同样不是网络问题——要么降低发送速率，
+        # 要么调大 [DOWNLOADER] 里的 per_host 限额。
+        if code is grpc.StatusCode.RESOURCE_EXHAUSTED:
+            return HostLimitTimeout(f"服务端限流：{details}")
         return TransportError(f"gRPC 调用失败 [{code}]: {details}")
 
     def _build_task(

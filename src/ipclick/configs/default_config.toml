@@ -102,14 +102,32 @@ backoff_exponent = 2.0               # 退避指数（等待 = initial_backoff *
 initial_backoff = 1                  # 初始等待时间（秒）
 max_backoff = 30                     # 单次等待上限（秒，硬上限 300）
 retry_codes = [429, 500, 502, 503, 504]  # 触发重试的状态码；连接层异常总是会重试
-# 连接池
+# 连接池与按 host 的并发闸门
 [DOWNLOADER.concurrency]
 max_connections = 100           # 连接池总上限
 max_keepalive_connections = 20  # 保持长连接的上限
 
-# 说明：限速（rate_limit）、分块下载（chunk）、临时存储（storage）依赖真正的
-# 流式传输通路，当前的 protobuf 协议是整个响应体一条消息，无法支持。
-# 这些配置项已从默认配置移除，待流式下载实现后再引入，避免"配了却不生效"。
+# 单个目标 host 的并发上限（0 = 不限制）。严格限制：超出的请求在服务端排队。
+# ⚠️ 服务端是一请求一线程，排队会占着 worker 线程。把这个值设得很小、同时又有
+#    大量请求打向同一个 host 时，[SERVER].max_workers 要留够余量，否则其他 host
+#    的请求会跟着饿死。
+per_host_max_concurrent = 0
+# 等待额度的上限（秒）。超时返回 RESOURCE_EXHAUSTED，而不是无限期占着线程。
+per_host_wait_timeout = 30
+# host 条目空闲多久后回收（秒）。爬虫会碰到无穷多域名，不回收就是内存泄漏。
+per_host_idle_ttl = 300
+# 同时跟踪的 host 数上限，防御性兜底
+max_tracked_hosts = 10000
+
+# 按 host 的速率限制（令牌桶）
+[DOWNLOADER.rate_limit]
+# 单个 host 每秒最多发起几个请求（0 = 不限制）。可以是小数，如 0.5 表示两秒一个。
+per_host_qps = 0
+# 突发额度（桶容量）。0 = 取 ceil(per_host_qps)，即最多攒够一秒的量。
+per_host_burst = 0
+
+# 说明：分块下载（chunk）、临时存储（storage）尚未实现，已从默认配置移除，
+# 避免"配了却不生效"。
 
 # ------- 浏览器渲染配置 [BROWSER] -------
 # 供 playwright 适配器使用（adapter = "playwright"）。

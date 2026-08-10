@@ -19,6 +19,7 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 - **连接复用**：客户端复用 gRPC channel，服务端复用适配器与 HTTP 连接池
 - **代理支持**：灵活的代理配置，支持 HTTP/HTTPS 代理
 - **自动重试**：内置请求重试机制，支持指数退避 + 抖动，并可按状态码重试
+- **按 host 限流**：服务端按目标域名严格限制并发数与 QPS，避免把单个站点打爆
 - **流式下载**：大文件分片传输，服务端与客户端都不需要把整个响应体驻留内存
 - **批量请求**：一次 RPC 处理多个任务，结果按完成顺序流式返回
 - **异步客户端**：基于 `grpc.aio` 的 `AsyncDownloader`，与同步版接口对应
@@ -310,6 +311,42 @@ with Downloader() as d:
 >
 > 另外，渲染本身就会加载页面引用的子资源，同样不经过 URL 策略。介意的话把
 > `block_resources` 配严一些，并打开 `[SECURITY].block_private_networks`。
+
+### 按 host 限流
+
+服务端会代替调用方向外发请求。不加约束的话，一个批量任务就能对同一个站点瞬间
+打出几十上百个并发连接——对方大概率先限速再封 IP。两道闸门，都是**按 host 独立**
+计数，默认都关闭：
+
+```toml
+[DOWNLOADER.concurrency]
+# 单个 host 同时最多几个在途请求（0 = 不限制）。超出的在服务端排队。
+per_host_max_concurrent = 4
+# 等不到额度的上限（秒），超时返回 RESOURCE_EXHAUSTED
+per_host_wait_timeout = 30
+
+[DOWNLOADER.rate_limit]
+# 单个 host 每秒最多发起几个请求（0 = 不限制）。可以是小数：0.5 = 两秒一个。
+per_host_qps = 2
+# 突发额度（令牌桶容量）。0 = 取 ceil(per_host_qps)
+per_host_burst = 0
+```
+
+并发用信号量（硬保证），速率用令牌桶（允许突发）。取额度的顺序是**先并发槽、
+后令牌**：并发槽是要保证的上限，先拿住；令牌紧挨着真正的 HTTP 请求再取，这样
+"每秒 N 个"限的是真实发出去的请求，而不是进入排队的请求。
+
+限流对 `Send` / `SendStream` / `SendBatch` 都生效。流式请求的额度**持有到整条流
+结束**——只在建流时占额度等于没限住。
+
+> ⚠️ **这会占用 worker 线程。** 服务端是一请求一线程，排队等额度会占着那个
+> 线程。`per_host_max_concurrent` 设得很小、同时又有大量请求打向同一个 host 时，
+> 线程池会被排队的请求占满，其他 host 的请求也跟着饿死。所以等待有硬性上限
+> （`per_host_wait_timeout`），并且 `[SERVER].max_workers` 要留够余量。
+> 真要做到"排队不占线程"，得把服务端改成 `grpc.aio`，那是另一件事。
+
+超时会抛 `HostLimitTimeout`，而不是返回 `status_code == -1`：这是本机的限流策略
+生效了，不是网络故障，返回 -1 会让人去排查目标站点。
 
 ### 集群与故障转移
 
@@ -699,8 +736,11 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
   `requests`、`playwright`。`DrissionPage` 与 `undetected_chromedriver` 未实现，
   请求到会抛 `AdapterError`：两者都基于 selenium + chromedriver，能力与 `playwright`
   高度重叠，主要卖点是反检测规避，收益不足以抵消维护成本。
-- **限速与分块下载**：`[DOWNLOADER]` 里的 `rate_limit` / `chunk` / `storage` 尚未实现。
-  流式通路已经就绪，这几项可以在其上实现，但目前还没做。
+- **分块下载与临时存储**：`[DOWNLOADER]` 里的 `chunk` / `storage` 尚未实现。
+  流式通路已经就绪，这两项可以在其上实现，但目前还没做。
+- **限流只在单机内生效**：`per_host_max_concurrent` / `per_host_qps` 是每个服务端
+  进程各自计数的。集群部署时 N 个节点就是 N 倍的实际并发，没有跨节点的共享计数器
+  （那需要 Redis 之类的外部状态）。
 - **集群流式的中途重连**：`ClusterDownloader.stream()` 只有**建流**这一步会故障
   转移。流建立之后中途断掉不会自动重连——那需要断点续传（Range 请求）才能不重复
   数据。批量则是整批发给同一个节点，不跨节点拆分。

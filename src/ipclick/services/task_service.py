@@ -9,7 +9,7 @@ import grpc
 from grpc import ServicerContext
 from typing_extensions import override
 
-from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamHeader
+from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader
 from ipclick.adapters.browser_settings import BrowserSettings
 from ipclick.adapters.registry import get_adapter, get_default_adapter
 from ipclick.adapters.settings import AdapterSettings
@@ -17,6 +17,7 @@ from ipclick.dto.models import METHOD_MAP, IPClickAdapter
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, URLNotAllowedError
+from ipclick.limiter import HostLimiter, HostLimitTimeout, LimiterSettings
 from ipclick.metrics import Metrics, get_metrics
 from ipclick.utils import json_hook
 from ipclick.utils.config_util import Settings
@@ -79,6 +80,9 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
         # 目标 URL 准入策略（SSRF 防护）
         self.url_policy: URLPolicy = URLPolicy.from_config(dict(self.config.get("SECURITY", {})))
+
+        # 按 host 的并发与速率闸门。未配置时是零开销的空操作。
+        self.host_limiter: HostLimiter = HostLimiter(LimiterSettings.from_config(downloader_config))
 
         # 获取默认适配器
         self.default_adapter: DownloaderAdapter = get_default_adapter(self.adapter_settings)
@@ -162,6 +166,14 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 log.warning(f"Request {request.uuid} rejected: {e}")
                 self._metrics.record_rejected("url_not_allowed")
                 context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                context.set_details(str(e))
+                grpc_response = self._build_error_response(request, str(e))
+            except HostLimitTimeout as e:
+                # 本机限流策略生效，不是目标站点或网络的问题。RESOURCE_EXHAUSTED
+                # 是 gRPC 里表达"被限流了，稍后再来"的标准状态码。
+                log.warning(f"Request {request.uuid} throttled: {e}")
+                self._metrics.record_rejected("host_limit")
+                context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
                 context.set_details(str(e))
                 grpc_response = self._build_error_response(request, str(e))
             except AdapterError as e:
@@ -274,7 +286,24 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     def _execute_download(self, adapter: DownloaderAdapter, request: task_pb2.ReqTask) -> Response:
         """执行一次（非流式）下载。"""
-        return adapter.download(request.url, **self._build_download_kwargs(request))
+        with self.host_limiter.acquire(request.url):
+            return adapter.download(request.url, **self._build_download_kwargs(request))
+
+    def _limited_stream(self, url: str, stream: Iterator[StreamEvent]) -> Iterator[StreamEvent]:
+        """给流式下载套上 host 限流，并保证底层生成器最终被关闭。
+
+        额度在第一次取值时获取（此时才真正发出请求），随 RPC 结束一并释放。
+        """
+        with self.host_limiter.acquire(url):
+            try:
+                yield from stream
+            finally:
+                # 提前 break（调用方断开）时也要让适配器释放底层连接。
+                # download_stream 的签名只承诺 Iterator，不一定是生成器，
+                # 所以这里探测一下再调，不能直接用 contextlib.closing。
+                closer = getattr(stream, "close", None)
+                if callable(closer):
+                    closer()
 
     # ------------------------------------------------------------------ #
     # 响应
@@ -349,7 +378,12 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 download_kwargs.pop("max_retries", None)
                 download_kwargs.pop("retry_delay", None)
 
-                stream = adapter.download_stream(request.url, chunk_size=self._chunk_size, **download_kwargs)
+                # 限流额度要持有到整条流结束：流式请求同样占着一条到该 host 的连接，
+                # 只在建流时占额度等于没限住。
+                stream = self._limited_stream(
+                    request.url,
+                    adapter.download_stream(request.url, chunk_size=self._chunk_size, **download_kwargs),
+                )
 
                 header_sent = False
                 for event in stream:
@@ -396,6 +430,12 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 error_message = str(e)
                 self._metrics.record_rejected("url_not_allowed")
                 context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                context.set_details(error_message)
+                yield self._stream_error_header(request, error_message)
+            except HostLimitTimeout as e:
+                error_message = str(e)
+                self._metrics.record_rejected("host_limit")
+                context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
                 context.set_details(error_message)
                 yield self._stream_error_header(request, error_message)
             except AdapterError as e:
