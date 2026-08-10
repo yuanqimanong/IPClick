@@ -14,6 +14,7 @@ from ipclick.exceptions import ConfigError
 from ipclick.health import HealthReporter
 from ipclick.metrics import get_metrics
 from ipclick.services import TaskService
+from ipclick.tls import TLSSettings, describe, server_credentials, warn_if_insecure
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import LogUtil, log
 
@@ -64,8 +65,13 @@ class IPClickServer:
             raise ConfigError(f"SERVER.max_workers 必须 >= 1，当前为 {max_workers}")
 
         # 鉴权：令牌来自环境变量 IPCLICK_AUTH_TOKEN 或 [SECURITY].auth_token
-        tokens = load_tokens(dict(self.config.get("SECURITY", {})))
+        security_config = dict(self.config.get("SECURITY", {}))
+        tokens = load_tokens(security_config)
         auth_interceptor = TokenAuthInterceptor(tokens)
+
+        # 传输层加密。证书读取与组合校验在这里就做掉——带着半套 TLS 配置起来，
+        # 比起不来危险得多。
+        tls_settings = TLSSettings.from_config(security_config)
 
         # 创建gRPC服务器
         self.server = grpc.server(
@@ -97,9 +103,13 @@ class IPClickServer:
             task_pb2_grpc.add_TaskServiceServicer_to_server(self.task_service, self.server)
             self.health.register(self.server)
 
-            # 绑定地址
+            # 绑定地址。TLS 凭据在绑定之前构造：证书有问题就该在这里失败，
+            # 而不是等到第一个客户端连上来才发现。
             listen_addr = f"{server_host}:{server_port}"
-            bound_port: int = self.server.add_insecure_port(listen_addr)
+            if tls_settings.enabled:
+                bound_port: int = self.server.add_secure_port(listen_addr, server_credentials(tls_settings))
+            else:
+                bound_port = self.server.add_insecure_port(listen_addr)
             if bound_port == 0:
                 raise RuntimeError(f"Failed to bind to address {listen_addr}")
 
@@ -114,6 +124,8 @@ class IPClickServer:
 
             # 记录启动信息
             log.info(f"IPClick server started on {listen_addr} with {max_workers} workers")
+            log.info(f"传输层：{describe(tls_settings)}")
+            warn_if_insecure(tls_settings, server_host)
             if auth_interceptor.enabled:
                 log.info(f"已启用令牌鉴权（{len(tokens)} 个有效令牌）")
             else:

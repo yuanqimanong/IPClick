@@ -14,6 +14,7 @@ from ipclick.cluster.pool import NodePool
 from ipclick.dto.models import DownloadResponse, DownloadTask, HttpMethod
 from ipclick.exceptions import ClientClosedError, IPClickError, TransportError
 from ipclick.sdk import ClientBase, Downloader, StreamedResponse
+from ipclick.tls import TLSSettings
 from ipclick.utils.log_util import log
 
 
@@ -36,14 +37,15 @@ class ClusterDownloader(ClientBase):
         *,
         cluster_config: ClusterConfig | None = None,
         start_probing: bool = True,
+        tls: TLSSettings | None = None,
     ):
         # ClientBase 提供配置加载、令牌解析与 _build_task；host/port 在集群模式下
         # 用不到（真正的目标地址来自节点池），但复用它能保证任务组装规则一致。
-        super().__init__(config_path=config_path, token=token)
+        super().__init__(config_path=config_path, token=token, tls=tls)
         self.cluster_config: ClusterConfig = cluster_config or ClusterConfig.from_config(
             dict(self.config.get("CLUSTER", {}))
         )
-        self.pool: NodePool = NodePool(self.cluster_config, start_probing=start_probing)
+        self.pool: NodePool = NodePool(self.cluster_config, start_probing=start_probing, tls=self.tls)
 
         self._config_path: str | None = config_path
         self._token: str | None = token
@@ -76,6 +78,8 @@ class ClusterDownloader(ClientBase):
                     host=state.node.host,
                     port=state.node.port,
                     token=self._token,
+                    # 显式透传：调用方可能是用参数而不是配置文件给的 TLS 设置
+                    tls=self.tls,
                 )
             return self._clients[node_id]
 

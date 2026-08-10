@@ -16,10 +16,12 @@
 from __future__ import annotations
 
 from concurrent import futures
+from typing import Any
 
 import grpc
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
+from ipclick.tls import TLSSettings, channel_credentials, channel_options
 from ipclick.utils.log_util import log
 
 
@@ -92,6 +94,7 @@ def check_health(
     *,
     service: str = OVERALL_SERVICE,
     timeout: float = 5.0,
+    tls: TLSSettings | None = None,
 ) -> tuple[bool, str]:
     """以客户端身份查询某个 IPClick 服务端的健康状态。
 
@@ -102,6 +105,8 @@ def check_health(
         target: ``host:port``
         service: 要查询的服务名，默认查总体状态
         timeout: 超时（秒）
+        tls: 目标服务端的 TLS 配置。服务端开了 TLS 而这里还用明文连，
+            探活会一直失败——集群会把健康节点全判成挂了。
 
     Returns:
         ``(是否健康, 状态描述)``
@@ -109,7 +114,14 @@ def check_health(
     try:
         # enable_http_proxy=0：gRPC 也会读环境里的 http_proxy，不关掉的话
         # 探本机节点会被路由到环境代理去。
-        with grpc.insecure_channel(target, options=[("grpc.enable_http_proxy", 0)]) as channel:
+        settings = tls or TLSSettings()
+        options: list[tuple[str, Any]] = [("grpc.enable_http_proxy", 0), *channel_options(settings)]
+        channel_ctx = (
+            grpc.secure_channel(target, channel_credentials(settings), options=options)
+            if settings.enabled
+            else grpc.insecure_channel(target, options=options)
+        )
+        with channel_ctx as channel:
             stub = health_pb2_grpc.HealthStub(channel)
             # grpc_health 没有随包发 health_pb2_grpc.pyi，且 Check 是在 __init__ 里
             # 动态赋值的，类型检查器看不到——运行时是存在的。

@@ -66,6 +66,8 @@ dev = [
     "pytest>=9.1.1",
     "pytest-cov>=7.0.0",
     "pytest-asyncio>=1.0.0",
+    # 测试里现生成自签名证书，用来做真实的 TLS/mTLS 握手
+    "cryptography>=42.0.0",
 ]
 
 [project.scripts]

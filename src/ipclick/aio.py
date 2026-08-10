@@ -29,7 +29,8 @@ from typing_extensions import override
 from ipclick.dto.models import DownloadResponse, DownloadTask, HttpMethod, IPClickAdapter, ProxyConfig
 from ipclick.dto.proto import task_pb2_grpc
 from ipclick.exceptions import ClientClosedError, TransportError
-from ipclick.sdk import CHANNEL_OPTIONS, ClientBase
+from ipclick.sdk import ClientBase
+from ipclick.tls import TLSSettings
 from ipclick.utils.log_util import log
 
 
@@ -137,8 +138,9 @@ class AsyncDownloader(ClientBase):
         host: str | None = None,
         port: int | None = None,
         token: str | None = None,
+        tls: TLSSettings | None = None,
     ):
-        super().__init__(config_path, host, port, token)
+        super().__init__(config_path, host, port, token, tls)
         self._channel: aio.Channel | None = None
         self._stub: task_pb2_grpc.TaskServiceStub | None = None
 
@@ -156,10 +158,19 @@ class AsyncDownloader(ClientBase):
             raise ClientClosedError("AsyncDownloader 已关闭，无法继续发送请求")
 
         if self._stub is None:
-            self._channel = aio.insecure_channel(
-                self.target,
-                options=CHANNEL_OPTIONS,
-                compression=grpc.Compression.Gzip,
+            self._channel = (
+                aio.secure_channel(
+                    self.target,
+                    self._credentials,
+                    options=self._channel_options,
+                    compression=grpc.Compression.Gzip,
+                )
+                if self._credentials is not None
+                else aio.insecure_channel(
+                    self.target,
+                    options=self._channel_options,
+                    compression=grpc.Compression.Gzip,
+                )
             )
             self._stub = task_pb2_grpc.TaskServiceStub(self._channel)
         return self._stub

@@ -18,6 +18,7 @@ from ipclick.exceptions import (
     ValidationError,
 )
 from ipclick.limiter import HostLimitTimeout
+from ipclick.tls import TLSSettings, channel_credentials, channel_options, describe
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
 from ipclick.utils.secure_util import SecureUtil
@@ -168,6 +169,7 @@ class ClientBase:
         host: str | None = None,
         port: int | None = None,
         token: str | None = None,
+        tls: TLSSettings | None = None,
     ):
         self.config_path: str | None = config_path
         self.config: Settings = load_config(self.config_path)
@@ -182,8 +184,15 @@ class ClientBase:
             self.host = "127.0.0.1"
 
         # 鉴权令牌：参数 > 环境变量 IPCLICK_AUTH_TOKEN > [SECURITY].auth_token
-        resolved_token = token or (load_tokens(dict(self.config.get("SECURITY", {}))) or (None,))[0]
+        security_config = dict(self.config.get("SECURITY", {}))
+        resolved_token = token or (load_tokens(security_config) or (None,))[0]
         self._metadata: tuple[tuple[str, str], ...] = build_client_metadata(resolved_token)
+
+        # 传输层加密。凭据在这里就构造出来——证书路径写错要在建连之前失败，
+        # 而不是等到第一个请求发出去才报一个含糊的连接错误。
+        self.tls: TLSSettings = tls or TLSSettings.from_config(security_config)
+        self._credentials: grpc.ChannelCredentials | None = channel_credentials(self.tls) if self.tls.enabled else None
+        self._channel_options: list[tuple[str, Any]] = CHANNEL_OPTIONS + channel_options(self.tls)
         # 子类的 close() 会改写它，声明在这里以便类型检查器识别
         self._closed: bool = False
 
@@ -191,7 +200,8 @@ class ClientBase:
         log.debug(
             f"{type(self).__name__} 已加载配置，目标服务端 {self.host}:{self.port}，"
             f"配置节: {sorted(self.config.keys())}，"
-            f"鉴权令牌: {'已配置' if self._metadata else '未配置'}"
+            f"鉴权令牌: {'已配置' if self._metadata else '未配置'}，"
+            f"传输层: {describe(self.tls)}"
         )
 
     @property
@@ -287,6 +297,7 @@ class Downloader(ClientBase):
         host: str | None = None,
         port: int | None = None,
         token: str | None = None,
+        tls: TLSSettings | None = None,
     ):
         """
         初始化下载器
@@ -297,8 +308,10 @@ class Downloader(ClientBase):
             port: 服务器端口 (覆盖配置文件)
             token: 鉴权令牌 (覆盖环境变量 ``IPCLICK_AUTH_TOKEN`` 与配置文件
                 ``[SECURITY].auth_token``)。服务端未启用鉴权时可留空。
+            tls: 传输层配置 (覆盖 ``[SECURITY.tls]``)。服务端启用 TLS 时必须
+                同步开启，否则连接会握手失败。
         """
-        super().__init__(config_path, host, port, token)
+        super().__init__(config_path, host, port, token, tls)
 
         self._channel: grpc.Channel | None = None
         self._stub: task_pb2_grpc.TaskServiceStub | None = None
@@ -322,10 +335,19 @@ class Downloader(ClientBase):
 
         with self._lock:
             if self._stub is None:
-                self._channel = grpc.insecure_channel(
-                    self.target,
-                    options=CHANNEL_OPTIONS,
-                    compression=grpc.Compression.Gzip,
+                self._channel = (
+                    grpc.secure_channel(
+                        self.target,
+                        self._credentials,
+                        options=self._channel_options,
+                        compression=grpc.Compression.Gzip,
+                    )
+                    if self._credentials is not None
+                    else grpc.insecure_channel(
+                        self.target,
+                        options=self._channel_options,
+                        compression=grpc.Compression.Gzip,
+                    )
                 )
                 self._stub = task_pb2_grpc.TaskServiceStub(self._channel)
         return self._stub

@@ -84,6 +84,28 @@ block_private_networks = false
 # 即便开启上面的拦截也放行的主机名或 IP
 allowlist = []
 
+# ------- 传输层加密 [SECURITY.tls] -------
+# 默认关闭（明文），与旧部署兼容。但令牌鉴权保护的是"谁能用"，
+# 明文链路上令牌本身会被同网段原样嗅探到——公网或不可信网络务必打开。
+[SECURITY.tls]
+enabled = false
+# 服务端：自己的证书与私钥（必填）
+# 客户端：只有服务端要求 mTLS 时才需要填
+cert_file = ""
+key_file = ""
+# 验证**对端**用的 CA。
+#   服务端：填了才会验证客户端证书；配合 require_client_cert 构成 mTLS
+#   客户端：留空则用系统信任库（对接公网 CA 签发的证书时就该留空）
+ca_file = ""
+# 仅服务端：强制客户端出示证书（mTLS）。
+# ⚠️ 打开时必须同时配 ca_file，否则任何自签名证书都能通过，等于没验证——
+#    这种组合会在启动时直接报错，不会静默降级。
+require_client_cert = false
+# 仅客户端：证书里的名字与实际连接地址不一致时用它覆盖，
+# 例如证书签给 "ipclick.internal" 而你连的是 "10.0.0.5"。
+# ⚠️ 这会跳过主机名匹配，只应在自签名证书的内网环境里用。
+server_name_override = ""
+
 # ------- 下载器配置 [DOWNLOADER] -------
 # 这些是"请求未显式传参时"的默认值。单次请求传的 timeout / max_retries /
 # retry_backoff 优先级更高。

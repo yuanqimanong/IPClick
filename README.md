@@ -25,6 +25,7 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 - **批量请求**：一次 RPC 处理多个任务，结果按完成顺序流式返回
 - **异步客户端**：基于 `grpc.aio` 的 `AsyncDownloader`，与同步版接口对应
 - **令牌鉴权**：gRPC 标准 Bearer 令牌，支持环境变量注入与多令牌轮换
+- **TLS / mTLS**：链路加密与双向证书认证，客户端、服务端、集群探活全通路覆盖
 - **健康检查**：实现 `grpc.health.v1` 标准协议，K8s 探针与服务网格开箱即用
 - **Prometheus 指标**：请求量 / 延迟 / 重试 / 拒绝等指标，可选依赖、优雅降级
 - **SSRF 防护**：服务端对目标 URL 做协议白名单与内网/元数据地址拦截
@@ -364,6 +365,67 @@ engine = "auto"     # 或 camoufox / patchright / playwright / drissionpage
 >
 > 另外，渲染本身就会加载页面引用的子资源，同样不经过 URL 策略。介意的话把
 > `block_resources` 配严一些，并打开 `[SECURITY].block_private_networks`。
+
+### TLS / mTLS
+
+gRPC 链路默认是**明文**的。令牌鉴权解决的是"谁能用"，但令牌本身在不受信任的
+网络上会被同网段原样嗅探到——鉴权、限流、SSRF 防护全都建在这条明文通道上。
+公网或跨机房部署务必打开 TLS。
+
+```toml
+[SECURITY.tls]
+enabled = true
+cert_file = "/etc/ipclick/server.crt"   # 服务端证书
+key_file  = "/etc/ipclick/server.key"
+# 下面两项一起构成 mTLS：服务端反过来验证客户端证书
+ca_file = "/etc/ipclick/ca.crt"
+require_client_cert = true
+```
+
+客户端用同一个配置节，各取所需：
+
+```toml
+[SECURITY.tls]
+enabled = true
+ca_file = "/etc/ipclick/ca.crt"          # 验证服务端；留空则用系统信任库
+cert_file = "/etc/ipclick/client.crt"    # 服务端要求 mTLS 时才需要
+key_file  = "/etc/ipclick/client.key"
+```
+
+也可以在代码里直接给：
+
+```python
+from ipclick import Downloader
+from ipclick.tls import TLSSettings
+
+tls = TLSSettings(enabled=True, ca_file="ca.crt", cert_file="client.crt", key_file="client.key")
+with Downloader(tls=tls) as d:
+    resp = d.get("https://example.com")
+```
+
+几点值得说明：
+
+- **TLS 和令牌是两回事，互不替代**。证书回答"这条连接可不可信"，令牌回答"这个
+  调用方是谁"。两者可以同时开。
+- **`require_client_cert = true` 必须同时配 `ca_file`**，否则任何自签名证书都能
+  通过，mTLS 形同虚设。这种组合会在启动时直接报错，不会静默降级。
+- **集群探活也走 TLS**。服务端开了 TLS 而探活还是明文的话，集群会把健康节点
+  全判成挂了。
+- **证书签给域名、却用 IP 连**时，用 `server_name_override` 对上名字。
+  它会跳过主机名匹配这道校验，只应在自签名证书的内网环境里用。
+- 服务端监听非回环地址却没开 TLS 时，启动日志会打显著告警。
+
+自签名证书（内网自用）可以这样生成：
+
+```bash
+openssl req -x509 -newkey rsa:4096 -nodes -keyout ca.key -out ca.crt -days 3650 -subj "/CN=ipclick-ca"
+openssl req -newkey rsa:4096 -nodes -keyout server.key -out server.csr -subj "/CN=ipclick"
+openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 825 \
+  -extfile <(printf "subjectAltName=DNS:ipclick,IP:10.0.0.5")
+```
+
+> gRPC 校验的是证书里的 **SAN**，不是 CN——只写 `-subj "/CN=..."` 而没有
+> `subjectAltName` 的证书，在现代 TLS 栈里一律会被拒。
 
 ### 按 host 限流
 
@@ -785,9 +847,6 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 
 - **服务发现**：集群的节点列表来自静态配置，改了要重启。没有 DNS / etcd / Consul
   之类的动态发现，`[CLUSTER].db_uri` 仍是预留配置。
-- **传输加密 / mTLS**：已支持令牌鉴权，但 gRPC 仍是 `insecure_channel`（明文）。
-  令牌在不受信任的网络上会被窃听，请在 TLS 终端（如 nginx / service mesh）之后部署，
-  或等待后续的 mTLS 支持。
 - **`undetected_chromedriver` 未实现**：它基于 selenium + chromedriver，能力与
   patchright / camoufox 高度重叠，收益不足以抵消维护成本。请求到会抛 `AdapterError`。
 - **分块下载与临时存储**：`[DOWNLOADER]` 里的 `chunk` / `storage` 尚未实现。

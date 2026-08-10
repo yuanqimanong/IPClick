@@ -13,6 +13,7 @@ from ipclick.cluster.balancer import LoadBalancer, create_balancer
 from ipclick.cluster.node import ClusterConfig, NodeState, NodeStatus
 from ipclick.exceptions import ConfigError, TransportError
 from ipclick.health import check_health
+from ipclick.tls import TLSSettings
 from ipclick.utils.log_util import log
 
 
@@ -22,7 +23,7 @@ class NodePool:
     线程安全：请求线程调 :meth:`acquire`，后台探活线程调 :meth:`probe_once`。
     """
 
-    def __init__(self, config: ClusterConfig, *, start_probing: bool = True):
+    def __init__(self, config: ClusterConfig, *, start_probing: bool = True, tls: TLSSettings | None = None):
         if not config.nodes:
             raise ConfigError("集群模式需要至少一个 [CLUSTER].nodes 节点")
 
@@ -30,6 +31,9 @@ class NodePool:
         self.balancer: LoadBalancer = create_balancer(config.strategy)
         self._states: list[NodeState] = [NodeState(node) for node in config.nodes]
         self._lock: threading.Lock = threading.Lock()
+
+        # 探活也要走 TLS：服务端开了 TLS 而探活还用明文，会把健康节点全判成挂了
+        self._tls: TLSSettings = tls or TLSSettings()
 
         self._stop: threading.Event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -72,7 +76,7 @@ class NodePool:
         for state in self._states:
             if self._stop.is_set():
                 return
-            healthy, detail = check_health(state.node.address, timeout=self.config.probe_timeout)
+            healthy, detail = check_health(state.node.address, timeout=self.config.probe_timeout, tls=self._tls)
             changed = state.record_probe(
                 healthy,
                 detail,
