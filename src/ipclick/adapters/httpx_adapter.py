@@ -4,6 +4,7 @@ from typing import Any
 from typing_extensions import override
 
 from ipclick.adapters.base import DownloaderAdapter, retry
+from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError
 from ipclick.utils.log_util import log
@@ -44,16 +45,14 @@ class HttpxAdapter(DownloaderAdapter):
 
     adapter_name: str = "httpx"
 
-    def __init__(self):
+    def __init__(self, settings: AdapterSettings | None = None):
         if _httpx is None:
             raise AdapterError("httpx is not installed. Install it with: pip install httpx")
 
-        super().__init__()
+        super().__init__(settings)
         # 按 (proxy, verify) 缓存 Client，以复用连接池
         self._clients: dict[tuple[str | None, bool], Any] = {}
         self._clients_lock: threading.Lock = threading.Lock()
-        # 是否读取环境变量里的代理配置，默认关闭（见 _get_client 的说明）
-        self.trust_env: bool = False
 
         # User Agent生成器
         self.ua_generator: Any = _user_agent_cls(platforms="desktop") if _user_agent_cls is not None else None
@@ -81,7 +80,15 @@ class HttpxAdapter(DownloaderAdapter):
                     # 设了 enable_http_proxy=0）。需要时可通过 kwargs 传
                     # trust_env=true 显式开启。
                     trust_env=bool(self.trust_env),
-                    limits=_httpx.Limits(max_connections=100, max_keepalive_connections=20),
+                    # 连接池上限来自 [DOWNLOADER.concurrency]
+                    limits=_httpx.Limits(
+                        max_connections=self.settings.max_connections,
+                        max_keepalive_connections=self.settings.max_keepalive_connections,
+                    ),
+                    timeout=_httpx.Timeout(
+                        self.settings.download_timeout,
+                        connect=self.settings.connect_timeout,
+                    ),
                 )
             return self._clients[key]
 

@@ -51,8 +51,8 @@ class FakeContext:
 @pytest.fixture
 def service(monkeypatch: pytest.MonkeyPatch) -> TaskService:
     adapter = RecordingAdapter()
-    monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda: adapter)
-    monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name: adapter)
+    monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
+    monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
     return TaskService(Settings({"SECURITY": {"block_private_networks": False}}))
 
 
@@ -76,10 +76,15 @@ class TestProto3Presence:
         assert _adapter_of(service).last_kwargs["verify"] is False
 
     def test_unset_timeout_does_not_become_zero(self, service: TaskService):
-        """回归：proto3 隐式默认让 timeout 变成 0，等于立刻超时。"""
+        """回归：proto3 隐式默认让 timeout 变成 0，等于立刻超时。
+
+        未设置时回落到 [DOWNLOADER].download_timeout（默认 300），
+        而不是写死的常量。
+        """
         request = task_pb2.ReqTask(url="http://example.com", uuid="u1")
         service.Send(request, FakeContext())
-        assert _adapter_of(service).last_kwargs["timeout"] == 60.0
+        assert _adapter_of(service).last_kwargs["timeout"] == service.adapter_settings.download_timeout
+        assert _adapter_of(service).last_kwargs["timeout"] > 0
 
     def test_unset_allow_redirects_defaults_to_true(self, service: TaskService):
         request = task_pb2.ReqTask(url="http://example.com", uuid="u1")
@@ -125,8 +130,8 @@ class TestAdapterCache:
 class TestErrorHandling:
     def test_blocked_url_returns_permission_denied(self, monkeypatch: pytest.MonkeyPatch):
         adapter = RecordingAdapter()
-        monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda: adapter)
-        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name: adapter)
+        monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
+        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
         service = TaskService(Settings({"SECURITY": {"block_private_networks": True}}))
 
         context = FakeContext()
@@ -151,8 +156,8 @@ class TestErrorHandling:
                 raise RuntimeError("boom")
 
         adapter = ExplodingAdapter()
-        monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda: adapter)
-        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name: adapter)
+        monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
+        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
         service = TaskService(Settings({}))
 
         response = service.Send(task_pb2.ReqTask(url="http://example.com", uuid="u1"), FakeContext())

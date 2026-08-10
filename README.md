@@ -1,6 +1,6 @@
 # IPClick
 
-![IPClick Logo](https://i.imgur.com/XvemBlO.png)
+![IPClick Logo](https://raw.githubusercontent.com/yuanqimanong/IPClick/master/docs/logo.png)
 
 > IPClick 名字灵感来源于动画《Link Click》（时光代理人）。正如时光代理人穿梭于不同的时空执行任务，IPClick 帮助您将 HTTP 请求分发到不同的节点高效执行。
 
@@ -235,6 +235,27 @@ IPClick/
 | `SECURITY.block_private_networks`   | 拦截回环 / 私网 / 保留地址         | `false`              |
 | `SECURITY.allowlist`                | 即便开启拦截也放行的主机名或 IP        | `[]`                 |
 
+### 下载器配置
+
+这些是**请求未显式传参时**的默认值；单次请求传的 `timeout` / `max_retries` /
+`retry_backoff` 优先级更高。
+
+| 配置项                                    | 说明                          | 默认值                       |
+|----------------------------------------|-----------------------------|---------------------------|
+| `DOWNLOADER.connect_timeout`           | 连接超时（秒）                     | `10`                      |
+| `DOWNLOADER.download_timeout`          | 下载超时（秒）                     | `300`                     |
+| `DOWNLOADER.trust_env`                 | 是否读取环境变量里的代理（`HTTP_PROXY` 等） | `false`                   |
+| `DOWNLOADER.retry.max_attempts`        | 最大重试次数（`0` = 不重试）           | `3`                       |
+| `DOWNLOADER.retry.backoff_exponent`    | 退避指数                        | `2.0`                     |
+| `DOWNLOADER.retry.initial_backoff`     | 初始等待（秒）                     | `1`                       |
+| `DOWNLOADER.retry.max_backoff`         | 单次等待上限（秒，硬上限 300）           | `30`                      |
+| `DOWNLOADER.retry.retry_codes`         | 触发重试的状态码；连接层异常总是会重试         | `[429,500,502,503,504]`   |
+| `DOWNLOADER.concurrency.max_connections` | 连接池总上限                    | `100`                     |
+| `DOWNLOADER.concurrency.max_keepalive_connections` | 长连接上限            | `20`                      |
+
+等待时间 = `initial_backoff × backoff_exponent^已重试次数`，封顶到 `max_backoff`，
+再乘一个 0.8~1.2 的抖动因子（避免并发任务集体重试造成惊群）。
+
 ### 代理配置
 
 | 配置项                    | 说明          |
@@ -309,35 +330,51 @@ docker run -d -p 9527:9527 --name ipclick -v /你的路径/:/home/ipclick/.ipcli
 
 ### 异常
 
-所有异常都继承自 `IPClickError`：
+所有异常都继承自 `IPClickError`。**注意抛出位置** —— 服务端抛的异常不会原样
+传到客户端（gRPC 之间只传状态码和文本）：
 
-| 异常                  | 场景                    |
-|---------------------|-----------------------|
-| `ConfigError`       | 配置缺失或非法               |
-| `AdapterError`      | 适配器不存在或依赖未安装          |
-| `TransportError`    | 与服务端的 gRPC 通信失败       |
-| `RequestError`      | 目标站点返回错误              |
-| `ValidationError`   | 任务参数校验失败（同时继承 `ValueError`） |
-| `URLNotAllowedError`| 目标 URL 被安全策略拒绝        |
+| 异常                  | 场景                    | 客户端能否 `except` 到 |
+|---------------------|-----------------------|---------------|
+| `ValidationError`   | 任务参数校验失败，如 URL 为空、适配器名拼错（同时继承 `ValueError`） | ✅ 会抛出 |
+| `TransportError`    | 与服务端的 gRPC 通信失败       | ✅ 由 `download()` 抛出 |
+| `RequestError`      | 目标站点返回错误，由 `raise_for_status()` 抛出 | ✅ 需自行调用 |
+| `ConfigError`       | 配置缺失或非法               | ✅ 加载配置时抛出 |
+| `AdapterError`      | 适配器不存在或依赖未安装          | ❌ 仅服务端 |
+| `URLNotAllowedError`| 目标 URL 被安全策略拒绝        | ❌ 仅服务端 |
+
+标 ❌ 的两个只在**服务端**抛出，客户端看到的是
+`status_code == -1` 且 `error` 含说明文字的 `DownloadResponse`，
+写 `except AdapterError:` 永远不会命中。
+
+```python
+resp = downloader.get(url)          # 网络失败不抛异常
+if not resp.is_success():
+    print(resp.error)               # 服务端拒绝的原因在这里
+```
+
+而参数错误是会抛的：
+
+```python
+downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名称
+```
 
 ## 🚧 尚未实现 / 已知限制
 
 为免误导，这里如实列出**当前还没有实现**的部分。配置文件里出现但落在本节的项，
 改了不会有任何效果。
 
-### 配置节：仅 4 个真正生效
+### 配置节生效情况
 
 | 配置节 | 状态 |
 |---|---|
-| `[SERVER]` `[PROXY]` `[LOG]` `[SECURITY]` | ✅ 生效 |
-| `[GENERAL]` | ❌ `mode` / `debug` 无消费方 |
-| `[CLUSTER]` | ❌ `load_balancer` / `nodes` / `db_uri` 无消费方 |
-| `[DOWNLOADER]` | ❌ `connect_timeout` / `download_timeout` / `retry.*` / `concurrency.*` / `rate_limit.*` / `chunk.*` / `storage.*` 全部无消费方 |
-| `[BROWSER]` | ❌ 无消费方 |
-| `[MONITOR]` | ❌ `health_check` 无消费方 |
+| `[SERVER]` `[PROXY]` `[LOG]` `[SECURITY]` `[DOWNLOADER]` | ✅ 生效 |
+| `[GENERAL]` | ⚠️ `debug` 生效；`mode` 待集群支持（P4） |
+| `[CLUSTER]` | ❌ `load_balancer` / `nodes` / `db_uri` 无消费方（P4） |
+| `[BROWSER]` | ❌ 无消费方（P5） |
+| `[MONITOR]` | ❌ `health_check` 待健康检查协议（P2） |
 
-> 超时与重试目前只能**按请求**传参（`timeout` / `max_retries` / `retry_backoff`），
-> 配置文件里的对应项不生效。
+> `[DOWNLOADER]` 的限速（`rate_limit`）、分块下载（`chunk`）、临时存储（`storage`）
+> 依赖真正的流式传输通路，已从默认配置移除，待流式下载实现后再引入（P3）。
 
 ### 功能
 
@@ -351,8 +388,8 @@ docker run -d -p 9527:9527 --name ipclick -v /你的路径/:/home/ipclick/.ipcli
   `AdapterError`。
 - **浏览器渲染**：`automation_config` / `automation_script` 字段贯穿了整条调用链，
   但末端没有任何消费方，属于预留接口。
-- **流式下载**：`stream` 参数目前不改变行为。响应体经由单个 protobuf 消息整体传输
-  （上限 500MB），大文件会完整驻留内存，不适合下载超大文件。
+- **流式下载**：`stream` 参数不改变行为（两个适配器一致忽略）。响应体经由单个
+  protobuf 消息整体传输（上限 500MB），大文件会完整驻留内存。
 - **文件上传**：`files` 参数会抛 `NotImplementedError`。
 - **批量请求**：一次 RPC 只处理一个 URL，没有批量 / 流式接口。
 - **异步客户端**：只有同步 `Downloader`，没有 `grpc.aio` 版本。
@@ -360,6 +397,16 @@ docker run -d -p 9527:9527 --name ipclick -v /你的路径/:/home/ipclick/.ipcli
 - **客户端重试**：重试只发生在服务端适配器内部；客户端到服务端这一跳失败不会重试。
 - **可观测性**：没有 metrics，也没有实现 gRPC 标准健康检查协议。Docker 的
   healthcheck 只是探测端口 TCP 可连。
+
+## 🗺️ 路线图
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| **P1** 打通存量 | `[DOWNLOADER]` 生效、参数错误不再伪装成网络失败、`NO_PROXY` 处理、`[GENERAL].debug` | ✅ 已完成 |
+| **P2** 安全与可运维 | 服务端鉴权（token / mTLS）、gRPC 标准健康检查、Prometheus metrics | 计划中 |
+| **P3** 能力扩展 | 异步客户端、批量 RPC、真流式下载（连带限速 / 分块） | 计划中 |
+| **P4** 集群 | 节点池、负载均衡、健康探测、故障转移（依赖 P2 的健康检查） | 计划中 |
+| **P5** 适配器 | `requests`、`playwright` / `DrissionPage` / `undetected_chromedriver`（连带 `[BROWSER]` 与浏览器渲染） | 计划中 |
 
 ## 🛠️ 开发
 

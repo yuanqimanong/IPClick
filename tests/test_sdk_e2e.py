@@ -47,8 +47,8 @@ def _free_port() -> int:
 def live_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[int, EchoAdapter]]:
     """启动一个真实的 gRPC 服务端，返回 (端口, 假适配器)。"""
     adapter = EchoAdapter()
-    monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda: adapter)
-    monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name: adapter)
+    monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
+    monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
 
     service = TaskService(Settings({"SECURITY": {"block_private_networks": False}}))
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4), maximum_concurrent_rpcs=8)
@@ -172,6 +172,27 @@ class TestTransportFailure:
         assert resp.error
         assert not resp.is_success()
 
+    def test_typo_in_adapter_name_raises_instead_of_looking_like_a_network_error(self):
+        """回归：request() 用 `except IPClickError` 兜底，而 ValidationError 是它的
+        子类，于是适配器名拼错会返回 status_code == -1 的响应，看起来像网络故障，
+        调用方对着网络排查半天也找不到原因。参数错误必须抛出。"""
+        from ipclick.exceptions import ValidationError
+
+        with Downloader(host="127.0.0.1", port=_free_port()) as d, pytest.raises(ValidationError, match="适配器"):
+            d.get("http://example.com/x", adapter="htttpx", max_retries=0, timeout=1)
+
+    def test_invalid_url_still_raises(self):
+        from ipclick.exceptions import ValidationError
+
+        with Downloader(host="127.0.0.1", port=_free_port()) as d, pytest.raises(ValidationError):
+            d.get("", max_retries=0, timeout=1)
+
+    def test_transport_failure_still_returns_a_response(self):
+        """与上面相对：真正的传输失败仍然返回响应对象而不是抛异常。"""
+        with Downloader(host="127.0.0.1", port=_free_port()) as d:
+            resp = d.get("http://example.com/x", max_retries=0, timeout=1)
+        assert resp.status_code == -1
+
     def test_download_raises_transport_error_directly(self):
         """低层 download() 仍然抛异常，方便调用方自行处理。"""
         from ipclick.dto.models import DownloadTask
@@ -183,8 +204,8 @@ class TestTransportFailure:
 class TestServerSideSecurity:
     def test_blocked_url_surfaces_to_client(self, monkeypatch: pytest.MonkeyPatch):
         adapter = EchoAdapter()
-        monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda: adapter)
-        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name: adapter)
+        monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
+        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
 
         service = TaskService(Settings({"SECURITY": {"block_private_networks": True}}))
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))

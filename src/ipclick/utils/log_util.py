@@ -317,10 +317,20 @@ class LogUtil:
             cls._own_handler_ids.discard(handler_id)
 
     @classmethod
-    def init_from_config(cls, log_config: dict[str, Any] | None, *, logger_name: str = "default") -> None:
+    def init_from_config(
+        cls,
+        log_config: dict[str, Any] | None,
+        *,
+        logger_name: str = "default",
+        debug: bool = False,
+    ) -> None:
         """按配置文件的 ``[LOG]`` 节初始化日志。
 
         原先 ``[LOG]`` 里的 level / output / rotation 从来没被读取过，改配置不生效。
+
+        Args:
+            debug: 来自 ``[GENERAL].debug``，为真时强制 DEBUG 级别，
+                覆盖 ``[LOG].level``。
         """
         config = dict(log_config or {})
         output = str(config.get("output", "stdout"))
@@ -328,7 +338,7 @@ class LogUtil:
         max_size = rotation_config.get("max_size", 100)
 
         cls.init(
-            level=str(config.get("level", "INFO")),
+            level="DEBUG" if debug else str(config.get("level", "INFO")),
             logger_name=logger_name,
             log_file=None if output in ("stdout", "stderr", "") else output,
             rotation=f"{max_size} MB",

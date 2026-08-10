@@ -8,7 +8,7 @@ from typing_extensions import override
 from ipclick.config_loader import load_config
 from ipclick.dto.models import DownloadResponse, DownloadTask, HttpMethod, IPClickAdapter, ProxyConfig
 from ipclick.dto.proto import task_pb2_grpc
-from ipclick.exceptions import IPClickError, TransportError
+from ipclick.exceptions import TransportError
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
 from ipclick.utils.secure_util import SecureUtil
@@ -190,9 +190,13 @@ class Downloader:
 
         try:
             return self.download(task)
-        except IPClickError as e:
-            # 网络类失败返回错误响应而不是 None——调用方拿到的东西必须始终
-            # 满足 -> DownloadResponse 的签名（examples 也是这么用的）。
+        except TransportError as e:
+            # 只吞传输层失败：调用方拿到的东西必须始终满足 -> DownloadResponse
+            # 的签名（examples 也是这么用的）。
+            #
+            # 注意这里不能写 `except IPClickError`——ValidationError 也是它的子类，
+            # 于是「适配器名拼错」这类参数错误会被伪装成 status_code == -1 的
+            # 网络失败，调用方对着网络排查半天也找不到原因。参数错误必须抛出。
             log.error(f"请求 {url} 失败：{e}")
             return DownloadResponse.from_error(str(e), url=url)
 

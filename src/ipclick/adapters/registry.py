@@ -1,6 +1,7 @@
 from ipclick.adapters.base import DownloaderAdapter
 from ipclick.adapters.curl_cffi_adapter import CurlCffiAdapter
 from ipclick.adapters.httpx_adapter import HttpxAdapter
+from ipclick.adapters.settings import AdapterSettings
 from ipclick.exceptions import AdapterError
 
 
@@ -17,17 +18,18 @@ ADAPTER_LIST: list[type[DownloaderAdapter]] = list(ADAPTER_CLASSES.values())
 DEFAULT_ADAPTER_NAME = CurlCffiAdapter.adapter_name
 
 
-def get_default_adapter() -> DownloaderAdapter:
+def get_default_adapter(settings: AdapterSettings | None = None) -> DownloaderAdapter:
     """创建默认适配器实例（curl_cffi）。"""
-    return get_adapter(DEFAULT_ADAPTER_NAME)
+    return get_adapter(DEFAULT_ADAPTER_NAME, settings)
 
 
-def get_adapter(adapter_name: str) -> DownloaderAdapter:
+def get_adapter(adapter_name: str, settings: AdapterSettings | None = None) -> DownloaderAdapter:
     """
     获取适配器实例
 
     Args:
         adapter_name: 适配器名称
+        settings: 来自配置文件 ``[DOWNLOADER]`` 节的默认行为；None 表示用内置默认值。
 
     Returns:
         DownloaderAdapter: 适配器实例
@@ -40,7 +42,7 @@ def get_adapter(adapter_name: str) -> DownloaderAdapter:
         supported = ", ".join(sorted(ADAPTER_CLASSES))
         raise AdapterError(f"下载器适配器 {adapter_name!r} 尚未支持，当前可用: {supported}")
 
-    return adapter_class()
+    return adapter_class(settings)
 
 
 def register_adapter(adapter_class: type[DownloaderAdapter]) -> None:

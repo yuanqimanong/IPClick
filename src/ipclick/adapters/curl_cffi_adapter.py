@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 from typing_extensions import override
 
 from ipclick.adapters.base import DownloaderAdapter, retry
+from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError
 from ipclick.utils.log_util import log
@@ -15,14 +16,17 @@ if TYPE_CHECKING:
 # 可选依赖：缺失时降级为 None，由 __init__ 抛 AdapterError。
 # 标成 Any 是为了让"模块或 None"这种运行时形态不必到处写 type: ignore。
 _curl_cffi: Any
+_curl_opt: Any
 _impersonate_mod: Any
 _user_agent_cls: Any
 
 try:
+    from curl_cffi import CurlOpt as _curl_opt  # CurlOpt 在顶层包，不在 .requests 下
     import curl_cffi.requests as _curl_cffi
     from curl_cffi.requests import impersonate as _impersonate_mod
 except ImportError:  # pragma: no cover - 取决于安装环境
     _curl_cffi = None
+    _curl_opt = None
     _impersonate_mod = None
 
 try:
@@ -54,11 +58,11 @@ class CurlCffiAdapter(DownloaderAdapter):
 
     adapter_name: str = "curl_cffi"
 
-    def __init__(self):
+    def __init__(self, settings: AdapterSettings | None = None):
         if _curl_cffi is None:
             raise AdapterError("curl_cffi is not installed. Install it with: pip install curl-cffi")
 
-        super().__init__()
+        super().__init__(settings)
 
         # curl_cffi特有配置
         self.impersonate: str | None = DEFAULT_CHROME
@@ -68,9 +72,6 @@ class CurlCffiAdapter(DownloaderAdapter):
         # 按 (proxy, verify, impersonate) 缓存 Session，以复用连接
         self._sessions: dict[tuple[str | None, bool, str | None], Any] = {}
         self._sessions_lock: threading.Lock = threading.Lock()
-        # 是否读取环境变量里的代理配置，默认关闭：代理应由调用方显式指定，
-        # 而不是取决于服务端所在机器的 HTTP_PROXY/ALL_PROXY
-        self.trust_env: bool = False
 
         # User Agent生成器
         self.ua_generator: Any = _user_agent_cls(platforms="desktop") if _user_agent_cls is not None else None
@@ -88,12 +89,20 @@ class CurlCffiAdapter(DownloaderAdapter):
 
         with self._sessions_lock:
             if key not in self._sessions:
-                self._sessions[key] = _curl_cffi.Session(
-                    proxies=self._build_proxies(proxy),
-                    verify=verify,
-                    impersonate=impersonate or DEFAULT_CHROME,
-                    trust_env=bool(self.trust_env),
-                )
+                session_kwargs: dict[str, Any] = {
+                    "proxies": self._build_proxies(proxy),
+                    "verify": verify,
+                    "impersonate": impersonate or DEFAULT_CHROME,
+                    "trust_env": bool(self.trust_env),
+                    "timeout": self.settings.download_timeout,
+                }
+                # 调用方显式指定了代理时，必须同时清空 no-proxy 列表。
+                # libcurl 会自行读取环境里的 no_proxy/NO_PROXY，命中的目标会
+                # 绕过我们设置的代理直连并返回 200——代理被静默丢弃，
+                # 调用方还以为走了代理。空字符串表示"没有任何主机免代理"。
+                if proxy and _curl_opt is not None:
+                    session_kwargs["curl_options"] = {_curl_opt.NOPROXY: ""}
+                self._sessions[key] = _curl_cffi.Session(**session_kwargs)
             return self._sessions[key]
 
     def _build_proxies(self, proxy: str | None) -> "ProxySpec | None":

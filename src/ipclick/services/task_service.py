@@ -9,6 +9,7 @@ from typing_extensions import override
 
 from ipclick.adapters.base import DownloaderAdapter
 from ipclick.adapters.registry import get_adapter, get_default_adapter
+from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.models import METHOD_MAP, IPClickAdapter
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
 from ipclick.dto.response import Response
@@ -19,10 +20,9 @@ from ipclick.utils.log_util import log
 from ipclick.utils.url_util import URLPolicy, validate_url
 
 
-# proto 未设置这些字段时服务端采用的默认值
-_DEFAULT_TIMEOUT = 60.0
-_DEFAULT_MAX_RETRIES = 3
-_DEFAULT_RETRY_BACKOFF = 2.0
+# proto 未设置这些字段时服务端采用的默认值。
+# 超时与重试三项改从 [DOWNLOADER] 配置读取（见 self.adapter_settings），
+# 这里只保留没有对应配置项的布尔默认值。
 _DEFAULT_VERIFY_SSL = True
 _DEFAULT_ALLOW_REDIRECTS = True
 _DEFAULT_STREAM = False
@@ -42,11 +42,10 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     def __init__(self, config: Settings):
         self.config: Settings = config
-        # 适配器配置
-        self.adapter_config: dict[str, Any] = {
-            "DOWNLOADER": self.config.get("DOWNLOADER", {}),
-            "BROWSER": self.config.get("BROWSER", {}),
-        }
+
+        # 适配器默认行为。此前这里只是把 [DOWNLOADER] 存进一个再没被读过的
+        # dict，导致配置文件里的超时与重试策略完全不生效。
+        self.adapter_settings: AdapterSettings = AdapterSettings.from_config(dict(self.config.get("DOWNLOADER", {})))
 
         self._adapter_cache: dict[str, DownloaderAdapter] = {}
         self._cache_lock: threading.Lock = threading.Lock()
@@ -55,11 +54,16 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         self.url_policy: URLPolicy = URLPolicy.from_config(dict(self.config.get("SECURITY", {})))
 
         # 获取默认适配器
-        self.default_adapter: DownloaderAdapter = get_default_adapter()
+        self.default_adapter: DownloaderAdapter = get_default_adapter(self.adapter_settings)
         self._adapter_cache[self.default_adapter.adapter_name] = self.default_adapter
 
         # 记录初始化信息
-        log.debug(f"TaskService initialized with default adapter: {self.default_adapter.adapter_name}")
+        log.debug(
+            f"TaskService initialized with default adapter: {self.default_adapter.adapter_name}, "
+            f"timeout={self.adapter_settings.download_timeout}s, "
+            f"max_attempts={self.adapter_settings.max_attempts}, "
+            f"retry_codes={sorted(self.adapter_settings.retry_codes)}"
+        )
         if self.url_policy.block_private_networks:
             log.info("已启用内网地址拦截")
         else:
@@ -83,7 +87,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
         with self._cache_lock:
             if name not in self._adapter_cache:
-                self._adapter_cache[name] = get_adapter(name)
+                self._adapter_cache[name] = get_adapter(name, self.adapter_settings)
             return self._adapter_cache[name]
 
     # ------------------------------------------------------------------ #
@@ -187,10 +191,19 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             "data": data,
             "json": json_data,
             "proxy": request.proxy or None,
-            "timeout": request.timeout_seconds if request.HasField("timeout_seconds") else _DEFAULT_TIMEOUT,
-            "max_retries": request.max_retries if request.HasField("max_retries") else _DEFAULT_MAX_RETRIES,
+            # 未设置时回落到 [DOWNLOADER] 配置，而不是写死的常量
+            "timeout": (
+                request.timeout_seconds
+                if request.HasField("timeout_seconds")
+                else self.adapter_settings.download_timeout
+            ),
+            "max_retries": (
+                request.max_retries if request.HasField("max_retries") else self.adapter_settings.max_attempts
+            ),
             "retry_delay": (
-                request.retry_backoff_seconds if request.HasField("retry_backoff_seconds") else _DEFAULT_RETRY_BACKOFF
+                request.retry_backoff_seconds
+                if request.HasField("retry_backoff_seconds")
+                else self.adapter_settings.initial_backoff
             ),
             "verify": request.verify_ssl if request.HasField("verify_ssl") else _DEFAULT_VERIFY_SSL,
             "allow_redirects": (
@@ -207,7 +220,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
         # timeout 为 0 会让适配器立刻超时，这里兜底成默认值
         if not download_kwargs["timeout"] or download_kwargs["timeout"] <= 0:
-            download_kwargs["timeout"] = _DEFAULT_TIMEOUT
+            download_kwargs["timeout"] = self.adapter_settings.download_timeout
 
         return adapter.download(request.url, **download_kwargs)
 

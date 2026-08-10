@@ -5,16 +5,15 @@ from random import uniform
 import time
 from typing import Any
 
+from ipclick.adapters.settings import DEFAULT_RETRY_STATUS_CODES, AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.utils.log_util import log
 
 
 # 单次重试等待的上限（秒）。服务端每个请求占用一个 gRPC worker 线程，
 # 原来的 min(2**attempt, 600) 在 max_retries 稍大时会让线程睡上十分钟。
-MAX_RETRY_DELAY = 30.0
-
-# 默认触发重试的状态码（连接层异常总是会重试，与此无关）
-DEFAULT_RETRY_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+# 现在可由 [DOWNLOADER.retry].max_backoff 覆盖，此处仅作为未配置时的默认值。
+MAX_RETRY_DELAY = AdapterSettings().max_backoff
 
 
 def _coerce_delay(value: Any, default: float) -> float:
@@ -64,7 +63,13 @@ def retry(max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_
 
             url = args[0] if args else kwargs.get("url", "unknown")
             allowed = kwargs.get("allowed_status_codes") or None
-            retry_codes = DEFAULT_RETRY_STATUS_CODES
+
+            # 退避参数取自适配器的 settings（来自 [DOWNLOADER.retry]），
+            # 没有 settings 的适配器（如测试里的假实现）回落到模块默认值。
+            settings: AdapterSettings | None = getattr(self, "settings", None)
+            retry_codes = settings.retry_codes if settings else DEFAULT_RETRY_STATUS_CODES
+            exponent = settings.backoff_exponent if settings else 2.0
+            max_backoff = settings.max_backoff if settings else MAX_RETRY_DELAY
 
             last_exception: Exception | None = None
 
@@ -85,7 +90,7 @@ def retry(max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_
                         and status in retry_codes
                         and not (allowed and status in allowed)
                     ):
-                        sleep_time = _backoff(attempt, base_delay)
+                        sleep_time = _backoff(attempt, base_delay, exponent, max_backoff)
                         log.warning(
                             f"Download {url} returned {status}, "
                             f"retrying {attempt + 1}/{max_retries} in {sleep_time:.1f}s..."
@@ -101,7 +106,7 @@ def retry(max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_
                     if attempt >= max_retries:
                         return Response.error_response(url, e)
 
-                    sleep_time = _backoff(attempt, base_delay)
+                    sleep_time = _backoff(attempt, base_delay, exponent, max_backoff)
                     # 原来这行日志裹在 `if hasattr(self, "logger")` 里，而适配器
                     # 从来没有 logger 属性，等于重试全程静默。
                     log.warning(
@@ -117,12 +122,18 @@ def retry(max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_
     return decorator
 
 
-def _backoff(attempt: int, base_delay: float) -> float:
-    """指数退避 + 抖动，并封顶到 MAX_RETRY_DELAY。
+def _backoff(
+    attempt: int,
+    base_delay: float,
+    exponent: float = 2.0,
+    max_backoff: float = MAX_RETRY_DELAY,
+) -> float:
+    """指数退避 + 抖动，并封顶到 max_backoff。
 
     抖动可以避免多个并发任务在同一时刻集体重试（惊群）。
+    exponent / max_backoff 来自 [DOWNLOADER.retry] 配置。
     """
-    delay = min(base_delay * (2**attempt), MAX_RETRY_DELAY)
+    delay = min(base_delay * (exponent**attempt), max_backoff)
     return delay * uniform(0.8, 1.2)
 
 
@@ -131,12 +142,22 @@ class DownloaderAdapter(ABC):
 
     adapter_name: str = "base_downloader_adapter"
 
-    def __init__(self):
+    def __init__(self, settings: AdapterSettings | None = None):
+        """
+        Args:
+            settings: 来自配置文件 ``[DOWNLOADER]`` 节的默认行为。
+                请求级参数（timeout / max_retries / ...）优先于这里的值。
+        """
+        self.settings: AdapterSettings = settings or AdapterSettings()
+
         self.proxy: str | None = None
-        self.max_retries: int = 3
-        self.retry_delay: float = 1.0
-        self.timeout: float = 30
+        # 这几个属性是 retry 装饰器和各适配器读取的"未显式传参时的默认值"
+        self.max_retries: int = self.settings.max_attempts
+        self.retry_delay: float = self.settings.initial_backoff
+        self.timeout: float = self.settings.download_timeout
+        self.connect_timeout: float = self.settings.connect_timeout
         self.verify_ssl: bool = True
+        self.trust_env: bool = self.settings.trust_env
         # 兜底 UA：fake_useragent 不可用或抛错时使用
         self.user_agent: str = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

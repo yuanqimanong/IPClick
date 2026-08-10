@@ -28,8 +28,12 @@ class IPClickServer:
 
     def __init__(self, config_path: str | None = None):
         self.config: Settings = load_config(config_path)
-        # 按配置里的 [LOG] 节初始化日志（此前这一节完全没被读取过）
-        LogUtil.init_from_config(dict(self.config.get("LOG", {})))
+        # 按配置里的 [LOG] 节初始化日志（此前这一节完全没被读取过）；
+        # [GENERAL].debug 为真时强制 DEBUG 级别
+        LogUtil.init_from_config(
+            dict(self.config.get("LOG", {})),
+            debug=bool(dict(self.config.get("GENERAL", {})).get("debug", False)),
+        )
         self.server: Server | None = None
         self.task_service: TaskService | None = None
         log.info("IPClickServer initialized")

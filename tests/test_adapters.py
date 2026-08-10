@@ -223,6 +223,45 @@ class TestProxyParameter:
         finally:
             adapter.close()
 
+    @pytest.mark.skipif(not CURL_CFFI_AVAILABLE, reason="curl_cffi 未安装")
+    def test_explicit_proxy_overrides_ambient_no_proxy(self, monkeypatch: pytest.MonkeyPatch, http_server: str):
+        """回归：libcurl 自行读取环境里的 no_proxy/NO_PROXY，命中的目标会绕过
+        我们设置的代理直连并返回 200——显式指定的代理被静默丢弃。
+
+        这里把本地目标加进 NO_PROXY，再指定一个不可达的代理：修复后请求必须
+        走代理（因而失败），而不是无视代理直连成功。
+        """
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+
+        adapter = CurlCffiAdapter()
+        try:
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                dead_proxy_port = int(s.getsockname()[1])
+
+            resp = adapter.download(
+                f"{http_server}/x",
+                method="GET",
+                proxy=f"http://127.0.0.1:{dead_proxy_port}",
+                max_retries=0,
+                kwargs="{}",
+            )
+            assert resp.status_code == -1, "指定了不可达代理却请求成功，说明代理被 NO_PROXY 绕过了"
+        finally:
+            adapter.close()
+
+    @pytest.mark.skipif(not CURL_CFFI_AVAILABLE, reason="curl_cffi 未安装")
+    def test_no_proxy_option_only_set_when_proxy_given(self):
+        """不指定代理时不应干预 no-proxy 行为。"""
+        adapter = CurlCffiAdapter()
+        try:
+            assert adapter._get_session(None, True, "chrome") is not None
+            assert adapter._get_session("http://127.0.0.1:9", True, "chrome") is not None
+            assert len(adapter._sessions) == 2
+        finally:
+            adapter.close()
+
     @pytest.mark.skipif(not HTTPX_AVAILABLE, reason="httpx 未安装")
     def test_httpx_does_not_trust_env_by_default(self):
         """回归：httpx trust_env 默认 True 会捡起环境里的 ALL_PROXY，

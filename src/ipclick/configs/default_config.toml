@@ -1,10 +1,10 @@
 # ================ SDK配置 [CLIENT] ================
 # -------------- 基础配置 [GENERAL] --------------
-# ⚠️ 尚未实现：本节配置当前没有任何消费方，修改不会生效（详见 README「尚未实现 / 已知限制」）
 [GENERAL]
 # 程序运行模式: "standalone" (单机) | "cluster" (多机器/集群)
+# ⚠️ 尚未实现：集群模式待 [CLUSTER] 一并支持，当前恒为单机
 mode = "standalone"
-# 调试模式 (开启后输出详细日志)
+# 调试模式 (开启后强制 DEBUG 级别日志，覆盖 [LOG].level)
 debug = false
 
 # ------- 代理配置 [PROXY] -------
@@ -58,38 +58,31 @@ block_private_networks = false
 allowlist = []
 
 # ------- 下载器配置 [DOWNLOADER] -------
-# ⚠️ 尚未实现：本节配置当前没有任何消费方，修改不会生效（详见 README「尚未实现 / 已知限制」）
-# 超时与重试请按请求传参：downloader.get(url, timeout=..., max_retries=..., retry_backoff=...)
+# 这些是"请求未显式传参时"的默认值。单次请求传的 timeout / max_retries /
+# retry_backoff 优先级更高。
 [DOWNLOADER]
 # 连接超时（秒）
 connect_timeout = 10
 # 下载超时（秒）
 download_timeout = 300
+# 是否读取环境变量里的代理设置（HTTP_PROXY / ALL_PROXY）。
+# 默认关闭：代理应由调用方显式指定，而不是取决于服务端所在机器的环境
+trust_env = false
 # 失败重试策略
 [DOWNLOADER.retry]
-max_attempts = 3                # 最大重试次数
-backoff_exponent = 2.0          # 退避指数（等待时间 = base * (exponent^重试次数)）
-initial_backoff = 1             # 初始等待时间（秒）
-max_backoff = 60                # 最大等待时间（秒）
-retry_codes = [500, 502, 503]   # 触发重试的状态码
-# 并发控制
+max_attempts = 3                     # 最大重试次数（0 = 不重试）
+backoff_exponent = 2.0               # 退避指数（等待 = initial_backoff * exponent^已重试次数）
+initial_backoff = 1                  # 初始等待时间（秒）
+max_backoff = 30                     # 单次等待上限（秒，硬上限 300）
+retry_codes = [429, 500, 502, 503, 504]  # 触发重试的状态码；连接层异常总是会重试
+# 连接池
 [DOWNLOADER.concurrency]
-max_threads = 8                 # 最大下载线程数
-per_host_connections = 2        # 单目标主机最大并发连接数
-# 流量控制（KB/s）
-[DOWNLOADER.rate_limit]
-enabled = false
-download_speed = 1024           # 下载限速值（0=不限速）
-upload_speed = 512              # 上传限速值（P2P场景）
-# 分块下载（大文件优化）
-[DOWNLOADER.chunk]
-enabled = true
-chunk_size = 10                 # 分块大小（MB）
-verify_checksum = true          # 下载完成后校验哈希
-# 临时存储
-[DOWNLOADER.storage]
-temp_dir = "/tmp/downloads"     # 分块临时存储目录
-auto_clean = true               # 下载完成后清除临时文件
+max_connections = 100           # 连接池总上限
+max_keepalive_connections = 20  # 保持长连接的上限
+
+# 说明：限速（rate_limit）、分块下载（chunk）、临时存储（storage）依赖真正的
+# 流式传输通路，当前的 protobuf 协议是整个响应体一条消息，无法支持。
+# 这些配置项已从默认配置移除，待流式下载实现后再引入，避免"配了却不生效"。
 
 # ------- 浏览器渲染配置 [BROWSER] -------
 # ⚠️ 尚未实现：本节配置当前没有任何消费方，修改不会生效（详见 README「尚未实现 / 已知限制」）
@@ -135,7 +128,7 @@ level = "strict"    # strict/moderate/off
 
 
 # ================ 监控配置 [MONITOR] ================
-# ⚠️ 尚未实现：本节配置当前没有任何消费方，修改不会生效（详见 README「尚未实现 / 已知限制」）
+# ⚠️ 尚未实现：健康检查将随 gRPC 标准健康检查协议一并支持（见 README 路线图）
 [MONITOR]
 health_check = true
 
