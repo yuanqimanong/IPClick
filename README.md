@@ -19,7 +19,7 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 - **gRPC 通信**：使用 gRPC 协议进行高效的客户端-服务端通信
 - **连接复用**：客户端复用 gRPC channel，服务端复用适配器与 HTTP 连接池
 - **代理支持**：灵活的代理配置，支持 HTTP/HTTPS 代理
-- **自动重试**：内置请求重试机制，支持指数退避 + 抖动，并可按状态码重试
+- **自动重试**：适配器内重试（指数退避 + 抖动、按状态码）+ 客户端到服务端这一跳的重试
 - **按 host 限流**：服务端按目标域名严格限制并发数与 QPS，避免把单个站点打爆
 - **流式下载**：大文件分片传输，服务端与客户端都不需要把整个响应体驻留内存
 - **断点续传**：中断后用 HTTP Range 接着下，`If-Range` 保证不会拼接两个版本
@@ -281,6 +281,36 @@ async with AsyncDownloader() as d:
 ```
 
 参数含义、默认值、异常类型与同步版完全一致（两者共用同一套配置与任务组装逻辑）。
+
+### 单机还是集群，由配置决定
+
+`create_client()` 按 `[GENERAL].mode` 返回 `Downloader` 或 `ClusterDownloader`，
+两者的请求接口一致，调用方通常不用关心：
+
+```python
+from ipclick import create_client
+
+with create_client() as d:          # mode = standalone / cluster / auto
+    resp = d.get("https://example.com")
+```
+
+`mode = "cluster"` 却没配任何节点会**直接报错**，不会静默退回单机——那会让你
+以为集群生效了，实际所有流量都打在一个节点上、也没有故障转移。
+
+### 客户端重试
+
+适配器内部的重试解决的是"目标站点抖了"；`[CLIENT]` 这组解决的是"我们自己的
+服务端抖了"：
+
+```toml
+[CLIENT]
+rpc_max_retries = 2
+rpc_retry_backoff = 0.5
+```
+
+**只有 `UNAVAILABLE` 会重试**——那意味着连接压根没建起来，请求没到过服务端，
+重发是安全的。`DEADLINE_EXCEEDED` 刻意不重试：请求可能已经在服务端执行了，
+只是回复没赶上，这时重发一个 POST 就是重复下单。
 
 ### 使用全局下载器
 
@@ -919,7 +949,6 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
   数据。批量则是整批发给同一个节点，不跨节点拆分。
 - **文件上传**：`files` 参数会抛 `NotImplementedError`。
 - **Cookie 持久化**：请求之间不共享 cookie jar，每次请求相互独立。
-- **客户端重试**：重试只发生在服务端适配器内部；客户端到服务端这一跳失败不会重试。
 
 
 ## 🗺️ 路线图
@@ -932,7 +961,8 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 | **P4** 集群 | 节点池 ✅、负载均衡 ✅、健康探测 ✅、故障转移 ✅、只读状态页 ✅ | ✅ 已完成 |
 | **P5** 适配器 | `requests` ✅、`playwright` ✅（连带 `[BROWSER]` 与浏览器渲染） | ✅ 已完成 |
 | **P6** 限流与引擎 | 按 host 并发 / QPS 限制 ✅、浏览器引擎可插拔（camoufox / patchright / DrissionPage）✅ | ✅ 已完成 |
-| **P7** 待定 | mTLS、服务发现、分块下载、Cookie 持久化 | 计划中 |
+| **P7** 生产化 | TLS/mTLS ✅、断点续传 ✅、分布式限流 ✅、DNS 服务发现 ✅、客户端重试 ✅、`[GENERAL].mode` ✅ | ✅ 已完成 |
+| **P8** 待定 | 异步服务端、文件上传、Cookie 持久化、etcd/Consul 原生发现 | 计划中 |
 
 ## 🛠️ 开发
 

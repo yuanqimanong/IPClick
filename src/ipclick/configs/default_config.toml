@@ -1,11 +1,27 @@
 # ================ SDK配置 [CLIENT] ================
 # -------------- 基础配置 [GENERAL] --------------
 [GENERAL]
-# 程序运行模式: "standalone" (单机) | "cluster" (多机器/集群)
-# ⚠️ 尚未实现：集群模式待 [CLUSTER] 一并支持，当前恒为单机
+# 客户端运行模式，供 ipclick.create_client() 使用：
+#   standalone 连单个 [SERVER].host:port（默认）
+#   cluster    用 [CLUSTER] 的节点池、负载均衡与故障转移
+#   auto       配了节点就走集群，没配就单机
+# 注意：mode = "cluster" 却没配任何节点会直接报错，不会静默退回单机——
+# 那会让你以为集群生效了，实际所有流量都打在一个节点上、也没有故障转移。
 mode = "standalone"
 # 调试模式 (开启后强制 DEBUG 级别日志，覆盖 [LOG].level)
 debug = false
+
+# ------- 客户端配置 [CLIENT] -------
+# 客户端到服务端这一跳的重试。适配器内部的重试解决的是"目标站点抖了"，
+# 这里解决的是"我们自己的服务端抖了"，两者互不覆盖。
+[CLIENT]
+# 最多重试几次（0 = 不重试）
+rpc_max_retries = 2
+# 退避基数（秒），实际等待 = 基数 * 2^已重试次数
+rpc_retry_backoff = 0.5
+# 说明：只有 UNAVAILABLE（连接压根没建起来、请求没到过服务端）才会重试。
+# DEADLINE_EXCEEDED 刻意不重试——请求可能已经在服务端执行了，只是回复没赶上，
+# 这时重发一个 POST 就是重复下单。
 
 # ------- 代理配置 [PROXY] -------
 # 供 downloader.get(url, proxy=True) 使用。默认留空表示"未配置代理"，

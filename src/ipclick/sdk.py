@@ -1,6 +1,7 @@
 from collections.abc import Iterable, Iterator
 import json as json_lib
 import threading
+import time
 from typing import Any
 
 import grpc
@@ -30,6 +31,23 @@ _MAX_MESSAGE_LENGTH = 500 * 1024 * 1024
 # RPC 超时在任务超时之上留的余量（秒）：服务端还要做重试、解析和序列化，
 # 如果 deadline 正好等于任务超时，客户端会先于服务端超时，拿不到错误详情。
 _RPC_TIMEOUT_MARGIN = 30.0
+
+
+def _as_int(value: Any, default: int) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return default
+    return result if result >= 0 else default
+
+
+def _as_float(value: Any, default: float) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    return result if result >= 0 else default
+
 
 #: gRPC channel 选项，同步与异步客户端共用
 CHANNEL_OPTIONS: list[tuple[str, Any]] = [
@@ -193,6 +211,12 @@ class ClientBase:
         self.tls: TLSSettings = tls or TLSSettings.from_config(security_config)
         self._credentials: grpc.ChannelCredentials | None = channel_credentials(self.tls) if self.tls.enabled else None
         self._channel_options: list[tuple[str, Any]] = CHANNEL_OPTIONS + channel_options(self.tls)
+
+        # 客户端到服务端这一跳的重试。适配器内部的重试解决的是"目标站点抖了"，
+        # 这里解决的是"我们自己的服务端抖了"，两者互不覆盖。
+        client_config = dict(self.config.get("CLIENT", {}))
+        self.rpc_max_retries: int = _as_int(client_config.get("rpc_max_retries"), 2)
+        self.rpc_retry_backoff: float = _as_float(client_config.get("rpc_retry_backoff"), 0.5)
         # 子类的 close() 会改写它，声明在这里以便类型检查器识别
         self._closed: bool = False
 
@@ -234,6 +258,30 @@ class ClientBase:
         if code is grpc.StatusCode.RESOURCE_EXHAUSTED:
             return HostLimitTimeout(f"服务端限流：{details}")
         return TransportError(f"gRPC 调用失败 [{code}]: {details}")
+
+    def _should_retry_rpc(self, error: grpc.RpcError, attempt: int) -> bool:
+        """这次 RPC 失败能不能安全重试。
+
+        只认 UNAVAILABLE：那意味着**连接就没建起来**，请求根本没到过服务端，
+        重发不会造成重复执行。
+
+        DEADLINE_EXCEEDED 刻意不重试——请求可能已经发出去、服务端正在执行，
+        只是回复没赶上。这时重发一个 POST 就是重复下单。宁可让调用方拿到超时
+        自己决定，也不替它做这个决定。
+        """
+        if attempt >= self.rpc_max_retries:
+            return False
+        code = error.code() if hasattr(error, "code") else None
+        return code is grpc.StatusCode.UNAVAILABLE
+
+    def _sleep_before_retry(self, error: grpc.RpcError, attempt: int) -> None:
+        delay = self.rpc_retry_backoff * (2**attempt)
+        details = error.details() if hasattr(error, "details") else str(error)
+        log.warning(
+            f"连接服务端 {self.target} 失败（第 {attempt + 1}/{self.rpc_max_retries + 1} 次），"
+            f"{delay:.1f} 秒后重试：{details}"
+        )
+        time.sleep(delay)
 
     def _build_task(
         self,
@@ -462,13 +510,20 @@ class Downloader(ClientBase):
         pb_request = task.to_protobuf()
         stub = self._get_stub()
 
-        try:
-            pb_response = stub.Send(pb_request, timeout=self._deadline(task), metadata=self._metadata or None)
-            return DownloadResponse.from_protobuf(pb_response)
-        except grpc.RpcError as e:
-            raise self._rpc_error(e) from e
-        except Exception as e:
-            raise TransportError(f"连接 {self.target} 失败: {e}") from e
+        for attempt in range(self.rpc_max_retries + 1):
+            try:
+                pb_response = stub.Send(pb_request, timeout=self._deadline(task), metadata=self._metadata or None)
+                return DownloadResponse.from_protobuf(pb_response)
+            except grpc.RpcError as e:
+                if not self._should_retry_rpc(e, attempt):
+                    raise self._rpc_error(e) from e
+                self._sleep_before_retry(e, attempt)
+            except Exception as e:
+                raise TransportError(f"连接 {self.target} 失败: {e}") from e
+
+        # for 正常走完只可能是最后一次也重试失败了，而那一次 _should_retry_rpc
+        # 会返回 False 并抛出——所以这里理论上不可达，留个明确的错误兜底。
+        raise TransportError(f"连接 {self.target} 失败：重试 {self.rpc_max_retries} 次后仍不可用")
 
     # ------------------------------------------------------------------ #
     # 流式下载

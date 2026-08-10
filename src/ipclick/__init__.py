@@ -19,6 +19,7 @@ from ipclick.exceptions import (
     URLNotAllowedError,
     ValidationError,
 )
+from ipclick.factory import create_client
 from ipclick.limiter import HostLimitTimeout
 from ipclick.sdk import Downloader, close_all_downloaders, downloader, get_downloader
 
@@ -37,6 +38,7 @@ __all__ = [  # noqa: RUF022 - 按用途分组比字母序更易读
     "get_downloader",
     "close_all_downloaders",
     "downloader",
+    "create_client",
     # 数据模型
     "DownloadTask",
     "DownloadResponse",

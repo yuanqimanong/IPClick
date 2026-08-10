@@ -75,6 +75,12 @@ P3 扩展传输能力，P4 做集群，P5 补齐适配器，P6 加限流与可�
   中断后用 HTTP Range 接着下。带 `If-Range` 校验，资源变了就丢掉重来而不是把两个
   版本拼在一起；服务端不支持 Range 时退化成整体重下。
 
+- **客户端重试**（`[CLIENT]`）：客户端到服务端这一跳失败时重试。只重试
+  `UNAVAILABLE`（连接没建起来、请求没到过服务端）；`DEADLINE_EXCEEDED` 刻意不
+  重试，避免重复执行已经在服务端跑起来的请求。
+- **`[GENERAL].mode` 终于有消费方**：`ipclick.create_client()` 按它返回单机或
+  集群客户端。`mode = "cluster"` 却没配节点会直接报错，不静默退回单机。
+
 ### 新增（P6）
 
 - **按 host 的并发与 QPS 限制**（`[DOWNLOADER.concurrency]` /
