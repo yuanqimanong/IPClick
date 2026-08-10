@@ -11,6 +11,7 @@ from ipclick.auth import AUTH_TOKEN_ENV, TokenAuthInterceptor, load_tokens
 from ipclick.config_loader import load_config
 from ipclick.dto.proto import task_pb2_grpc
 from ipclick.exceptions import ConfigError
+from ipclick.health import HealthReporter
 from ipclick.services import TaskService
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import LogUtil, log
@@ -37,6 +38,9 @@ class IPClickServer:
         )
         self.server: Server | None = None
         self.task_service: TaskService | None = None
+        self.health: HealthReporter = HealthReporter(
+            enabled=bool(dict(self.config.get("MONITOR", {})).get("health_check", True))
+        )
         log.info("IPClickServer initialized")
 
     def start(self, host: str | None = None, port: int | None = None) -> None:
@@ -90,6 +94,7 @@ class IPClickServer:
 
             # 注册服务
             task_pb2_grpc.add_TaskServiceServicer_to_server(self.task_service, self.server)
+            self.health.register(self.server)
 
             # 绑定地址
             listen_addr = f"{server_host}:{server_port}"
@@ -99,6 +104,8 @@ class IPClickServer:
 
             # 启动服务器
             self.server.start()
+            # 只有真正 start() 之后才宣告可服务，避免上游在还没监听时就打流量进来
+            self.health.set_serving()
 
             # 记录启动信息
             log.info(f"IPClick server started on {listen_addr} with {max_workers} workers")
@@ -151,6 +158,9 @@ class IPClickServer:
         """
         if self.server:
             log.info(f"Stopping gRPC server (grace period: {grace_period}s)...")
+            # 先把健康状态置为 NOT_SERVING 再 stop：上游负载均衡器据此摘掉本节点，
+            # 在途请求还能在优雅期内跑完。反过来做的话是先掐连接、上游才后知后觉。
+            self.health.enter_graceful_shutdown()
             # server.stop() 立即返回一个 Event，必须 wait 才算真的优雅停机；
             # 原来没等就往下走并 sys.exit(0)，在途请求会被直接掐断。
             stopped = self.server.stop(grace=grace_period)

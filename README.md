@@ -18,6 +18,7 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 - **代理支持**：灵活的代理配置，支持 HTTP/HTTPS 代理
 - **自动重试**：内置请求重试机制，支持指数退避 + 抖动，并可按状态码重试
 - **令牌鉴权**：gRPC 标准 Bearer 令牌，支持环境变量注入与多令牌轮换
+- **健康检查**：实现 `grpc.health.v1` 标准协议，K8s 探针与服务网格开箱即用
 - **SSRF 防护**：服务端对目标 URL 做协议白名单与内网/元数据地址拦截
 - **命令行工具**：提供便捷的 CLI 工具，支持快速启动服务和查看配置
 - **Docker 支持**：多阶段构建、非 root 运行的镜像
@@ -259,6 +260,43 @@ auth_token = ["新令牌", "旧令牌"]
 > 鉴权解决的是"**谁**能用"，下面的 SSRF 防护解决的是"能打到**哪儿**"。
 > 两者互相不能替代，公网部署两个都要开。
 
+### 健康检查
+
+服务端实现了 gRPC 标准的 `grpc.health.v1` 协议，Kubernetes 探针、
+`grpc_health_probe`、服务网格都能直接对接。**该接口免鉴权**。
+
+```bash
+ipclick health                    # 查总体状态
+ipclick health --port 9527
+ipclick health --service task.TaskService
+```
+
+健康时退出码 `0`，否则 `1` —— 可直接用于 Docker `HEALTHCHECK` 或就绪探针。
+
+Kubernetes：
+
+```yaml
+readinessProbe:
+  grpc: { port: 9527 }
+livenessProbe:
+  grpc: { port: 9527 }
+```
+
+**优雅停机会先把状态置为 `NOT_SERVING` 再停服务**，此时端口仍在监听、在途请求
+继续跑完，但负载均衡器已经可以据此摘除本节点。反过来做的话是先掐连接、
+上游才后知后觉。
+
+可通过 `[MONITOR].health_check = false` 关闭（关闭后该服务不注册，
+探活会收到 `UNIMPLEMENTED`）。
+
+在代码里探活（P4 集群的节点探活也用这个）：
+
+```python
+from ipclick.health import check_health
+
+healthy, status = check_health("10.0.0.1:9527", timeout=3)
+```
+
 ### 安全配置
 
 服务端会代替调用方请求任意 URL。**若监听在公网或不可信网络，请开启内网拦截**，
@@ -409,7 +447,7 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 | `[GENERAL]` | ⚠️ `debug` 生效；`mode` 待集群支持（P4） |
 | `[CLUSTER]` | ❌ `load_balancer` / `nodes` / `db_uri` 无消费方（P4） |
 | `[BROWSER]` | ❌ 无消费方（P5） |
-| `[MONITOR]` | ❌ `health_check` 待健康检查协议（P2） |
+| `[MONITOR]` | ⚠️ `health_check` 生效；metrics 相关待 P2-3 |
 
 > `[DOWNLOADER]` 的限速（`rate_limit`）、分块下载（`chunk`）、临时存储（`storage`）
 > 依赖真正的流式传输通路，已从默认配置移除，待流式下载实现后再引入（P3）。
@@ -433,15 +471,14 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 - **异步客户端**：只有同步 `Downloader`，没有 `grpc.aio` 版本。
 - **Cookie 持久化**：请求之间不共享 cookie jar，每次请求相互独立。
 - **客户端重试**：重试只发生在服务端适配器内部；客户端到服务端这一跳失败不会重试。
-- **可观测性**：没有 metrics，也没有实现 gRPC 标准健康检查协议。Docker 的
-  healthcheck 只是探测端口 TCP 可连。
+- **可观测性**：已实现 gRPC 标准健康检查；Prometheus metrics 尚未提供（P2-3）。
 
 ## 🗺️ 路线图
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **P1** 打通存量 | `[DOWNLOADER]` 生效、参数错误不再伪装成网络失败、`NO_PROXY` 处理、`[GENERAL].debug` | ✅ 已完成 |
-| **P2** 安全与可运维 | 服务端 token 鉴权 ✅、gRPC 标准健康检查、Prometheus metrics | 进行中 |
+| **P2** 安全与可运维 | 服务端 token 鉴权 ✅、gRPC 标准健康检查 ✅、Prometheus metrics | 进行中 |
 | **P3** 能力扩展 | 异步客户端、批量 RPC、真流式下载（连带限速 / 分块） | 计划中 |
 | **P4** 集群 | 节点池、负载均衡、健康探测、故障转移（依赖 P2 的健康检查） | 计划中 |
 | **P5** 适配器 | `requests`、`playwright` / `DrissionPage` / `undetected_chromedriver`（连带 `[BROWSER]` 与浏览器渲染） | 计划中 |

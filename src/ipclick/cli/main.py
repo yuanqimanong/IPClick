@@ -4,6 +4,7 @@ import click
 
 from ipclick import __version__
 from ipclick.config_loader import load_config
+from ipclick.health import check_health
 from ipclick.server import serve
 from ipclick.utils.log_util import LogUtil
 
@@ -39,6 +40,29 @@ def run(config: Path | None, port: int | None, host: str | None, verbose: bool):
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         raise click.Abort() from e
+
+
+@main.command()
+@click.option("--host", default="127.0.0.1", show_default=True, help="服务端地址")
+@click.option("--port", "-p", type=int, help="服务端端口（默认取配置）")
+@click.option("--config", "-c", type=click.Path(path_type=Path), help="配置文件路径")
+@click.option("--service", default="", help="要查询的服务名，默认查总体状态")
+@click.option("--timeout", type=float, default=5.0, show_default=True, help="超时（秒）")
+def health(host: str, port: int | None, config: Path | None, service: str, timeout: float):
+    """检查服务端健康状态（grpc.health.v1）。
+
+    健康时退出码 0，否则 1 —— 可直接用于 Docker HEALTHCHECK 或就绪探针。
+    该接口免鉴权，无需提供令牌。
+    """
+    LogUtil.init(level="ERROR")  # 探活只输出结论，不要日志噪音
+
+    resolved_port = port or int(dict(load_config(str(config) if config else None).get("SERVER", {})).get("port", 9527))
+    target = f"{host}:{resolved_port}"
+
+    healthy, status = check_health(target, service=service, timeout=timeout)
+    click.echo(f"{target} -> {status}")
+    if not healthy:
+        raise SystemExit(1)
 
 
 @main.command("config-info")

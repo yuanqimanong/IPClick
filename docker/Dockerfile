@@ -55,8 +55,9 @@ USER ipclick
 
 EXPOSE 9527
 
-# gRPC 服务没有 HTTP 健康检查端点，这里用一次 TCP 连接探活
+# 走 grpc.health.v1 标准健康检查，而不是只探 TCP 端口通不通——
+# 端口能连上不代表服务真的在可服务状态（例如正在优雅停机）。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import socket,sys; s=socket.create_connection(('127.0.0.1',9527),3); s.close()" || exit 1
+    CMD ipclick health --host 127.0.0.1 --port 9527 --timeout 3 || exit 1
 
 CMD ["ipclick", "run"]

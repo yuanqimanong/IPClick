@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "curl-cffi>=0.16.0,<0.17.0",
     "grpcio>=1.83.0,<2.0.0",
+    "grpcio-health-checking>=1.83.0,<2.0.0",
     "protobuf>=6.33.2,<8.0.0",
     "click>=8.4.2,<9.0.0",
     "httpx>=0.28.1,<0.29.0",

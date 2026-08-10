@@ -136,8 +136,9 @@ level = "strict"    # strict/moderate/off
 
 
 # ================ 监控配置 [MONITOR] ================
-# ⚠️ 尚未实现：健康检查将随 gRPC 标准健康检查协议一并支持（见 README 路线图）
 [MONITOR]
+# 是否注册 grpc.health.v1 健康检查服务（免鉴权，供 K8s 探针 / 服务网格使用）。
+# 关闭后探活会收到 UNIMPLEMENTED。
 health_check = true
 
 # ================ 日志配置 [LOG] ================
