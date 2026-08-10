@@ -27,14 +27,18 @@ def _reset_config_cache() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _reset_downloader_cache() -> Iterator[None]:
-    """清理 SDK 的全局下载器缓存，避免测试间共享 gRPC channel。"""
-    from ipclick import sdk
+    """清理全局下载器缓存，避免测试间共享 gRPC channel。
 
-    sdk._downloader_cache.clear()
+    缓存在 factory 里（不在 sdk 里）：让 sdk 去解释 [GENERAL].mode 会形成
+    sdk -> factory -> cluster -> sdk 的导入环。
+    """
+    from ipclick import factory
+
+    factory._downloader_cache.clear()
     yield
-    for instance in sdk._downloader_cache.values():
+    for instance in factory._downloader_cache.values():
         instance.close()
-    sdk._downloader_cache.clear()
+    factory._downloader_cache.clear()
 
 
 @pytest.fixture

@@ -103,3 +103,59 @@ class TestCreateClient:
                 client.close()
         finally:
             load_config.cache_clear()
+
+
+class TestGlobalDownloader:
+    """回归：全局 downloader / get_downloader 以前硬编码 Downloader。
+
+    于是配了 mode = "cluster" 的人只要用 `from ipclick import downloader` 就会
+    静默拿到单机客户端——所有流量打在一个节点上、没有故障转移，而 create_client()
+    那边却明确拒绝这种静默降级。同一个配置项在两条路径上表现不同，比不支持还糟。
+    """
+
+    def test_get_downloader_honours_cluster_mode(self, tmp_path):
+        from ipclick.cluster import ClusterDownloader
+        from ipclick.config_loader.loader import load_config
+        from ipclick.factory import get_downloader
+
+        cfg = tmp_path / "c.toml"
+        cfg.write_text(
+            '[GENERAL]\nmode = "cluster"\n\n[CLUSTER]\nnodes = [{ id = "a", address = "127.0.0.1:19527" }]\n'
+            "\n[CLUSTER.discovery]\nrefresh_interval = 0\n",
+            encoding="utf-8",
+        )
+        load_config.cache_clear()
+        try:
+            assert isinstance(get_downloader(str(cfg)), ClusterDownloader)
+        finally:
+            load_config.cache_clear()
+
+    def test_explicit_host_always_standalone(self, tmp_path):
+        """点名了地址就别再去解释 mode——调用方要的就是这个节点。"""
+        from ipclick.config_loader.loader import load_config
+        from ipclick.factory import get_downloader
+        from ipclick.sdk import Downloader
+
+        cfg = tmp_path / "c.toml"
+        cfg.write_text(
+            '[GENERAL]\nmode = "cluster"\n\n[CLUSTER]\nnodes = [{ id = "a", address = "127.0.0.1:19527" }]\n',
+            encoding="utf-8",
+        )
+        load_config.cache_clear()
+        try:
+            client = get_downloader(str(cfg), host="127.0.0.1", port=19999)
+            assert isinstance(client, Downloader)
+            assert client.port == 19999
+        finally:
+            load_config.cache_clear()
+
+    def test_standalone_by_default(self):
+        from ipclick.factory import get_downloader
+        from ipclick.sdk import Downloader
+
+        assert isinstance(get_downloader(), Downloader)
+
+    def test_instances_are_cached(self):
+        from ipclick.factory import get_downloader
+
+        assert get_downloader() is get_downloader()

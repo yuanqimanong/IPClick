@@ -22,7 +22,6 @@ from ipclick.limiter import HostLimitTimeout
 from ipclick.tls import TLSSettings, channel_credentials, channel_options, describe
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
-from ipclick.utils.secure_util import SecureUtil
 
 
 # 单条消息上限（收发一致）
@@ -617,49 +616,3 @@ class Downloader(ClientBase):
 
 
 # 按 (config_path, host, port) 缓存的下载器实例。
-# 用普通 dict：defaultdict(Downloader) 会在任何一次误访问时凭空造出一个客户端。
-_downloader_cache: dict[str, Downloader] = {}
-_cache_lock = threading.Lock()
-
-
-def get_downloader(config_path: str | None = None, host: str | None = None, port: int | None = None) -> Downloader:
-    """获取（并缓存）下载器实例。相同参数返回同一个实例，以复用 gRPC 连接。"""
-    key = SecureUtil.md5([config_path, host, port])
-    downloader_instance = _downloader_cache.get(key)
-    if downloader_instance is not None:
-        return downloader_instance
-
-    with _cache_lock:
-        if key not in _downloader_cache:
-            _downloader_cache[key] = Downloader(config_path=config_path, host=host, port=port)
-        return _downloader_cache[key]
-
-
-def close_all_downloaders() -> None:
-    """关闭所有缓存的下载器（进程退出前调用，或在测试中隔离状态）。"""
-    with _cache_lock:
-        for instance in _downloader_cache.values():
-            instance.close()
-        _downloader_cache.clear()
-
-
-class _LazyDownloader:
-    """``ipclick.downloader`` 的惰性代理。
-
-    以前这里是模块导入时就 ``Downloader()``，于是 ``import ipclick`` 会立刻
-    读配置文件、打日志；服务端也 import 了 sdk，等于起服务先造一个客户端。
-    改成首次真正使用时才构造。
-    """
-
-    __slots__: tuple[str, ...] = ()
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(get_downloader(), name)
-
-    @override
-    def __repr__(self) -> str:
-        return "<ipclick.downloader (lazy)>"
-
-
-# 向后兼容的别名：downloader.get(...) 等用法保持不变
-downloader: Any = _LazyDownloader()

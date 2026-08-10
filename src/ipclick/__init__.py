@@ -19,9 +19,9 @@ from ipclick.exceptions import (
     URLNotAllowedError,
     ValidationError,
 )
-from ipclick.factory import create_client
+from ipclick.factory import close_all_downloaders, create_client, downloader, get_downloader
 from ipclick.limiter import HostLimitTimeout
-from ipclick.sdk import Downloader, close_all_downloaders, downloader, get_downloader
+from ipclick.sdk import Downloader
 
 
 try:

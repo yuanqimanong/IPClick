@@ -71,23 +71,75 @@ class TestConfigInfo:
         cfg = tmp_path / "c.toml"
         cfg.write_text("[SECURITY]\nblock_private_networks = true\n", encoding="utf-8")
         result = runner.invoke(main, ["config-info", "--config", str(cfg)])
-        assert "Block private networks: True" in result.output
+        assert "拦截内网地址: True" in result.output
 
-    def test_does_not_print_unimplemented_config(self, runner: CliRunner, tmp_path: Path):
-        """[DOWNLOADER] 目前没有消费方，打印它会让人以为改了就生效。"""
+    def test_auth_token_value_not_printed(self, runner: CliRunner, tmp_path: Path):
+        """只说有没有配，绝不打印令牌本身。"""
         cfg = tmp_path / "c.toml"
-        cfg.write_text("[DOWNLOADER]\nconnect_timeout = 999\ndownload_timeout = 888\n", encoding="utf-8")
+        cfg.write_text('[SECURITY]\nauth_token = "sup3r-s3cret-token"\n', encoding="utf-8")
         result = runner.invoke(main, ["config-info", "--config", str(cfg)])
         assert result.exit_code == 0
-        assert "999" not in result.output
-        assert "888" not in result.output
+        assert "sup3r-s3cret-token" not in result.output
+        assert "令牌鉴权:     已配置" in result.output
 
-    def test_cluster_nodes_marked_unimplemented(self, runner: CliRunner):
-        """默认配置里有一个预留节点，必须标注尚未实现。"""
-        result = runner.invoke(main, ["config-info"])
+    def test_warns_when_no_auth(self, runner: CliRunner, tmp_path: Path):
+        cfg = tmp_path / "c.toml"
+        cfg.write_text("[SERVER]\nport = 1\n", encoding="utf-8")
+        result = runner.invoke(main, ["config-info", "--config", str(cfg)])
+        assert "任何人都能调用" in result.output
+
+    def test_shows_tls_state(self, runner: CliRunner, tmp_path: Path):
+        """TLS 配错了不会报错，只会悄悄少一层防护——必须能一眼看到。"""
+        cfg = tmp_path / "c.toml"
+        cfg.write_text(
+            '[SECURITY.tls]\nenabled = true\ncert_file = "/c"\nkey_file = "/k"\n'
+            'ca_file = "/ca"\nrequire_client_cert = true\n',
+            encoding="utf-8",
+        )
+        result = runner.invoke(main, ["config-info", "--config", str(cfg)])
+        assert "mTLS" in result.output
+
+    def test_shows_host_limits(self, runner: CliRunner, tmp_path: Path):
+        cfg = tmp_path / "c.toml"
+        cfg.write_text(
+            "[DOWNLOADER.concurrency]\nper_host_max_concurrent = 7\n"
+            '\n[DOWNLOADER.rate_limit]\nper_host_qps = 3\nbackend = "redis"\n',
+            encoding="utf-8",
+        )
+        result = runner.invoke(main, ["config-info", "--config", str(cfg)])
+        assert "并发上限:     7" in result.output
+        assert "集群共享" in result.output
+
+    def test_limits_off_by_default(self, runner: CliRunner, tmp_path: Path):
+        cfg = tmp_path / "c.toml"
+        cfg.write_text("[SERVER]\nport = 1\n", encoding="utf-8")
+        result = runner.invoke(main, ["config-info", "--config", str(cfg)])
+        assert "Per-host limits:\n  未启用" in result.output
+
+    def test_shows_resolved_browser_engine(self, runner: CliRunner, tmp_path: Path):
+        """engine = auto 时要显示**实际解析到**的引擎，不然等于没说。"""
+        cfg = tmp_path / "c.toml"
+        cfg.write_text('[BROWSER]\nengine = "playwright"\n', encoding="utf-8")
+        result = runner.invoke(main, ["config-info", "--config", str(cfg)])
+        assert "playwright" in result.output
+
+    def test_bad_engine_reported_not_crashed(self, runner: CliRunner, tmp_path: Path):
+        """配置写错了要说清楚，而不是让整条命令挂掉。"""
+        cfg = tmp_path / "c.toml"
+        cfg.write_text('[BROWSER]\nengine = "netscape"\n', encoding="utf-8")
+        result = runner.invoke(main, ["config-info", "--config", str(cfg)])
         assert result.exit_code == 0
-        if "Cluster nodes" in result.output:
-            assert "尚未实现" in result.output
+        assert "配置错误" in result.output
+
+    def test_shows_client_mode(self, runner: CliRunner, tmp_path: Path):
+        cfg = tmp_path / "c.toml"
+        cfg.write_text(
+            '[GENERAL]\nmode = "cluster"\n\n[CLUSTER]\nnodes = [{ id = "a", address = "h:1" }]\n',
+            encoding="utf-8",
+        )
+        result = runner.invoke(main, ["config-info", "--config", str(cfg)])
+        assert "运行模式:     cluster" in result.output
+        assert "集群节点:     1 个" in result.output
 
     def test_works_without_config_file(self, runner: CliRunner):
         result = runner.invoke(main, ["config-info"])

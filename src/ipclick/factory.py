@@ -14,11 +14,15 @@
 ``cluster``——后者已经 import 了前者。
 """
 
+import threading
 from typing import Any
+
+from typing_extensions import override
 
 from ipclick.config_loader import load_config
 from ipclick.exceptions import ConfigError
 from ipclick.utils.log_util import log
+from ipclick.utils.secure_util import SecureUtil
 
 
 #: ``[GENERAL].mode`` 的合法取值
@@ -82,4 +86,84 @@ def create_client(config_path: str | None = None, **kwargs: Any) -> Any:
     return Downloader(config_path=config_path, **kwargs)
 
 
-__all__ = ["CLIENT_MODES", "create_client", "resolve_mode"]
+# ---------------------------------------------------------------------- #
+# 缓存实例与全局代理
+#
+# 这几个原本在 sdk.py 里，但让 sdk 去解释 [GENERAL].mode 就得 import 本模块，
+# 而本模块要 import cluster、cluster 又 import sdk——形成导入环。放在这里，
+# 依赖方向就只剩单向的 factory -> {sdk, cluster}。
+# 公开路径 `from ipclick import downloader / get_downloader` 完全不变。
+# ---------------------------------------------------------------------- #
+
+#: 值可能是 Downloader 或 ClusterDownloader，取决于 [GENERAL].mode。
+#: 用普通 dict：defaultdict 会在任何一次误访问时凭空造出一个客户端。
+_downloader_cache: dict[str, Any] = {}
+_cache_lock = threading.Lock()
+
+
+def get_downloader(config_path: str | None = None, host: str | None = None, port: int | None = None) -> Any:
+    """获取（并缓存）下载器实例。相同参数返回同一个实例，以复用 gRPC 连接。
+
+    **按 [GENERAL].mode 决定返回单机还是集群客户端**，与 :func:`create_client`
+    一致。显式给了 host/port 则总是单机——那是在点名某个具体节点。
+
+    回归：这里以前硬编码 Downloader。于是配了 mode = "cluster" 的人只要用
+    ``from ipclick import downloader`` 就会静默拿到单机客户端——所有流量打在
+    一个节点上、没有故障转移，而 create_client() 那边却明确拒绝这种静默降级。
+    同一个配置项在两条路径上表现不同，比不支持还糟。
+    """
+    key = SecureUtil.md5([config_path, host, port])
+    instance = _downloader_cache.get(key)
+    if instance is not None:
+        return instance
+
+    with _cache_lock:
+        if key not in _downloader_cache:
+            if host is not None or port is not None:
+                # 点名了地址就别再去解释 mode——调用方要的就是这个节点
+                from ipclick.sdk import Downloader
+
+                _downloader_cache[key] = Downloader(config_path=config_path, host=host, port=port)
+            else:
+                _downloader_cache[key] = create_client(config_path)
+        return _downloader_cache[key]
+
+
+def close_all_downloaders() -> None:
+    """关闭所有缓存的下载器（进程退出前调用，或在测试中隔离状态）。"""
+    with _cache_lock:
+        for instance in _downloader_cache.values():
+            instance.close()
+        _downloader_cache.clear()
+
+
+class _LazyDownloader:
+    """``ipclick.downloader`` 的惰性代理。
+
+    以前这里是模块导入时就 ``Downloader()``，于是 ``import ipclick`` 会立刻
+    读配置文件、打日志；服务端也 import 了 sdk，等于起服务先造一个客户端。
+    改成首次真正使用时才构造。
+    """
+
+    __slots__: tuple[str, ...] = ()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(get_downloader(), name)
+
+    @override
+    def __repr__(self) -> str:
+        return "<ipclick.downloader (lazy)>"
+
+
+#: 向后兼容的别名：downloader.get(...) 等用法保持不变
+downloader: Any = _LazyDownloader()
+
+
+__all__ = [
+    "CLIENT_MODES",
+    "close_all_downloaders",
+    "create_client",
+    "downloader",
+    "get_downloader",
+    "resolve_mode",
+]

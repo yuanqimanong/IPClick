@@ -81,6 +81,20 @@ P3 扩展传输能力，P4 做集群，P5 补齐适配器，P6 加限流与可�
 - **`[GENERAL].mode` 终于有消费方**：`ipclick.create_client()` 按它返回单机或
   集群客户端。`mode = "cluster"` 却没配节点会直接报错，不静默退回单机。
 
+### 修复（P7）
+
+- **全局 `downloader` / `get_downloader()` 无视 `[GENERAL].mode`**。它们硬编码
+  单机 `Downloader`，于是配了 `mode = "cluster"` 的人只要用
+  `from ipclick import downloader` 就会静默拿到单机客户端——所有流量打在一个
+  节点上、没有故障转移，而 `create_client()` 那边却明确拒绝这种静默降级。
+  同一个配置项在两条路径上表现不同，比不支持还糟。
+  这几个函数随之从 `sdk` 移到 `factory`（否则会形成
+  `sdk -> factory -> cluster -> sdk` 的导入环），公开路径不变。
+- **`ipclick config-info` 看不到这一轮加的任何配置**。它是用来确认"配置真的
+  生效了吗"的命令，却不显示 TLS、鉴权、限流、浏览器引擎、运行模式——而这些
+  恰恰是配错了不会报错、只会悄悄少一层防护的那些。现在都展示了（令牌与代理
+  密码仍然只说有无、不打印内容），并去掉了"集群尚未实现"这类过期标注。
+
 ### 新增（P6）
 
 - **按 host 的并发与 QPS 限制**（`[DOWNLOADER.concurrency]` /
