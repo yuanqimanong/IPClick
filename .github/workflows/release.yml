@@ -1,0 +1,160 @@
+name: Release
+
+# 发布到 PyPI。使用 Trusted Publishing（OIDC），仓库里不存任何 API token。
+#
+# 触发方式：
+#   1. 推送 v* 标签（如 v0.2.3）—— 常规发布路径
+#   2. 手动触发 workflow_dispatch —— 用于补发已有标签，或先发 TestPyPI 验证
+#
+# 发布这一步跑在 GitHub Environment 里，可在其中配置人工审批与分支/标签限制。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "要发布的标签或提交（留空则用当前分支）"
+        required: false
+        type: string
+
+permissions: {}
+
+jobs:
+  # ---------------------------------------------------------------- #
+  # 构建并做发布前校验。产物通过 artifact 传给后续 job，
+  # 保证「被校验的字节」和「被上传的字节」是同一份。
+  # ---------------------------------------------------------------- #
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Lint / format / types / tests
+        run: |
+          uv run ruff check src/ tests/
+          uv run ruff format --check src/ tests/
+          uv run basedpyright src/
+          uv run pytest
+
+      - name: Build
+        run: uv build
+
+      - name: Read version and check tag agreement
+        id: meta
+        run: |
+          version="$(uv run python -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "pyproject version: $version"
+
+          # 标签触发时，标签必须与 pyproject 版本一致，否则发出去的版本号会对不上
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$tag" != "$version" ]; then
+              echo "::error::标签 v$tag 与 pyproject.toml 中的版本 $version 不一致"
+              exit 1
+            fi
+          fi
+
+      - name: Verify artifacts
+        run: |
+          uv run --with twine twine check dist/*
+          python - <<'PY'
+          import glob, sys, zipfile
+
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+
+          required = [
+              "ipclick/configs/default_config.toml",
+              "ipclick/dto/proto/task_pb2.py",
+              "ipclick/py.typed",
+          ]
+          if missing := [r for r in required if r not in names]:
+              sys.exit(f"wheel 缺少文件: {missing}")
+
+          # 不该出现在分发包里的东西
+          if leaked := [n for n in names if any(k in n for k in ("test", "__pycache__", ".env", ".git"))]:
+              sys.exit(f"wheel 含不应分发的文件: {leaked}")
+
+          # README 会作为 long_description 成为 PyPI 项目页正文，且上传后不可修改。
+          # 相对链接在 PyPI 上会 404。
+          meta = zipfile.ZipFile(wheel).read(
+              next(n for n in names if n.endswith("METADATA"))
+          ).decode()
+          if "](LICENSE)" in meta or "](CHANGELOG.md)" in meta:
+              sys.exit("METADATA 中存在相对链接，PyPI 上会 404")
+
+          print(f"{wheel} 校验通过")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- #
+  # 发布到 PyPI。
+  # environment: pypi 上配置了「必需审批人」，上传前会停下来等人工确认——
+  # PyPI 同一版本号永远不能重传，只能 yank。
+  # ---------------------------------------------------------------- #
+  publish-pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ipclick
+    permissions:
+      id-token: write # Trusted Publishing 需要，用于取 OIDC token
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        # 不设 skip-existing：正式发布时重复版本应当失败并让人知道
+
+  # ---------------------------------------------------------------- #
+  # 发布成功后补一个 GitHub Release（仅标签触发）
+  # ---------------------------------------------------------------- #
+  github-release:
+    if: github.event_name == 'push'
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --notes "已发布到 PyPI: https://pypi.org/project/ipclick/${{ needs.build.outputs.version }}/
+
+          完整变更见 [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/master/CHANGELOG.md)。" \
+            --verify-tag
