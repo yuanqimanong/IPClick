@@ -10,6 +10,7 @@ from ipclick.dto.models import (
 from ipclick.dto.response import Response
 from ipclick.exceptions import (
     AdapterError,
+    AuthenticationError,
     ConfigError,
     IPClickError,
     RequestError,
@@ -45,6 +46,7 @@ __all__ = [  # noqa: RUF022 - 按用途分组比字母序更易读
     "IPClickError",
     "ConfigError",
     "AdapterError",
+    "AuthenticationError",
     "TransportError",
     "RequestError",
     "ValidationError",

@@ -17,6 +17,7 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 - **连接复用**：客户端复用 gRPC channel，服务端复用适配器与 HTTP 连接池
 - **代理支持**：灵活的代理配置，支持 HTTP/HTTPS 代理
 - **自动重试**：内置请求重试机制，支持指数退避 + 抖动，并可按状态码重试
+- **令牌鉴权**：gRPC 标准 Bearer 令牌，支持环境变量注入与多令牌轮换
 - **SSRF 防护**：服务端对目标 URL 做协议白名单与内网/元数据地址拦截
 - **命令行工具**：提供便捷的 CLI 工具，支持快速启动服务和查看配置
 - **Docker 支持**：多阶段构建、非 root 运行的镜像
@@ -223,6 +224,41 @@ IPClick/
 | `SERVER.port`        | 服务端口              | `9527`  |
 | `SERVER.max_workers` | 最大工作线程数（每请求占用一个）  | `100`   |
 
+### 鉴权
+
+服务端默认**不鉴权** —— 任何能连到端口的调用方都能使用本服务，启动时会打一条告警。
+生产部署请务必配置令牌。
+
+推荐用环境变量提供，不要把密钥写进配置文件：
+
+```bash
+# 服务端
+IPCLICK_AUTH_TOKEN='用 openssl rand -hex 32 生成的令牌' ipclick run
+```
+
+```python
+# 客户端：三种方式，优先级从高到低
+Downloader(token="...")                 # 1. 显式传参
+# 2. 环境变量 IPCLICK_AUTH_TOKEN
+# 3. 配置文件 [SECURITY].auth_token
+```
+
+轮换令牌时可以配置多个，新旧并存，不必停机：
+
+```toml
+[SECURITY]
+auth_token = ["新令牌", "旧令牌"]
+```
+
+令牌通过 gRPC 标准的 `authorization: Bearer <token>` metadata 头传输，
+任何语言的 gRPC 客户端都能对接。校验使用常量时间比较；令牌不会出现在任何日志里。
+
+鉴权失败抛 `AuthenticationError`（**不是** `TransportError`）——
+令牌错了重试多少次都没用，属于配置问题，不该被当成一次网络失败吞掉。
+
+> 鉴权解决的是"**谁**能用"，下面的 SSRF 防护解决的是"能打到**哪儿**"。
+> 两者互相不能替代，公网部署两个都要开。
+
 ### 安全配置
 
 服务端会代替调用方请求任意 URL。**若监听在公网或不可信网络，请开启内网拦截**，
@@ -230,6 +266,7 @@ IPClick/
 
 | 配置项                                 | 说明                       | 默认值                  |
 |-------------------------------------|--------------------------|----------------------|
+| `SECURITY.auth_token`               | 鉴权令牌，留空 = 不鉴权；可为列表以支持轮换 | `""`                 |
 | `SECURITY.allowed_schemes`          | 允许的 URL 协议               | `["http", "https"]`  |
 | `SECURITY.block_metadata_endpoints` | 拦截云元数据地址（169.254.169.254 等） | `true`               |
 | `SECURITY.block_private_networks`   | 拦截回环 / 私网 / 保留地址         | `false`              |
@@ -337,6 +374,7 @@ docker run -d -p 9527:9527 --name ipclick -v /你的路径/:/home/ipclick/.ipcli
 |---------------------|-----------------------|---------------|
 | `ValidationError`   | 任务参数校验失败，如 URL 为空、适配器名拼错（同时继承 `ValueError`） | ✅ 会抛出 |
 | `TransportError`    | 与服务端的 gRPC 通信失败       | ✅ 由 `download()` 抛出 |
+| `AuthenticationError` | 鉴权令牌缺失或不正确        | ✅ 会抛出（非 TransportError） |
 | `RequestError`      | 目标站点返回错误，由 `raise_for_status()` 抛出 | ✅ 需自行调用 |
 | `ConfigError`       | 配置缺失或非法               | ✅ 加载配置时抛出 |
 | `AdapterError`      | 适配器不存在或依赖未安装          | ❌ 仅服务端 |
@@ -380,9 +418,9 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 
 - **分布式 / 集群**：尽管项目定位是"分布式"，目前客户端只连**单个** `host:port`。
   没有节点池、负载均衡、故障转移或服务发现。`[CLUSTER]` 是预留配置。
-- **服务端鉴权**：gRPC 使用 `insecure_channel`，**没有任何鉴权**。任何能连到端口的
-  调用方都能使用本服务。部署到非可信网络时，请自行用防火墙 / 网络策略限制来源，
-  并开启 `[SECURITY].block_private_networks`。
+- **传输加密 / mTLS**：已支持令牌鉴权，但 gRPC 仍是 `insecure_channel`（明文）。
+  令牌在不受信任的网络上会被窃听，请在 TLS 终端（如 nginx / service mesh）之后部署，
+  或等待后续的 mTLS 支持。
 - **适配器**：`IPClickAdapter` 枚举列出 6 种，实际只实现 **`curl_cffi`** 和 **`httpx`**。
   请求 `requests` / `DrissionPage` / `undetected_chromedriver` / `playwright` 会抛
   `AdapterError`。
@@ -403,7 +441,7 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **P1** 打通存量 | `[DOWNLOADER]` 生效、参数错误不再伪装成网络失败、`NO_PROXY` 处理、`[GENERAL].debug` | ✅ 已完成 |
-| **P2** 安全与可运维 | 服务端鉴权（token / mTLS）、gRPC 标准健康检查、Prometheus metrics | 计划中 |
+| **P2** 安全与可运维 | 服务端 token 鉴权 ✅、gRPC 标准健康检查、Prometheus metrics | 进行中 |
 | **P3** 能力扩展 | 异步客户端、批量 RPC、真流式下载（连带限速 / 分块） | 计划中 |
 | **P4** 集群 | 节点池、负载均衡、健康探测、故障转移（依赖 P2 的健康检查） | 计划中 |
 | **P5** 适配器 | `requests`、`playwright` / `DrissionPage` / `undetected_chromedriver`（连带 `[BROWSER]` 与浏览器渲染） | 计划中 |

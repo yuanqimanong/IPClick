@@ -5,10 +5,11 @@ from typing import Any
 import grpc
 from typing_extensions import override
 
+from ipclick.auth import AUTH_TOKEN_ENV, build_client_metadata, load_tokens
 from ipclick.config_loader import load_config
 from ipclick.dto.models import DownloadResponse, DownloadTask, HttpMethod, IPClickAdapter, ProxyConfig
 from ipclick.dto.proto import task_pb2_grpc
-from ipclick.exceptions import TransportError
+from ipclick.exceptions import AuthenticationError, TransportError
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
 from ipclick.utils.secure_util import SecureUtil
@@ -32,7 +33,13 @@ class Downloader:
             resp = d.get("https://example.com")
     """
 
-    def __init__(self, config_path: str | None = None, host: str | None = None, port: int | None = None):
+    def __init__(
+        self,
+        config_path: str | None = None,
+        host: str | None = None,
+        port: int | None = None,
+        token: str | None = None,
+    ):
         """
         初始化下载器
 
@@ -40,6 +47,8 @@ class Downloader:
             config_path: 配置文件路径
             host: 服务器地址 (覆盖配置文件)
             port: 服务器端口 (覆盖配置文件)
+            token: 鉴权令牌 (覆盖环境变量 ``IPCLICK_AUTH_TOKEN`` 与配置文件
+                ``[SECURITY].auth_token``)。服务端未启用鉴权时可留空。
         """
         self.config_path: str | None = config_path
         self.config: Settings = load_config(self.config_path)
@@ -53,13 +62,21 @@ class Downloader:
         if self.host in ("[::]", "::", "0.0.0.0", ""):
             self.host = "127.0.0.1"
 
+        # 鉴权令牌：参数 > 环境变量 IPCLICK_AUTH_TOKEN > [SECURITY].auth_token
+        resolved_token = token or (load_tokens(dict(self.config.get("SECURITY", {}))) or (None,))[0]
+        self._metadata: tuple[tuple[str, str], ...] = build_client_metadata(resolved_token)
+
         self._channel: grpc.Channel | None = None
         self._stub: task_pb2_grpc.TaskServiceStub | None = None
         self._lock: threading.Lock = threading.Lock()
         self._closed: bool = False
 
-        # 配置里含代理密码、db_uri 等机密，只打印结构不打印内容
-        log.debug(f"Downloader 已加载配置，目标服务端 {self.host}:{self.port}，配置节: {sorted(self.config.keys())}")
+        # 配置里含代理密码、鉴权令牌等机密，只打印结构不打印内容
+        log.debug(
+            f"Downloader 已加载配置，目标服务端 {self.host}:{self.port}，"
+            f"配置节: {sorted(self.config.keys())}，"
+            f"鉴权令牌: {'已配置' if self._metadata else '未配置'}"
+        )
 
     # ------------------------------------------------------------------ #
     # 连接管理
@@ -220,11 +237,20 @@ class Downloader:
         deadline = task.timeout * (task.max_retries + 1) + _RPC_TIMEOUT_MARGIN
 
         try:
-            pb_response = stub.Send(pb_request, timeout=deadline)
+            pb_response = stub.Send(pb_request, timeout=deadline, metadata=self._metadata or None)
             return DownloadResponse.from_protobuf(pb_response)
         except grpc.RpcError as e:
             code = e.code() if hasattr(e, "code") else None
             details = e.details() if hasattr(e, "details") else str(e)
+            # 鉴权失败重试多少次都没用，单独抛出让调用方去改令牌，
+            # 而不是被 request() 当成网络失败吞成 status_code == -1 的响应。
+            if code is grpc.StatusCode.UNAUTHENTICATED:
+                hint = "未配置令牌" if not self._metadata else "令牌不被服务端接受"
+                raise AuthenticationError(
+                    f"鉴权失败（{hint}）：{details}。"
+                    f"请通过环境变量 {AUTH_TOKEN_ENV}、配置 [SECURITY].auth_token "
+                    f"或 Downloader(token=...) 提供正确的令牌"
+                ) from e
             raise TransportError(f"gRPC 调用失败 [{code}]: {details}") from e
         except Exception as e:
             raise TransportError(f"连接 {self.host}:{self.port} 失败: {e}") from e

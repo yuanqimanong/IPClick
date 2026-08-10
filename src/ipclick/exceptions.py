@@ -22,6 +22,14 @@ class TransportError(IPClickError):
     """与 IPClick 服务端之间的 gRPC 通信失败（连不上、超时、被拒绝）。"""
 
 
+class AuthenticationError(IPClickError):
+    """鉴权失败：令牌缺失或不正确。
+
+    刻意**不**继承 TransportError——令牌错了重试多少次都没用，属于配置问题，
+    应该直接抛给调用方，而不是伪装成一次网络失败被吞掉。
+    """
+
+
 class RequestError(IPClickError):
     """下载任务本身失败（目标站点不可达、状态码异常等）。"""
 
@@ -39,6 +47,7 @@ class URLNotAllowedError(ValidationError):
 
 __all__ = [
     "AdapterError",
+    "AuthenticationError",
     "ConfigError",
     "IPClickError",
     "RequestError",

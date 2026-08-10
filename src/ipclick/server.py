@@ -7,6 +7,7 @@ from typing import TypedDict, cast
 import grpc
 from grpc import Server
 
+from ipclick.auth import AUTH_TOKEN_ENV, TokenAuthInterceptor, load_tokens
 from ipclick.config_loader import load_config
 from ipclick.dto.proto import task_pb2_grpc
 from ipclick.exceptions import ConfigError
@@ -57,12 +58,17 @@ class IPClickServer:
         if max_workers < 1:
             raise ConfigError(f"SERVER.max_workers 必须 >= 1，当前为 {max_workers}")
 
+        # 鉴权：令牌来自环境变量 IPCLICK_AUTH_TOKEN 或 [SECURITY].auth_token
+        tokens = load_tokens(dict(self.config.get("SECURITY", {})))
+        auth_interceptor = TokenAuthInterceptor(tokens)
+
         # 创建gRPC服务器
         self.server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ipclick-worker"),
             # 每个 RPC 都会占用一个 worker 线程做阻塞 IO；不设上限时排队的请求
             # 会在 gRPC 内部无限堆积，直到内存耗尽。
             maximum_concurrent_rpcs=max_workers * 2,
+            interceptors=[auth_interceptor],
             options=[
                 ("grpc.keepalive_time_ms", 60000),
                 ("grpc.keepalive_timeout_ms", 30000),
@@ -96,6 +102,13 @@ class IPClickServer:
 
             # 记录启动信息
             log.info(f"IPClick server started on {listen_addr} with {max_workers} workers")
+            if auth_interceptor.enabled:
+                log.info(f"已启用令牌鉴权（{len(tokens)} 个有效令牌）")
+            else:
+                log.warning(
+                    "未配置鉴权令牌，任何能连到本端口的调用方都可以使用本服务。"
+                    f"请设置环境变量 {AUTH_TOKEN_ENV} 或配置 [SECURITY].auth_token"
+                )
 
             # 注册信号处理
             self._setup_signal_handlers()
