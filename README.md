@@ -385,6 +385,6 @@ uv run python src/ipclick/dto/proto/generate.py
 
 ## 📄 许可证
 
-本项目采用 [MIT License](LICENSE) 开源许可证。
+本项目采用 [MIT License](https://github.com/yuanqimanong/IPClick/blob/master/LICENSE) 开源许可证。
 
 Copyright (c) 2025 元气码农少女酱
