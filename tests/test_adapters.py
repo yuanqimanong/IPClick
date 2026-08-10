@@ -5,12 +5,14 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import socket
 import threading
+import time
 
 import pytest
 
 from ipclick.adapters.curl_cffi_adapter import CURL_CFFI_AVAILABLE, CurlCffiAdapter
 from ipclick.adapters.httpx_adapter import HTTPX_AVAILABLE, HttpxAdapter
-from ipclick.exceptions import AdapterError
+from ipclick.adapters.requests_adapter import REQUESTS_AVAILABLE, RequestsAdapter
+from ipclick.exceptions import ValidationError
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -76,16 +78,19 @@ def _pool_of(adapter: object) -> dict:
     return pool if pool is not None else adapter._clients  # type: ignore[attr-defined]
 
 
-@pytest.fixture(params=["curl_cffi", "httpx"])
+_ADAPTERS = {
+    "curl_cffi": (CURL_CFFI_AVAILABLE, CurlCffiAdapter),
+    "httpx": (HTTPX_AVAILABLE, HttpxAdapter),
+    "requests": (REQUESTS_AVAILABLE, RequestsAdapter),
+}
+
+
+@pytest.fixture(params=sorted(_ADAPTERS))
 def adapter(request: pytest.FixtureRequest) -> Iterator[object]:
-    if request.param == "curl_cffi":
-        if not CURL_CFFI_AVAILABLE:
-            pytest.skip("curl_cffi 未安装")
-        instance = CurlCffiAdapter()
-    else:
-        if not HTTPX_AVAILABLE:
-            pytest.skip("httpx 未安装")
-        instance = HttpxAdapter()
+    available, cls = _ADAPTERS[request.param]
+    if not available:
+        pytest.skip(f"{request.param} 未安装")
+    instance = cls()
     try:
         yield instance
     finally:
@@ -93,7 +98,7 @@ def adapter(request: pytest.FixtureRequest) -> Iterator[object]:
 
 
 class TestAdapterBehaviour:
-    """两个适配器必须表现一致——过去 httpx 会静默丢掉一堆参数。"""
+    """所有适配器必须表现一致——过去 httpx 会静默丢掉一堆参数。"""
 
     def test_basic_get(self, adapter, http_server: str):
         resp = adapter.download(f"{http_server}/hello", method="GET", kwargs="{}")
@@ -288,11 +293,26 @@ class TestProxyParameter:
 class TestUnsupportedMethod:
     @pytest.mark.skipif(not CURL_CFFI_AVAILABLE, reason="curl_cffi 未安装")
     def test_unknown_method_raises(self):
+        """参数错误直接抛，不再被 retry 装饰器吞成 -1 响应。
+
+        伪装成网络失败会误导调用方去查网络，TaskService 那边也就没机会把它
+        映射成 INVALID_ARGUMENT。
+        """
         adapter = CurlCffiAdapter()
         try:
-            resp = adapter.download("http://127.0.0.1/", method="BREW", max_retries=0, kwargs="{}")
-            # retry 装饰器会把异常转成错误响应
-            assert resp.status_code == -1
-            assert isinstance(resp.exception, AdapterError)
+            with pytest.raises(ValidationError, match="BREW"):
+                adapter.download("http://127.0.0.1/", method="BREW", max_retries=0, kwargs="{}")
+        finally:
+            adapter.close()
+
+    @pytest.mark.skipif(not CURL_CFFI_AVAILABLE, reason="curl_cffi 未安装")
+    def test_unknown_method_is_not_retried(self):
+        """回归：原先默认配置下要先睡满 1+2+4 秒才返回，而重试永远不可能成功。"""
+        adapter = CurlCffiAdapter()
+        try:
+            start = time.monotonic()
+            with pytest.raises(ValidationError):
+                adapter.download("http://127.0.0.1/", method="BREW", max_retries=3, retry_delay=1.0, kwargs="{}")
+            assert time.monotonic() - start < 1.0
         finally:
             adapter.close()

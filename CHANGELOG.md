@@ -2,6 +2,71 @@
 
 本文件记录 IPClick 的重要变更。版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+P1–P5 五个阶段的开发成果。P1 让存量配置真正生效，P2 补安全与可运维，
+P3 扩展传输能力，P4 做集群，P5 补齐适配器。
+
+### 新增
+
+- **令牌鉴权**（P2-1）：gRPC 拦截器校验 `authorization: Bearer <token>`，
+  常量时间比较，支持多令牌轮换与环境变量注入。健康检查端点免鉴权。
+- **标准健康检查**（P2-2）：实现 `grpc.health.v1`，K8s 探针与服务网格开箱即用。
+  优雅下线时先置 `NOT_SERVING` 再停服务，让流量有机会先摘走。
+- **Prometheus 指标**（P2-3）：请求量 / 延迟 / 重试 / 拒绝等。`prometheus-client`
+  为可选依赖，未安装时所有埋点降级为无操作。标签基数受测试约束，
+  不允许出现 URL、主机名这类无界标签。
+- **真流式下载**（P3-1）：新增 server-streaming RPC `SendStream`，
+  服务端与客户端都不再把整个响应体驻留内存。
+- **批量请求**（P3-2）：新增 bidi-streaming RPC `SendBatch`，结果按完成顺序返回。
+- **异步客户端**（P3-3）：`ipclick.aio.AsyncDownloader`，基于 `grpc.aio`，
+  接口与同步版对应。
+- **集群客户端**（P4）：`ipclick.cluster.ClusterDownloader`，多节点负载均衡
+  （轮询 / 随机 / 加权）、基于 `grpc.health.v1` 的健康探测、请求级故障转移。
+  摘除与恢复都用连续计数阈值，避免一次抖动就让流量反复横跳。
+- **只读集群状态页**（P4）：`StatusPageServer` 提供 HTML 页面与 `/api/nodes`
+  JSON，仅标准库实现。刻意做成只读，且默认只监听 `127.0.0.1`。
+- **`requests` 适配器**（P5-1）：可选依赖 `ipclick[requests]`。
+- **`playwright` 浏览器渲染适配器**（P5-2）：可选依赖 `ipclick[browser]`。
+  起真实浏览器执行 JS 并返回渲染后的 DOM，支持等待选择器、滚动懒加载、整页截图、
+  资源类型拦截。`[BROWSER]` 配置节至此第一次真正有消费方。
+
+### 变更
+
+- **`[BROWSER]` 配置节重写**。原来那一节写的插件目录、`.crx`/`.dll` 列表、
+  缓存上限 MB 数、`sandbox.level = strict/moderate/off` 没有任何一项有消费方，
+  也没有任何一项能落到 playwright 上，全部删除。现在只保留能真正生效的键。
+- **参数校验错误不再被重试装饰器吞成 `-1` 响应**。`ValidationError` 现在直接
+  上抛：重试多少次都是同样的结果，默认配置下还要先睡满 1+2+4 秒；
+  伪装成网络失败也会误导调用方去查网络。`TaskService` 那边本来就会把它映射成
+  `INVALID_ARGUMENT`，只是此前根本没机会看到。
+  受影响的行为：适配器收到不支持的 HTTP 方法时由"返回 `status_code == -1`
+  的响应"改为"抛 `ValidationError`"。
+- **服务端错误按类型翻译回客户端**，不再一律吞成 `status_code == -1`：
+  - `INVALID_ARGUMENT` → `ValidationError`（参数写错了，改调用代码）
+  - `FAILED_PRECONDITION` → `AdapterError`（这个服务端做不到，改部署）
+
+  此前两者都变成 `TransportError`，再被 `request()` 吞成 `-1` 响应，错误信息写着
+  "gRPC 调用失败"——调用方会去排查网络。客户端**本地**发现的参数错误早就是直接
+  抛出的，服务端发现的没理由不一致：同一个错误不该因为"谁先发现"而表现不同。
+  真正的传输失败（连不上、超时）仍然返回 `-1` 响应，行为不变。
+- 服务端相应地把 `AdapterError` 从 `INVALID_ARGUMENT` 拆到 `FAILED_PRECONDITION`。
+  "适配器不存在 / 依赖没装 / 浏览器渲染被关掉"不是调用方参数写错，
+  报成 `INVALID_ARGUMENT` 会让人去改自己的参数，而实际要改的是服务端部署。
+- `get_adapter()` 新增可选参数 `browser_settings`，供浏览器适配器读取 `[BROWSER]`。
+- 缺可选依赖时，`get_adapter()` 的报错从笼统的"尚未支持"改为给出安装命令——
+  "没装"和"没实现"的处理方式完全不同。
+- CI 增加 `playwright install --with-deps chromium`，让浏览器渲染用例在 CI 上
+  真的跑起来，而不是静默 skip。
+
+### 修复
+
+- **`playwright` 启动级代理占位值会让所有直连请求失败**。playwright 文档里
+  `proxy={"server": "per-context"}` 的写法是给旧版 chromium 的；现在每个 context
+  单独设代理已能直接生效，而设了那个占位值之后，没配代理的 context 会去连一个
+  叫 `per-context` 的代理，于是全部 `ERR_PROXY_CONNECTION_FAILED`。
+  （开发期发现，未随任何版本发布。）
+
 ## [0.2.3] - 2026-08-10
 
 **首个发布到 PyPI 的 0.2.x 版本。** 0.2.0 / 0.2.1 / 0.2.2 均未上传 PyPI，

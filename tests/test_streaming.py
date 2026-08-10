@@ -66,7 +66,9 @@ class StreamingAdapter(DownloaderAdapter):
 
 def _start_server(adapter: DownloaderAdapter, monkeypatch: pytest.MonkeyPatch, config: dict[str, Any] | None = None):
     monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-    monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+    monkeypatch.setattr(
+        "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+    )
     service = TaskService(Settings(config or {}))
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8), maximum_concurrent_rpcs=16)
     task_pb2_grpc.add_TaskServiceServicer_to_server(service, server)
@@ -280,7 +282,9 @@ class TestBatch:
 
         adapter = StreamingAdapter()
         monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+        monkeypatch.setattr(
+            "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+        )
         service = TaskService(Settings({}))
         server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=4),

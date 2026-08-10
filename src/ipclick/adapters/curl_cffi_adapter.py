@@ -7,7 +7,7 @@ from typing_extensions import override
 from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader, retry
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
-from ipclick.exceptions import AdapterError
+from ipclick.exceptions import AdapterError, ValidationError
 from ipclick.utils.log_util import log
 
 
@@ -152,7 +152,7 @@ class CurlCffiAdapter(DownloaderAdapter):
         """
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
-            raise AdapterError(f"Unsupported HTTP method: {method}")
+            raise ValidationError(f"Unsupported HTTP method: {method}")
 
         # 以前这里是无条件 json.loads(kwargs)，kwargs 为空串时直接抛
         # JSONDecodeError，而且解析结果压根没被用到。

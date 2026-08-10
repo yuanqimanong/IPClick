@@ -10,6 +10,7 @@ from grpc import ServicerContext
 from typing_extensions import override
 
 from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamHeader
+from ipclick.adapters.browser_settings import BrowserSettings
 from ipclick.adapters.registry import get_adapter, get_default_adapter
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.models import METHOD_MAP, IPClickAdapter
@@ -63,6 +64,8 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         # 适配器默认行为。此前这里只是把 [DOWNLOADER] 存进一个再没被读过的
         # dict，导致配置文件里的超时与重试策略完全不生效。
         self.adapter_settings: AdapterSettings = AdapterSettings.from_config(dict(self.config.get("DOWNLOADER", {})))
+        # 同理，[BROWSER] 此前也没有任何消费方
+        self.browser_settings: BrowserSettings = BrowserSettings.from_config(dict(self.config.get("BROWSER", {})))
 
         self._adapter_cache: dict[str, DownloaderAdapter] = {}
         self._cache_lock: threading.Lock = threading.Lock()
@@ -111,7 +114,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
         with self._cache_lock:
             if name not in self._adapter_cache:
-                self._adapter_cache[name] = get_adapter(name, self.adapter_settings)
+                self._adapter_cache[name] = get_adapter(name, self.adapter_settings, self.browser_settings)
             return self._adapter_cache[name]
 
     # ------------------------------------------------------------------ #
@@ -161,7 +164,16 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 context.set_code(grpc.StatusCode.PERMISSION_DENIED)
                 context.set_details(str(e))
                 grpc_response = self._build_error_response(request, str(e))
-            except (AdapterError, ValueError) as e:
+            except AdapterError as e:
+                # 与 ValueError 分开：这是"本服务端做不到"（适配器不存在、依赖没装、
+                # 浏览器渲染被关掉），不是调用方参数写错。混成 INVALID_ARGUMENT
+                # 会让调用方去改自己的参数，而实际要改的是服务端部署。
+                log.warning(f"Request {request.uuid} cannot be served: {e}")
+                self._metrics.record_rejected("failed_precondition")
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                context.set_details(str(e))
+                grpc_response = self._build_error_response(request, str(e))
+            except ValueError as e:
                 log.warning(f"Request {request.uuid} invalid: {e}")
                 self._metrics.record_rejected("invalid_argument")
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -386,7 +398,13 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 context.set_code(grpc.StatusCode.PERMISSION_DENIED)
                 context.set_details(error_message)
                 yield self._stream_error_header(request, error_message)
-            except (AdapterError, ValueError) as e:
+            except AdapterError as e:
+                error_message = str(e)
+                self._metrics.record_rejected("failed_precondition")
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                context.set_details(error_message)
+                yield self._stream_error_header(request, error_message)
+            except ValueError as e:
                 error_message = str(e)
                 self._metrics.record_rejected("invalid_argument")
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)

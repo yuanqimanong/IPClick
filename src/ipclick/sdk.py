@@ -10,7 +10,13 @@ from ipclick.auth import AUTH_TOKEN_ENV, build_client_metadata, load_tokens
 from ipclick.config_loader import load_config
 from ipclick.dto.models import DownloadResponse, DownloadTask, HttpMethod, IPClickAdapter, ProxyConfig
 from ipclick.dto.proto import task_pb2_grpc
-from ipclick.exceptions import AuthenticationError, ClientClosedError, TransportError
+from ipclick.exceptions import (
+    AdapterError,
+    AuthenticationError,
+    ClientClosedError,
+    TransportError,
+    ValidationError,
+)
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
 from ipclick.utils.secure_util import SecureUtil
@@ -204,6 +210,14 @@ class ClientBase:
                 f"请通过环境变量 {AUTH_TOKEN_ENV}、配置 [SECURITY].auth_token "
                 f"或 token=... 提供正确的令牌"
             )
+        # 参数错误同理：换成 -1 响应会让调用方去查网络，而真正要改的是自己的
+        # 调用参数。客户端本地发现的参数错误早就是抛出的，服务端发现的没理由不一致。
+        if code is grpc.StatusCode.INVALID_ARGUMENT:
+            return ValidationError(f"请求参数不被服务端接受：{details}")
+        # "这个服务端做不到"——适配器没实现、可选依赖没装、浏览器渲染被关掉。
+        # 改参数没用，得改服务端部署，所以也不该伪装成一次网络抖动。
+        if code is grpc.StatusCode.FAILED_PRECONDITION:
+            return AdapterError(f"服务端无法处理该请求：{details}")
         return TransportError(f"gRPC 调用失败 [{code}]: {details}")
 
     def _build_task(

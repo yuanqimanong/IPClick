@@ -112,45 +112,49 @@ max_keepalive_connections = 20  # 保持长连接的上限
 # 这些配置项已从默认配置移除，待流式下载实现后再引入，避免"配了却不生效"。
 
 # ------- 浏览器渲染配置 [BROWSER] -------
-# ⚠️ 尚未实现：本节配置当前没有任何消费方，修改不会生效（详见 README「尚未实现 / 已知限制」）
+# 供 playwright 适配器使用（adapter = "playwright"）。
+# 需要额外安装：pip install "ipclick[browser]"，再 playwright install chromium
+# （或把 executable_path 指向系统已有的浏览器，省掉那 150MB 下载）。
 [BROWSER]
-# 启用浏览器渲染引擎
+# 总开关。关掉后即使装了 playwright，请求 adapter = "playwright" 也会被拒绝——
+# 浏览器渲染又重又是更大的攻击面，不需要时应该能一键关死。
 enabled = true
-# 无头模式 (无GUI界面)
+# 内核：chromium / firefox / webkit
+browser = "chromium"
+# 无头模式（无 GUI 界面）
 headless = true
-# 用户代理 (伪装浏览器标识)
-user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+# 浏览器可执行文件路径。留空则用 playwright 自己下载的那份。
+# 容器里常见写法：executable_path = "/usr/bin/chromium"
+executable_path = ""
+# 传给浏览器进程的额外命令行参数
+args = []
+# 容器里没有 user namespace 时 chromium 起不来，需要打开这一项（等价于 --no-sandbox）。
+# 默认关闭：关掉沙箱意味着页面里的代码更容易影响到宿主进程，应由部署方明确选择。
+no_sandbox = false
+# 用户代理。留空则每次请求随机生成一个。
+user_agent = ""
 # 视窗尺寸
 viewport = { width = 1920, height = 1080 }
-# 插件配置
-[BROWSER.plugins]
-# 插件安装目录
-install_dir = "/path/to/browser/plugins"
-# 启用插件列表
-enabled = [
-    "adblock.crx",
-    "web-assistant.zip"
-]
-# 禁用插件列表
-disabled = ["flash_player.dll"]
-# 代理网关 (覆盖系统代理)
+# 默认的等待时机：load / domcontentloaded / networkidle / commit
+wait_until = "load"
+# 默认拦截的资源类型，只取 HTML 时拦掉能省大量时间与带宽。
+# 可选值：image media font stylesheet script xhr fetch websocket other
+block_resources = ["image", "media", "font"]
+# 同时打开的页面上限。无头浏览器每个页面几十上百 MB，不设上限很容易把机器打满。
+max_pages = 4
+# 是否允许请求携带 automation_script（在页面里执行任意 JS）。
+# ⚠️ 默认关闭。页面内的 JS 会自己发请求，[SECURITY] 那套 URL 策略（禁云元数据、
+# 禁内网）对它完全不起作用——放开它等于把 SSRF 防线让开一整条。
+# 只有在确认调用方全部可信时才打开。
+allow_scripts = false
+# 代理网关（覆盖系统代理）
 [BROWSER.proxy]
-gateway = "http://127.0.0.1:8080"  # 指向本地代理服务
-bypass_list = ["*.internal.com"]    # 代理排除列表
-# 渲染超时控制 (秒)
+gateway = ""                     # 例如 "http://127.0.0.1:8080"
+bypass_list = []                 # 例如 ["*.internal.com"]
+# 渲染超时控制（秒）
 [BROWSER.timeout]
 page_load = 30      # 页面加载超时
-script_exec = 60    # JS执行超时
-render = 20         # 渲染完成检测超时
-# 缓存管理
-[BROWSER.cache]
-max_size = 500      # 缓存上限(MB)
-persist = true      # 持久化缓存
-path = "/data/browser_cache"
-# 安全沙箱配置
-[BROWSER.sandbox]
-enable = true
-level = "strict"    # strict/moderate/off
+script_exec = 60    # automation_script 执行超时
 
 
 

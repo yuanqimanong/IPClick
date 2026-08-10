@@ -170,7 +170,9 @@ class TestAsyncAuth:
 
         adapter = StreamingAdapter()
         monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+        monkeypatch.setattr(
+            "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+        )
         service = TaskService(Settings({}))
         server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=4),

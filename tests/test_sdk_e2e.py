@@ -48,7 +48,9 @@ def live_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[int, EchoAdap
     """启动一个真实的 gRPC 服务端，返回 (端口, 假适配器)。"""
     adapter = EchoAdapter()
     monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-    monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+    monkeypatch.setattr(
+        "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+    )
 
     service = TaskService(Settings({"SECURITY": {"block_private_networks": False}}))
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4), maximum_concurrent_rpcs=8)
@@ -208,11 +210,79 @@ class TestTransportFailure:
             d.download(DownloadTask(url="http://example.com/x", timeout=1, max_retries=0))
 
 
+class TestServerSideErrorMapping:
+    """服务端发现的错误必须按类型翻译回来，不能一律变成 -1 响应。
+
+    客户端本地发现的参数错误早就是抛出的（见上面适配器名拼错那个用例）；
+    服务端发现的没理由不一致——否则同一个错误，取决于是谁先发现，调用方
+    看到的是异常还是"网络故障"。
+    """
+
+    def _serve(self, monkeypatch: pytest.MonkeyPatch, exc: Exception) -> Iterator[int]:
+        adapter = EchoAdapter()
+
+        def boom(*_args: Any, **_kwargs: Any) -> Response:
+            raise exc
+
+        adapter.download = boom  # type: ignore[method-assign]
+        monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
+        monkeypatch.setattr(
+            "ipclick.services.task_service.get_adapter",
+            lambda name, settings=None, browser_settings=None: adapter,
+        )
+
+        service = TaskService(Settings({}))
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+        task_pb2_grpc.add_TaskServiceServicer_to_server(service, server)
+        port = _free_port()
+        server.add_insecure_port(f"127.0.0.1:{port}")
+        server.start()
+        try:
+            yield port
+        finally:
+            server.stop(grace=0).wait(timeout=5)
+            service.cleanup()
+
+    def test_invalid_argument_raises_validation_error(self, monkeypatch: pytest.MonkeyPatch):
+        """回归：服务端 INVALID_ARGUMENT 曾被翻译成 TransportError，再被 request()
+        吞成 status_code == -1、错误信息写着"gRPC 调用失败"——调用方会去查网络，
+        而真正该改的是自己的调用参数。"""
+        from ipclick.exceptions import ValidationError
+
+        for port in self._serve(monkeypatch, ValidationError("浏览器渲染只支持 GET")):
+            with Downloader(host="127.0.0.1", port=port) as d, pytest.raises(ValidationError, match="只支持 GET"):
+                d.get("http://example.com/x", max_retries=0)
+
+    def test_adapter_error_raises_adapter_error(self):
+        """ "这个服务端做不到"（适配器没实现 / 可选依赖没装）改参数没用，
+        得改服务端部署，同样不该伪装成一次网络抖动。"""
+        from ipclick.exceptions import AdapterError
+
+        adapter = EchoAdapter()
+        service = TaskService(Settings({}))
+        # 让 _get_cached_adapter 走到真实的 registry：请求一个未实现的适配器
+        service._adapter_cache.clear()
+        service._adapter_cache[adapter.adapter_name] = adapter
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+        task_pb2_grpc.add_TaskServiceServicer_to_server(service, server)
+        port = _free_port()
+        server.add_insecure_port(f"127.0.0.1:{port}")
+        server.start()
+        try:
+            with Downloader(host="127.0.0.1", port=port) as d, pytest.raises(AdapterError, match="尚未支持"):
+                d.get("http://example.com/x", adapter="DrissionPage", max_retries=0)
+        finally:
+            server.stop(grace=0).wait(timeout=5)
+            service.cleanup()
+
+
 class TestServerSideSecurity:
     def test_blocked_url_surfaces_to_client(self, monkeypatch: pytest.MonkeyPatch):
         adapter = EchoAdapter()
         monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+        monkeypatch.setattr(
+            "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+        )
 
         service = TaskService(Settings({"SECURITY": {"block_private_networks": True}}))
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))

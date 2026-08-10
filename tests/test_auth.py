@@ -141,7 +141,9 @@ def secured_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[int, EchoA
     """启动一个启用了鉴权的真实 gRPC 服务端。"""
     adapter = EchoAdapter()
     monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-    monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+    monkeypatch.setattr(
+        "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+    )
 
     service = TaskService(Settings({"SECURITY": {"block_private_networks": False}}))
     server = grpc.server(
@@ -235,7 +237,9 @@ class TestBackwardsCompatibility:
         """未配置令牌时保持放行，避免现有部署升级即中断（启动时会打告警）。"""
         adapter = EchoAdapter()
         monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+        monkeypatch.setattr(
+            "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+        )
 
         service = TaskService(Settings({}))
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=2), interceptors=[TokenAuthInterceptor([])])

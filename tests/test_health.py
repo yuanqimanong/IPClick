@@ -30,7 +30,9 @@ def health_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[int, Health
     """启动一个注册了健康检查、且启用了鉴权的服务端。"""
     adapter = EchoAdapter()
     monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-    monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+    monkeypatch.setattr(
+        "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+    )
 
     service = TaskService(Settings({}))
     reporter = HealthReporter(enabled=True)
@@ -109,7 +111,9 @@ class TestDisabled:
         """[MONITOR].health_check = false 时不注册该服务。"""
         adapter = EchoAdapter()
         monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+        monkeypatch.setattr(
+            "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+        )
 
         service = TaskService(Settings({}))
         reporter = HealthReporter(enabled=False)

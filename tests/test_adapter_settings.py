@@ -163,7 +163,9 @@ class TestTaskServiceUsesConfig:
 
         adapter = RecordingAdapter()
         monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+        monkeypatch.setattr(
+            "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+        )
 
         service = TaskService(
             Settings({"DOWNLOADER": {"download_timeout": 33, "retry": {"max_attempts": 6, "initial_backoff": 5}}})

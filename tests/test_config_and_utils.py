@@ -100,9 +100,9 @@ class TestRegistry:
         assert get_default_adapter().adapter_name == "curl_cffi"
 
     def test_unimplemented_adapter_raises_adapter_error(self):
-        """枚举里宣称支持 6 种适配器，实际只实现了 2 种，其余要给出清楚的报错。"""
+        """枚举里宣称支持 6 种适配器，尚未实现的那些要给出清楚的报错。"""
         with pytest.raises(AdapterError, match="尚未支持"):
-            get_adapter("playwright")
+            get_adapter("DrissionPage")
 
     def test_error_lists_available_adapters(self):
         with pytest.raises(AdapterError, match="curl_cffi"):

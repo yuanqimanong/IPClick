@@ -8,6 +8,7 @@ from typing import Any
 
 from ipclick.adapters.settings import DEFAULT_RETRY_STATUS_CODES, AdapterSettings
 from ipclick.dto.response import Response
+from ipclick.exceptions import ValidationError
 from ipclick.metrics import get_metrics
 from ipclick.utils.log_util import log
 
@@ -122,6 +123,13 @@ def retry(max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_
                         continue
 
                     return result
+
+                except ValidationError:
+                    # 参数错误重试多少次都是同样的结果，纯属浪费——默认配置下
+                    # 一个"不支持的方法"要先睡够 1+2+4 秒才返回。而且吞成 -1
+                    # 响应等于把调用方的用法错误伪装成一次网络故障；
+                    # TaskService 那边本来就会把它映射成 INVALID_ARGUMENT。
+                    raise
 
                 except Exception as e:
                     last_exception = e

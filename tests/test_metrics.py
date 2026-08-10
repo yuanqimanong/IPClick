@@ -232,7 +232,9 @@ class TestServiceIntegration:
 
         adapter = RecordingAdapter()
         monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+        monkeypatch.setattr(
+            "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+        )
 
         from prometheus_client import CollectorRegistry
 
@@ -252,7 +254,9 @@ class TestServiceIntegration:
 
         adapter = RecordingAdapter()
         monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+        monkeypatch.setattr(
+            "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+        )
 
         from prometheus_client import CollectorRegistry
 
@@ -275,7 +279,9 @@ class TestServiceIntegration:
         adapter = RecordingAdapter()
         adapter.adapter_name = "httpx"
         monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+        monkeypatch.setattr(
+            "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+        )
 
         from prometheus_client import CollectorRegistry
 

@@ -52,7 +52,9 @@ class FakeContext:
 def service(monkeypatch: pytest.MonkeyPatch) -> TaskService:
     adapter = RecordingAdapter()
     monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-    monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+    monkeypatch.setattr(
+        "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+    )
     return TaskService(Settings({"SECURITY": {"block_private_networks": False}}))
 
 
@@ -131,7 +133,9 @@ class TestErrorHandling:
     def test_blocked_url_returns_permission_denied(self, monkeypatch: pytest.MonkeyPatch):
         adapter = RecordingAdapter()
         monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+        monkeypatch.setattr(
+            "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+        )
         service = TaskService(Settings({"SECURITY": {"block_private_networks": True}}))
 
         context = FakeContext()
@@ -157,7 +161,9 @@ class TestErrorHandling:
 
         adapter = ExplodingAdapter()
         monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
-        monkeypatch.setattr("ipclick.services.task_service.get_adapter", lambda name, settings=None: adapter)
+        monkeypatch.setattr(
+            "ipclick.services.task_service.get_adapter", lambda name, settings=None, browser_settings=None: adapter
+        )
         service = TaskService(Settings({}))
 
         response = service.Send(task_pb2.ReqTask(url="http://example.com", uuid="u1"), FakeContext())

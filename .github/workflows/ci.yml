@@ -34,8 +34,14 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        # --all-extras：装上可选的 metrics 依赖，否则相关测试会被整体跳过
+        # --all-extras：装上可选的 metrics / requests / playwright 依赖，
+        # 否则相关测试会被整体跳过
         run: uv sync --frozen --all-groups --all-extras
+
+      - name: Install chromium for the playwright adapter
+        # 只装 chromium：三个内核全下要几分钟。没有它，浏览器适配器的渲染
+        # 用例会静默 skip——而那正是最容易悄悄坏掉的一部分。
+        run: uv run playwright install --with-deps chromium
 
       - name: Lint (ruff)
         run: uv run ruff check src/ tests/

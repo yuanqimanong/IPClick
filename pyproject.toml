@@ -26,6 +26,16 @@ dependencies = [
 # Prometheus 指标为可选：未安装时所有埋点降级为无操作，功能不受影响。
 # 安装：pip install "ipclick[metrics]"
 metrics = ["prometheus-client>=0.26.0,<1.0.0"]
+# requests 适配器：非核心能力（无指纹伪装、无 HTTP/2），按需安装
+requests = ["requests>=2.32.0,<3.0.0"]
+# playwright 浏览器渲染适配器：装完还要 `playwright install chromium`
+# （或把 [BROWSER].executable_path 指向系统已有的浏览器）
+browser = ["playwright>=1.49.0,<2.0.0"]
+all = [
+    "prometheus-client>=0.26.0,<1.0.0",
+    "requests>=2.32.0,<3.0.0",
+    "playwright>=1.49.0,<2.0.0",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/yuanqimanong/IPClick"

@@ -11,8 +11,10 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 
 ## ✨ 特性
 
-- **多适配器支持**：内置 `curl_cffi`、`httpx` 适配器，并可注册自定义适配器
+- **多适配器支持**：内置 `curl_cffi`、`httpx`、`requests`、`playwright` 适配器，并可注册自定义适配器
 - **浏览器指纹伪装**：基于 `curl_cffi` 实现浏览器指纹模拟，有效绕过反爬检测
+- **浏览器渲染**：`playwright` 适配器起真实浏览器执行 JS，拿到渲染后的 DOM
+- **集群与故障转移**：多节点客户端，支持轮询 / 随机 / 加权均衡、健康探测与自动换节点
 - **gRPC 通信**：使用 gRPC 协议进行高效的客户端-服务端通信
 - **连接复用**：客户端复用 gRPC channel，服务端复用适配器与 HTTP 连接池
 - **代理支持**：灵活的代理配置，支持 HTTP/HTTPS 代理
@@ -34,6 +36,28 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 
 ```bash
 pip install ipclick
+```
+
+可选功能按需安装：
+
+```bash
+pip install "ipclick[metrics]"    # Prometheus 指标
+pip install "ipclick[requests]"   # requests 适配器
+pip install "ipclick[browser]"    # playwright 浏览器渲染适配器
+pip install "ipclick[all]"        # 以上全部
+```
+
+`browser` 还需要一个浏览器内核。二选一：
+
+```bash
+playwright install chromium
+```
+
+或复用系统已有的（省掉约 150MB 下载），在配置里指向它：
+
+```toml
+[BROWSER]
+executable_path = "/usr/bin/chromium"
 ```
 
 ### 从源码安装
@@ -237,6 +261,104 @@ from ipclick import IPClickAdapter, downloader
 response = downloader.get("https://httpbin.org/get", adapter=IPClickAdapter.HTTPX)
 ```
 
+| 适配器 | 指纹伪装 | HTTP/2 | JS 渲染 | 安装 |
+|---|---|---|---|---|
+| `curl_cffi`（默认） | ✅ | ✅ | ❌ | 内置 |
+| `httpx` | ❌ | ✅ | ❌ | 内置 |
+| `requests` | ❌ | ❌ | ❌ | `ipclick[requests]` |
+| `playwright` | 真实浏览器 | ✅ | ✅ | `ipclick[browser]` |
+
+### 浏览器渲染
+
+页面内容全靠 JS 生成时，HTTP 适配器拿到的 HTML 里什么都没有。`playwright`
+适配器会起一个真实浏览器把页面跑完，返回渲染后的 DOM：
+
+```python
+from ipclick import Downloader, IPClickAdapter
+
+with Downloader() as d:
+    resp = d.get(
+        "https://example.com/spa",
+        adapter=IPClickAdapter.PLAYWRIGHT,
+        # 声明式的等待与渲染选项
+        automation_config='{"wait_for_selector": "#content", "scroll_to_bottom": true}',
+    )
+    print(resp.text)          # 渲染后的 DOM
+```
+
+`automation_config` 支持的键：
+
+| 键 | 说明 |
+|---|---|
+| `wait_until` | `load` / `domcontentloaded` / `networkidle` / `commit` |
+| `wait_for_selector` | 等某个元素出现 |
+| `wait_for_timeout` | 额外固定等待（毫秒） |
+| `scroll_to_bottom` | 滚到底触发懒加载（高度不再变化即停，最多 20 轮） |
+| `screenshot` | 返回整页 PNG（此时 `content` 是图片字节，`text` 为空） |
+| `block_resources` | 覆盖默认拦截的资源类型 |
+
+浏览器本身带来的限制（不是没写，是做不到）：
+
+- **只支持 GET**：浏览器导航就是 GET。带请求体或用其他方法会抛 `ValidationError`。
+- **不能禁用重定向**：`allow_redirects=False` 会抛 `ValidationError`，而不是被静默忽略。
+- **流式无意义**：渲染必须等页面跑完才有结果。
+
+> ⚠️ `automation_script`（在页面里执行任意 JS）默认**关闭**。页面内的 JS 会自己
+> 发请求，`[SECURITY]` 那套 URL 策略对它完全不起作用——放开它等于把 SSRF 防线
+> 让开一整条。确认调用方全部可信后，再设 `[BROWSER].allow_scripts = true`。
+> 脚本返回值通过响应头 `x-ipclick-script-result` 带回（JSON 编码）。
+>
+> 另外，渲染本身就会加载页面引用的子资源，同样不经过 URL 策略。介意的话把
+> `block_resources` 配严一些，并打开 `[SECURITY].block_private_networks`。
+
+### 集群与故障转移
+
+`ClusterDownloader` 把请求分发到多个 IPClick 服务端，接口与单节点的
+`Downloader` 一致：
+
+```python
+from ipclick.cluster import ClusterDownloader
+
+with ClusterDownloader() as d:          # 节点取自 [CLUSTER].nodes
+    resp = d.get("https://example.com")
+    print(d.snapshot())                 # 各节点健康状态
+```
+
+```toml
+[CLUSTER]
+load_balancer = "round_robin"   # round_robin / random / weight
+probe_interval = 10             # 健康探测间隔（秒）
+failure_threshold = 3           # 连续失败多少次判定摘除
+recovery_threshold = 2          # 连续成功多少次判定恢复
+max_failover = 2                # 单个请求最多换几个节点
+
+[[CLUSTER.nodes]]
+id = "node-a"
+address = "10.0.0.1:9527"
+weight = 100
+region = "cn-east"
+```
+
+摘除与恢复都用**连续计数阈值**而不是单次结果：一次网络抖动就摘节点会让流量
+反复横跳。探测走 `grpc.health.v1`，也就是 P2 那套标准健康检查。
+
+故障转移只在 `TransportError`（这个节点有问题）时发生。参数错误、鉴权失败换个
+节点还是一样的结果，直接上抛，不浪费尝试次数。
+
+**只读状态页**（可选）：
+
+```python
+from ipclick.cluster import ClusterDownloader
+from ipclick.cluster.status_page import StatusPageServer
+
+with ClusterDownloader() as d:
+    StatusPageServer(d.snapshot).start(port=8080)   # 默认只监听 127.0.0.1
+```
+
+`/` 是人看的 HTML 表格，`/api/nodes` 是机器读的 JSON。**刻意做成只读**：这个
+服务已经能代任意 URL 发请求了，再给它一个能改配置的网页等于又开一个高价值攻击
+面，而状态页通常跑在比 gRPC 端口设防更少的地方。运维变更走配置文件。
+
 ## 📂 项目结构
 
 ```
@@ -245,15 +367,29 @@ IPClick/
 │   └── ipclick/
 │       ├── __init__.py          # 包入口，导出公共 API
 │       ├── __main__.py          # 模块入口
-│       ├── sdk.py               # SDK 客户端实现
+│       ├── sdk.py               # 同步 SDK 客户端
+│       ├── aio.py               # 异步 SDK 客户端（grpc.aio）
 │       ├── server.py            # gRPC 服务端实现
+│       ├── auth.py              # 服务端令牌鉴权拦截器
+│       ├── health.py            # grpc.health.v1 健康检查
+│       ├── metrics.py           # Prometheus 指标（可选依赖）
 │       ├── exceptions.py        # 异常层次
 │       ├── py.typed             # 类型标注标记
-│       ├── adapters/            # HTTP 客户端适配器
+│       ├── adapters/            # 下载器适配器
 │       │   ├── base.py          # 适配器基类与重试装饰器
+│       │   ├── settings.py      # [DOWNLOADER] 配置
+│       │   ├── browser_settings.py  # [BROWSER] 配置
 │       │   ├── curl_cffi_adapter.py
 │       │   ├── httpx_adapter.py
+│       │   ├── requests_adapter.py
+│       │   ├── playwright_adapter.py
 │       │   └── registry.py      # 适配器注册表
+│       ├── cluster/             # 集群客户端
+│       │   ├── node.py          # 节点模型与 [CLUSTER] 配置
+│       │   ├── balancer.py      # 轮询 / 随机 / 加权
+│       │   ├── pool.py          # 节点池与健康探测
+│       │   ├── client.py        # ClusterDownloader（故障转移）
+│       │   └── status_page.py   # 只读状态页
 │       ├── cli/                 # 命令行工具
 │       ├── config_loader/       # 配置加载器
 │       ├── configs/             # 默认配置文件
@@ -545,29 +681,29 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 
 | 配置节 | 状态 |
 |---|---|
-| `[SERVER]` `[PROXY]` `[LOG]` `[SECURITY]` `[DOWNLOADER]` `[MONITOR]` | ✅ 生效 |
-| `[GENERAL]` | ⚠️ `debug` 生效；`mode` 待集群支持（P4） |
-| `[CLUSTER]` | ❌ `load_balancer` / `nodes` / `db_uri` 无消费方（P4） |
-| `[BROWSER]` | ❌ 无消费方（P5） |
-| `[MONITOR]` | ✅ 生效 |
+| `[SERVER]` `[PROXY]` `[LOG]` `[SECURITY]` `[DOWNLOADER]` `[MONITOR]` `[BROWSER]` | ✅ 生效 |
+| `[GENERAL]` | ⚠️ `debug` 生效；`mode` 无消费方 |
+| `[CLUSTER]` | ⚠️ `load_balancer` / `nodes` / 阈值生效；`db_uri` 无消费方 |
 
 > `[DOWNLOADER]` 的限速（`rate_limit`）、分块下载（`chunk`）、临时存储（`storage`）
 > 依赖真正的流式传输通路，已从默认配置移除，待流式下载实现后再引入（P3）。
 
 ### 功能
 
-- **分布式 / 集群**：尽管项目定位是"分布式"，目前客户端只连**单个** `host:port`。
-  没有节点池、负载均衡、故障转移或服务发现。`[CLUSTER]` 是预留配置。
+- **服务发现**：集群的节点列表来自静态配置，改了要重启。没有 DNS / etcd / Consul
+  之类的动态发现，`[CLUSTER].db_uri` 仍是预留配置。
 - **传输加密 / mTLS**：已支持令牌鉴权，但 gRPC 仍是 `insecure_channel`（明文）。
   令牌在不受信任的网络上会被窃听，请在 TLS 终端（如 nginx / service mesh）之后部署，
   或等待后续的 mTLS 支持。
-- **适配器**：`IPClickAdapter` 枚举列出 6 种，实际只实现 **`curl_cffi`** 和 **`httpx`**。
-  请求 `requests` / `DrissionPage` / `undetected_chromedriver` / `playwright` 会抛
-  `AdapterError`。
-- **浏览器渲染**：`automation_config` / `automation_script` 字段贯穿了整条调用链，
-  但末端没有任何消费方，属于预留接口。
+- **适配器**：`IPClickAdapter` 枚举列出 6 种，已实现 4 种——`curl_cffi`、`httpx`、
+  `requests`、`playwright`。`DrissionPage` 与 `undetected_chromedriver` 未实现，
+  请求到会抛 `AdapterError`：两者都基于 selenium + chromedriver，能力与 `playwright`
+  高度重叠，主要卖点是反检测规避，收益不足以抵消维护成本。
 - **限速与分块下载**：`[DOWNLOADER]` 里的 `rate_limit` / `chunk` / `storage` 尚未实现。
   流式通路已经就绪，这几项可以在其上实现，但目前还没做。
+- **集群流式的中途重连**：`ClusterDownloader.stream()` 只有**建流**这一步会故障
+  转移。流建立之后中途断掉不会自动重连——那需要断点续传（Range 请求）才能不重复
+  数据。批量则是整批发给同一个节点，不跨节点拆分。
 - **文件上传**：`files` 参数会抛 `NotImplementedError`。
 - **Cookie 持久化**：请求之间不共享 cookie jar，每次请求相互独立。
 - **客户端重试**：重试只发生在服务端适配器内部；客户端到服务端这一跳失败不会重试。
@@ -580,8 +716,9 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 | **P1** 打通存量 | `[DOWNLOADER]` 生效、参数错误不再伪装成网络失败、`NO_PROXY` 处理、`[GENERAL].debug` | ✅ 已完成 |
 | **P2** 安全与可运维 | 服务端 token 鉴权 ✅、gRPC 标准健康检查 ✅、Prometheus metrics ✅ | ✅ 已完成 |
 | **P3** 能力扩展 | 异步客户端 ✅、批量 RPC ✅、真流式下载 ✅（限速 / 分块仍待做） | ✅ 已完成 |
-| **P4** 集群 | 节点池、负载均衡、健康探测、故障转移（依赖 P2 的健康检查） | 计划中 |
-| **P5** 适配器 | `requests`、`playwright` / `DrissionPage` / `undetected_chromedriver`（连带 `[BROWSER]` 与浏览器渲染） | 计划中 |
+| **P4** 集群 | 节点池 ✅、负载均衡 ✅、健康探测 ✅、故障转移 ✅、只读状态页 ✅ | ✅ 已完成 |
+| **P5** 适配器 | `requests` ✅、`playwright` ✅（连带 `[BROWSER]` 与浏览器渲染） | ✅ 已完成 |
+| **P6** 待定 | mTLS、服务发现、限速 / 分块下载、Cookie 持久化 | 计划中 |
 
 ## 🛠️ 开发
 
