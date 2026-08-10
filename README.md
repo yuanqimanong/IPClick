@@ -17,6 +17,9 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 - **连接复用**：客户端复用 gRPC channel，服务端复用适配器与 HTTP 连接池
 - **代理支持**：灵活的代理配置，支持 HTTP/HTTPS 代理
 - **自动重试**：内置请求重试机制，支持指数退避 + 抖动，并可按状态码重试
+- **流式下载**：大文件分片传输，服务端与客户端都不需要把整个响应体驻留内存
+- **批量请求**：一次 RPC 处理多个任务，结果按完成顺序流式返回
+- **异步客户端**：基于 `grpc.aio` 的 `AsyncDownloader`，与同步版接口对应
 - **令牌鉴权**：gRPC 标准 Bearer 令牌，支持环境变量注入与多令牌轮换
 - **健康检查**：实现 `grpc.health.v1` 标准协议，K8s 探针与服务网格开箱即用
 - **Prometheus 指标**：请求量 / 延迟 / 重试 / 拒绝等指标，可选依赖、优雅降级
@@ -157,6 +160,64 @@ response = downloader.request(
 
 > 适配器默认**不读取**环境变量里的 `HTTP_PROXY` / `ALL_PROXY`。代理必须由调用方显式指定，
 > 以免请求意外走到服务端所在机器的环境代理出口。
+
+### 流式下载（大文件）
+
+`get()` 会把整个响应体读进内存；大文件请用 `stream()`，响应体分片到达，
+状态码和响应头在收到第一个字节前就可用：
+
+```python
+with downloader.stream("https://example.com/big.zip") as resp:
+    print(resp.status_code, resp.content_length)
+    if not resp.is_success():
+        raise SystemExit(resp.error)
+
+    with open("big.zip", "wb") as f:
+        for chunk in resp:          # 每片默认 64KB
+            f.write(chunk)
+
+    print(f"共 {resp.total_bytes} 字节，耗时 {resp.elapsed_ms}ms")
+```
+
+提前退出 `with` 会 cancel 掉这条 gRPC 流，服务端也就不再继续下载。
+
+> 流式路径**不做重试** —— 重试要么得缓存已发出的分片、要么让调用方看到重复数据，
+> 两者都不可接受。流式请求失败就是失败，由调用方决定是否重来。
+
+### 批量请求
+
+一次 RPC 处理多个任务，省掉逐个调用的往返开销：
+
+```python
+from ipclick import DownloadTask
+
+tasks = [DownloadTask(uuid=url, url=url) for url in urls]
+for resp in downloader.batch(tasks):
+    print(resp.request_uuid, resp.status_code)
+```
+
+结果按**完成顺序**产出（不是提交顺序），所以要靠 `request_uuid` 对应回请求。
+单个任务失败不影响其他任务，失败信息在各自响应的 `error` 里。
+并发度受服务端 `[SERVER].max_workers` 约束。
+
+### 异步客户端
+
+```python
+from ipclick.aio import AsyncDownloader
+
+async with AsyncDownloader() as d:
+    resp = await d.get("https://example.com")
+
+    stream = await d.stream("https://example.com/big.zip")
+    async with stream:
+        async for chunk in stream:
+            ...
+
+    async for resp in d.batch(tasks):
+        ...
+```
+
+参数含义、默认值、异常类型与同步版完全一致（两者共用同一套配置与任务组装逻辑）。
 
 ### 使用全局下载器
 
@@ -453,6 +514,7 @@ docker run -d -p 9527:9527 --name ipclick -v /你的路径/:/home/ipclick/.ipcli
 | `ValidationError`   | 任务参数校验失败，如 URL 为空、适配器名拼错（同时继承 `ValueError`） | ✅ 会抛出 |
 | `TransportError`    | 与服务端的 gRPC 通信失败       | ✅ 由 `download()` 抛出 |
 | `AuthenticationError` | 鉴权令牌缺失或不正确        | ✅ 会抛出（非 TransportError） |
+| `ClientClosedError` | 在已关闭的客户端上继续发请求      | ✅ 会抛出（非 TransportError） |
 | `RequestError`      | 目标站点返回错误，由 `raise_for_status()` 抛出 | ✅ 需自行调用 |
 | `ConfigError`       | 配置缺失或非法               | ✅ 加载配置时抛出 |
 | `AdapterError`      | 适配器不存在或依赖未安装          | ❌ 仅服务端 |
@@ -504,11 +566,9 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
   `AdapterError`。
 - **浏览器渲染**：`automation_config` / `automation_script` 字段贯穿了整条调用链，
   但末端没有任何消费方，属于预留接口。
-- **流式下载**：`stream` 参数不改变行为（两个适配器一致忽略）。响应体经由单个
-  protobuf 消息整体传输（上限 500MB），大文件会完整驻留内存。
+- **限速与分块下载**：`[DOWNLOADER]` 里的 `rate_limit` / `chunk` / `storage` 尚未实现。
+  流式通路已经就绪，这几项可以在其上实现，但目前还没做。
 - **文件上传**：`files` 参数会抛 `NotImplementedError`。
-- **批量请求**：一次 RPC 只处理一个 URL，没有批量 / 流式接口。
-- **异步客户端**：只有同步 `Downloader`，没有 `grpc.aio` 版本。
 - **Cookie 持久化**：请求之间不共享 cookie jar，每次请求相互独立。
 - **客户端重试**：重试只发生在服务端适配器内部；客户端到服务端这一跳失败不会重试。
 
@@ -519,7 +579,7 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 |---|---|---|
 | **P1** 打通存量 | `[DOWNLOADER]` 生效、参数错误不再伪装成网络失败、`NO_PROXY` 处理、`[GENERAL].debug` | ✅ 已完成 |
 | **P2** 安全与可运维 | 服务端 token 鉴权 ✅、gRPC 标准健康检查 ✅、Prometheus metrics ✅ | ✅ 已完成 |
-| **P3** 能力扩展 | 异步客户端、批量 RPC、真流式下载（连带限速 / 分块） | 计划中 |
+| **P3** 能力扩展 | 异步客户端 ✅、批量 RPC ✅、真流式下载 ✅（限速 / 分块仍待做） | ✅ 已完成 |
 | **P4** 集群 | 节点池、负载均衡、健康探测、故障转移（依赖 P2 的健康检查） | 计划中 |
 | **P5** 适配器 | `requests`、`playwright` / `DrissionPage` / `undetected_chromedriver`（连带 `[BROWSER]` 与浏览器渲染） | 计划中 |
 

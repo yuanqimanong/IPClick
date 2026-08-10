@@ -1,9 +1,10 @@
+from collections.abc import Iterator
 import threading
 from typing import TYPE_CHECKING, Any
 
 from typing_extensions import override
 
-from ipclick.adapters.base import DownloaderAdapter, retry
+from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader, retry
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError
@@ -196,6 +197,57 @@ class CurlCffiAdapter(DownloaderAdapter):
             # 不打完整堆栈：retry 会重试多次，每次一份 traceback 会淹没日志。
             log.warning(f"curl_cffi request failed for {url}: {e}")
             raise
+
+    @override
+    def download_stream(
+        self,
+        url: str,
+        *,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        **kwargs: Any,
+    ) -> Iterator[StreamEvent]:
+        """curl_cffi 的真流式实现。
+
+        这里是 stream=True 唯一正确的用法：必须在响应上下文里把分片消费完。
+        之前在 download() 里转发 stream=True 却又去读 .content，拿到的是空
+        bytes 而 status_code 仍是 200——静默丢包，所以那条路径已经把该参数
+        彻底忽略掉了。
+        """
+        method = str(kwargs.get("method", "GET")).upper()
+        if method not in _SUPPORTED_METHODS:
+            yield StreamHeader(url=url, status_code=-1, error=f"Unsupported HTTP method: {method}")
+            return
+
+        session = self._get_session(kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate"))
+
+        request_kwargs: dict[str, Any] = {
+            "headers": kwargs.get("headers"),
+            "cookies": kwargs.get("cookies"),
+            "params": kwargs.get("params"),
+            "data": kwargs.get("data"),
+            "json": kwargs.get("json"),
+            "timeout": kwargs.get("timeout") or self.timeout,
+            "allow_redirects": bool(kwargs.get("allow_redirects", True)),
+        }
+        request_kwargs = {k: v for k, v in request_kwargs.items() if v is not None}
+
+        try:
+            response = session.request(method, url, stream=True, **request_kwargs)
+        except Exception as e:
+            log.warning(f"curl_cffi stream failed for {url}: {e}")
+            yield StreamHeader(url=url, status_code=-1, error=str(e))
+            return
+
+        try:
+            yield StreamHeader(
+                url=str(response.url),
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                content_length=int(response.headers.get("content-length") or -1),
+            )
+            yield from response.iter_content(chunk_size=chunk_size)
+        finally:
+            response.close()
 
     @override
     def close(self) -> None:

@@ -138,3 +138,48 @@ class TaskResp(_message.Message):
     error_message: str
     response_time_ms: int
     def __init__(self, request_uuid: _Optional[str] = ..., adapter: _Optional[_Union[AdapterType, str]] = ..., original_request: _Optional[_Union[ReqTask, _Mapping]] = ..., effective_url: _Optional[str] = ..., status_code: _Optional[int] = ..., response_headers: _Optional[_Mapping[str, str]] = ..., content: _Optional[bytes] = ..., error_message: _Optional[str] = ..., response_time_ms: _Optional[int] = ...) -> None: ...
+
+class TaskRespHeader(_message.Message):
+    __slots__ = ("request_uuid", "adapter", "effective_url", "status_code", "response_headers", "error_message", "content_length")
+    class ResponseHeadersEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: str
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    REQUEST_UUID_FIELD_NUMBER: _ClassVar[int]
+    ADAPTER_FIELD_NUMBER: _ClassVar[int]
+    EFFECTIVE_URL_FIELD_NUMBER: _ClassVar[int]
+    STATUS_CODE_FIELD_NUMBER: _ClassVar[int]
+    RESPONSE_HEADERS_FIELD_NUMBER: _ClassVar[int]
+    ERROR_MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    CONTENT_LENGTH_FIELD_NUMBER: _ClassVar[int]
+    request_uuid: str
+    adapter: AdapterType
+    effective_url: str
+    status_code: int
+    response_headers: _containers.ScalarMap[str, str]
+    error_message: str
+    content_length: int
+    def __init__(self, request_uuid: _Optional[str] = ..., adapter: _Optional[_Union[AdapterType, str]] = ..., effective_url: _Optional[str] = ..., status_code: _Optional[int] = ..., response_headers: _Optional[_Mapping[str, str]] = ..., error_message: _Optional[str] = ..., content_length: _Optional[int] = ...) -> None: ...
+
+class TaskRespChunk(_message.Message):
+    __slots__ = ("header", "chunk", "trailer")
+    HEADER_FIELD_NUMBER: _ClassVar[int]
+    CHUNK_FIELD_NUMBER: _ClassVar[int]
+    TRAILER_FIELD_NUMBER: _ClassVar[int]
+    header: TaskRespHeader
+    chunk: bytes
+    trailer: TaskRespTrailer
+    def __init__(self, header: _Optional[_Union[TaskRespHeader, _Mapping]] = ..., chunk: _Optional[bytes] = ..., trailer: _Optional[_Union[TaskRespTrailer, _Mapping]] = ...) -> None: ...
+
+class TaskRespTrailer(_message.Message):
+    __slots__ = ("response_time_ms", "total_bytes", "error_message")
+    RESPONSE_TIME_MS_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_BYTES_FIELD_NUMBER: _ClassVar[int]
+    ERROR_MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    response_time_ms: int
+    total_bytes: int
+    error_message: str
+    def __init__(self, response_time_ms: _Optional[int] = ..., total_bytes: _Optional[int] = ..., error_message: _Optional[str] = ...) -> None: ...

@@ -43,6 +43,16 @@ class TaskServiceStub:
                 request_serializer=task__pb2.ReqTask.SerializeToString,
                 response_deserializer=task__pb2.TaskResp.FromString,
                 _registered_method=True)
+        self.SendStream = channel.unary_stream(
+                '/task.TaskService/SendStream',
+                request_serializer=task__pb2.ReqTask.SerializeToString,
+                response_deserializer=task__pb2.TaskRespChunk.FromString,
+                _registered_method=True)
+        self.SendBatch = channel.stream_stream(
+                '/task.TaskService/SendBatch',
+                request_serializer=task__pb2.ReqTask.SerializeToString,
+                response_deserializer=task__pb2.TaskResp.FromString,
+                _registered_method=True)
 
 
 class TaskServiceServicer:
@@ -53,7 +63,24 @@ class TaskServiceServicer:
     """
 
     def Send(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+        """单次请求，响应体整条返回。适合中小响应。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SendStream(self, request, context):
+        """流式下载：响应体分片返回，服务端与客户端都不需要把整个 body 驻留内存。
+        大文件请用这个而不是 Send。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SendBatch(self, request_iterator, context):
+        """批量：客户端流式推送任务，服务端按**完成顺序**（不是提交顺序）流式返回结果。
+        相比逐个调用 Send，省掉了每个任务一次往返的开销。
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -63,6 +90,16 @@ def add_TaskServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'Send': grpc.unary_unary_rpc_method_handler(
                     servicer.Send,
+                    request_deserializer=task__pb2.ReqTask.FromString,
+                    response_serializer=task__pb2.TaskResp.SerializeToString,
+            ),
+            'SendStream': grpc.unary_stream_rpc_method_handler(
+                    servicer.SendStream,
+                    request_deserializer=task__pb2.ReqTask.FromString,
+                    response_serializer=task__pb2.TaskRespChunk.SerializeToString,
+            ),
+            'SendBatch': grpc.stream_stream_rpc_method_handler(
+                    servicer.SendBatch,
                     request_deserializer=task__pb2.ReqTask.FromString,
                     response_serializer=task__pb2.TaskResp.SerializeToString,
             ),
@@ -96,6 +133,60 @@ class TaskService:
             request,
             target,
             '/task.TaskService/Send',
+            task__pb2.ReqTask.SerializeToString,
+            task__pb2.TaskResp.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SendStream(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/task.TaskService/SendStream',
+            task__pb2.ReqTask.SerializeToString,
+            task__pb2.TaskRespChunk.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SendBatch(request_iterator,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.stream_stream(
+            request_iterator,
+            target,
+            '/task.TaskService/SendBatch',
             task__pb2.ReqTask.SerializeToString,
             task__pb2.TaskResp.FromString,
             options,

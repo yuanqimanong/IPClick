@@ -1,13 +1,15 @@
+from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import json
 import threading
 import time
-from typing import Any
+from typing import Any, cast
 
 import grpc
 from grpc import ServicerContext
 from typing_extensions import override
 
-from ipclick.adapters.base import DownloaderAdapter
+from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamHeader
 from ipclick.adapters.registry import get_adapter, get_default_adapter
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.models import METHOD_MAP, IPClickAdapter
@@ -27,6 +29,20 @@ from ipclick.utils.url_util import URLPolicy, validate_url
 _DEFAULT_VERIFY_SSL = True
 _DEFAULT_ALLOW_REDIRECTS = True
 _DEFAULT_STREAM = False
+
+
+class _IsolatedContext:
+    """批量里给单个任务用的假 ServicerContext。
+
+    只吞掉状态码设置，不影响批量共享的那条流。
+    """
+
+    def set_code(self, _code: object) -> None: ...
+
+    def set_details(self, _details: str) -> None: ...
+
+    def is_active(self) -> bool:
+        return True
 
 
 class TaskService(task_pb2_grpc.TaskServiceServicer):
@@ -51,6 +67,12 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         self._adapter_cache: dict[str, DownloaderAdapter] = {}
         self._cache_lock: threading.Lock = threading.Lock()
         self._metrics: Metrics = get_metrics()
+
+        downloader_config = dict(self.config.get("DOWNLOADER", {}))
+        self._chunk_size: int = int(downloader_config.get("chunk_size", DEFAULT_CHUNK_SIZE) or DEFAULT_CHUNK_SIZE)
+        # 批量的并发度沿用 SERVER.max_workers：这里再开一个不受约束的池的话，
+        # 总并发会变成 max_workers x 批量数，把下游打爆。
+        self._batch_concurrency: int = max(1, int(dict(self.config.get("SERVER", {})).get("max_workers", 10) or 10))
 
         # 目标 URL 准入策略（SSRF 防护）
         self.url_policy: URLPolicy = URLPolicy.from_config(dict(self.config.get("SECURITY", {})))
@@ -179,16 +201,11 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             log.debug(f"{field_name} 不是合法 JSON，按原始字符串处理")
             return raw
 
-    def _execute_download(self, adapter: DownloaderAdapter, request: task_pb2.ReqTask) -> Response:
-        """
-        执行下载请求
+    def _build_download_kwargs(self, request: task_pb2.ReqTask) -> dict[str, Any]:
+        """把 protobuf 请求翻译成适配器参数。
 
-        Args:
-            adapter: HTTP适配器
-            request: gRPC请求对象
-
-        Returns:
-            Response: 统一响应对象
+        单请求与流式两条路径共用，避免默认值处理（尤其是 proto3 显式存在性
+        那套逻辑）在两处各写一份而失步。
         """
         method = METHOD_MAP.get(request.method, "GET")
 
@@ -241,7 +258,11 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         if not download_kwargs["timeout"] or download_kwargs["timeout"] <= 0:
             download_kwargs["timeout"] = self.adapter_settings.download_timeout
 
-        return adapter.download(request.url, **download_kwargs)
+        return download_kwargs
+
+    def _execute_download(self, adapter: DownloaderAdapter, request: task_pb2.ReqTask) -> Response:
+        """执行一次（非流式）下载。"""
+        return adapter.download(request.url, **self._build_download_kwargs(request))
 
     # ------------------------------------------------------------------ #
     # 响应
@@ -282,6 +303,176 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             status_code=-1,
             error_message=message,
         )
+
+    # ------------------------------------------------------------------ #
+    # 流式下载
+    # ------------------------------------------------------------------ #
+
+    @override
+    def SendStream(self, request: "task_pb2.ReqTask", context: ServicerContext) -> Iterator["task_pb2.TaskRespChunk"]:
+        """流式下载：先发 header，再分片发 body，最后发 trailer。
+
+        与 Send 的关键区别是响应体不会在服务端整个进内存——对大文件来说，
+        Send 会把 body 复制好几份（适配器的 content、protobuf 序列化缓冲、
+        gRPC 发送缓冲），而这里始终只有一个分片在内存里。
+        """
+        log.info(f"Received stream request: {request.uuid} for URL: {request.url}")
+        start_time = time.monotonic()
+        total_bytes = 0
+        error_message = ""
+
+        try:
+            adapter_name = IPClickAdapter.from_pb(request.adapter).display_name
+        except ValueError:
+            adapter_name = "unknown"
+
+        with self._metrics.track_request(adapter_name, METHOD_MAP.get(request.method, "GET")) as metric_ctx:
+            try:
+                adapter = self._get_cached_adapter(adapter_name)
+                validate_url(request.url, self.url_policy)
+
+                download_kwargs = self._build_download_kwargs(request)
+                # 流式路径不做重试：重试要么得缓存已发出的分片、要么让调用方
+                # 看到重复数据，两者都不可接受。
+                download_kwargs.pop("max_retries", None)
+                download_kwargs.pop("retry_delay", None)
+
+                stream = adapter.download_stream(request.url, chunk_size=self._chunk_size, **download_kwargs)
+
+                header_sent = False
+                for event in stream:
+                    if context.is_active() is False:  # 调用方已断开，别再白白下载
+                        log.info(f"Stream request {request.uuid} cancelled by client")
+                        break
+
+                    if isinstance(event, StreamHeader):
+                        metric_ctx["status_code"] = event.status_code
+                        error_message = event.error or ""
+                        yield task_pb2.TaskRespChunk(
+                            header=task_pb2.TaskRespHeader(
+                                request_uuid=request.uuid,
+                                adapter=request.adapter,
+                                effective_url=event.url,
+                                status_code=event.status_code,
+                                response_headers=event.headers or {},
+                                error_message=error_message,
+                                content_length=event.content_length,
+                            )
+                        )
+                        header_sent = True
+                        if event.error:
+                            break
+                    else:
+                        total_bytes += len(event)
+                        yield task_pb2.TaskRespChunk(chunk=event)
+
+                if not header_sent:
+                    # 适配器一个事件都没产出——不该发生，但别让调用方收到一个
+                    # 没有 header 的流而无从判断。
+                    error_message = "适配器未返回任何响应"
+                    yield task_pb2.TaskRespChunk(
+                        header=task_pb2.TaskRespHeader(
+                            request_uuid=request.uuid,
+                            adapter=request.adapter,
+                            effective_url=request.url,
+                            status_code=-1,
+                            error_message=error_message,
+                        )
+                    )
+
+            except URLNotAllowedError as e:
+                error_message = str(e)
+                self._metrics.record_rejected("url_not_allowed")
+                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                context.set_details(error_message)
+                yield self._stream_error_header(request, error_message)
+            except (AdapterError, ValueError) as e:
+                error_message = str(e)
+                self._metrics.record_rejected("invalid_argument")
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(error_message)
+                yield self._stream_error_header(request, error_message)
+            except Exception as e:
+                log.exception(f"Stream request {request.uuid} failed: {e}")
+                self._metrics.record_rejected("internal_error")
+                error_message = f"内部错误: {type(e).__name__}"
+                yield self._stream_error_header(request, error_message)
+
+            metric_ctx["size"] = total_bytes
+
+        elapsed_ms = int((time.monotonic() - start_time) * 1000)
+        yield task_pb2.TaskRespChunk(
+            trailer=task_pb2.TaskRespTrailer(
+                response_time_ms=elapsed_ms,
+                total_bytes=total_bytes,
+                error_message=error_message,
+            )
+        )
+        log.info(f"Stream request {request.uuid} finished in {elapsed_ms}ms, {total_bytes} bytes")
+
+    @staticmethod
+    def _stream_error_header(request: task_pb2.ReqTask, message: str) -> "task_pb2.TaskRespChunk":
+        return task_pb2.TaskRespChunk(
+            header=task_pb2.TaskRespHeader(
+                request_uuid=request.uuid,
+                adapter=request.adapter,
+                effective_url=request.url,
+                status_code=-1,
+                error_message=message,
+            )
+        )
+
+    # ------------------------------------------------------------------ #
+    # 批量
+    # ------------------------------------------------------------------ #
+
+    @override
+    def SendBatch(
+        self, request_iterator: Iterator["task_pb2.ReqTask"], context: ServicerContext
+    ) -> Iterator["task_pb2.TaskResp"]:
+        """批量：客户端流式推任务，服务端按**完成顺序**流式返回。
+
+        并发度受 [SERVER].max_workers 约束——这里再开一个自己的线程池的话，
+        总并发会变成 max_workers × 批量数，把下游打爆。用 as_completed 让快的
+        先返回，而不是按提交顺序阻塞在慢请求上。
+        """
+        pending: dict[Future[task_pb2.TaskResp], str] = {}
+        submitted = 0
+
+        with ThreadPoolExecutor(max_workers=self._batch_concurrency, thread_name_prefix="ipclick-batch") as pool:
+            for request in request_iterator:
+                if not context.is_active():
+                    log.info("Batch cancelled by client")
+                    break
+                future = pool.submit(self._handle_one, request)
+                pending[future] = request.uuid
+                submitted += 1
+
+                # 边收边发：不等客户端把所有任务推完再开始返回结果，
+                # 否则一个超长的批次会让首个结果迟迟不到。
+                done = [f for f in pending if f.done()]
+                for f in done:
+                    del pending[f]
+                    yield f.result()
+
+            for future in as_completed(list(pending)):
+                if not context.is_active():
+                    break
+                yield future.result()
+
+        log.info(f"Batch finished, {submitted} tasks")
+
+    def _handle_one(self, request: "task_pb2.ReqTask") -> "task_pb2.TaskResp":
+        """批量里的单个任务，复用 Send 的全部逻辑（含指标与安全校验）。
+
+        刻意传一个隔离的假 context：Send 在出错时会调 set_code/set_details，
+        若把批量共享的那个 context 传进去，一个任务的 URL 被 SSRF 拦截就会把
+        **整条批量流**标记成 PERMISSION_DENIED，其余任务的结果全部丢失。
+        每个任务的失败信息已经在它自己的 TaskResp.error_message 里了。
+        """
+        # _IsolatedContext 只实现了 Send 实际用到的三个方法，
+        # 不是完整的 ServicerContext，这里显式 cast。
+        return self.Send(request, cast(ServicerContext, cast(object, _IsolatedContext())))
 
     # ------------------------------------------------------------------ #
     # 生命周期

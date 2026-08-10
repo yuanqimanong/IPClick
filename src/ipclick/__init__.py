@@ -11,6 +11,7 @@ from ipclick.dto.response import Response
 from ipclick.exceptions import (
     AdapterError,
     AuthenticationError,
+    ClientClosedError,
     ConfigError,
     IPClickError,
     RequestError,
@@ -47,6 +48,7 @@ __all__ = [  # noqa: RUF022 - 按用途分组比字母序更易读
     "ConfigError",
     "AdapterError",
     "AuthenticationError",
+    "ClientClosedError",
     "TransportError",
     "RequestError",
     "ValidationError",

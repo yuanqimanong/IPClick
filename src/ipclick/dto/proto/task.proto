@@ -86,10 +86,49 @@ message TaskResp {
 }
 
 
+// 流式响应的第一条消息：元信息。
+// 拆成 header + chunk 两段是为了让调用方在拿到第一个字节前就知道状态码和响应头，
+// 从而可以尽早决定是继续接收还是放弃。
+message TaskRespHeader {
+  string request_uuid = 1;
+  AdapterType adapter = 2;
+  string effective_url = 3;
+  int32 status_code = 4;
+  map<string, string> response_headers = 5;
+  string error_message = 6;  // 非空表示失败，后续不会再有 chunk
+  int64 content_length = 7;  // -1 表示服务端也不知道总长度
+}
+
+// 流式响应的消息包络。
+message TaskRespChunk {
+  oneof payload {
+    TaskRespHeader header = 1;  // 恰好一条，且总是第一条
+    bytes chunk = 2;            // 零条或多条，按到达顺序拼接即为完整响应体
+    TaskRespTrailer trailer = 3;  // 恰好一条，且总是最后一条
+  }
+}
+
+// 流式响应的最后一条消息：只有传完才知道的统计信息。
+message TaskRespTrailer {
+  int64 response_time_ms = 1;
+  int64 total_bytes = 2;
+  string error_message = 3;  // 传输中途出错时非空（此时前面的 chunk 是不完整的）
+}
+
+
 // =====================================
 // 服务定义
 // =====================================
 
 service TaskService {
+  // 单次请求，响应体整条返回。适合中小响应。
   rpc Send(ReqTask) returns (TaskResp) {}
+
+  // 流式下载：响应体分片返回，服务端与客户端都不需要把整个 body 驻留内存。
+  // 大文件请用这个而不是 Send。
+  rpc SendStream(ReqTask) returns (stream TaskRespChunk) {}
+
+  // 批量：客户端流式推送任务，服务端按**完成顺序**（不是提交顺序）流式返回结果。
+  // 相比逐个调用 Send，省掉了每个任务一次往返的开销。
+  rpc SendBatch(stream ReqTask) returns (stream TaskResp) {}
 }

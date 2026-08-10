@@ -22,6 +22,14 @@ class TransportError(IPClickError):
     """与 IPClick 服务端之间的 gRPC 通信失败（连不上、超时、被拒绝）。"""
 
 
+class ClientClosedError(IPClickError):
+    """在已关闭的客户端上继续发请求。
+
+    与 AuthenticationError 同理，刻意**不**继承 TransportError——这是调用方的
+    使用错误，重试多少次都不会好，不该被伪装成一次网络失败吞成 -1 响应。
+    """
+
+
 class AuthenticationError(IPClickError):
     """鉴权失败：令牌缺失或不正确。
 
@@ -48,6 +56,7 @@ class URLNotAllowedError(ValidationError):
 __all__ = [
     "AdapterError",
     "AuthenticationError",
+    "ClientClosedError",
     "ConfigError",
     "IPClickError",
     "RequestError",

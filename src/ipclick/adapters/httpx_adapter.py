@@ -1,9 +1,10 @@
+from collections.abc import Iterator
 import threading
 from typing import Any
 
 from typing_extensions import override
 
-from ipclick.adapters.base import DownloaderAdapter, retry
+from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader, retry
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError
@@ -177,6 +178,46 @@ class HttpxAdapter(DownloaderAdapter):
             # 否则每次重试都会打一份完整 traceback。
             log.warning(f"httpx request failed for {url}: {e}")
             raise
+
+    @override
+    def download_stream(
+        self,
+        url: str,
+        *,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        **kwargs: Any,
+    ) -> Iterator[StreamEvent]:
+        """httpx 的真流式实现：响应体不进内存，边收边 yield。"""
+        method = str(kwargs.get("method", "GET")).upper()
+        proxy = kwargs.get("proxy")
+        verify = bool(kwargs.get("verify", True))
+        client = self._get_client(proxy, verify)
+
+        request_kwargs: dict[str, Any] = {
+            "params": kwargs.get("params"),
+            "headers": kwargs.get("headers") or {"User-Agent": self._get_user_agent()},
+            "cookies": kwargs.get("cookies"),
+            "timeout": kwargs.get("timeout") or self.timeout,
+            "json": kwargs.get("json"),
+            "follow_redirects": bool(kwargs.get("allow_redirects", True)),
+        }
+        if kwargs.get("data") is not None:
+            request_kwargs["data"] = kwargs["data"]
+        request_kwargs = {k: v for k, v in request_kwargs.items() if v is not None}
+
+        try:
+            with client.stream(method, url, **request_kwargs) as response:
+                yield StreamHeader(
+                    url=str(response.url),
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                    content_length=int(response.headers.get("content-length") or -1),
+                )
+                yield from response.iter_bytes(chunk_size=chunk_size)
+        except Exception as e:
+            log.warning(f"httpx stream failed for {url}: {e}")
+            # 失败也要先给出 header，否则调用方连"为什么失败"都拿不到
+            yield StreamHeader(url=url, status_code=-1, error=str(e))
 
     @override
     def close(self) -> None:

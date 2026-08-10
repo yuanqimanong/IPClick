@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 import functools
 from random import uniform
 import time
@@ -9,6 +10,26 @@ from ipclick.adapters.settings import DEFAULT_RETRY_STATUS_CODES, AdapterSetting
 from ipclick.dto.response import Response
 from ipclick.metrics import get_metrics
 from ipclick.utils.log_util import log
+
+
+#: 流式传输的默认分片大小（字节）。64KB 是吞吐与 gRPC 消息开销之间的常见折中。
+DEFAULT_CHUNK_SIZE = 64 * 1024
+
+
+@dataclass
+class StreamHeader:
+    """流式响应的元信息，总是第一个 yield 出来的元素。"""
+
+    url: str
+    status_code: int
+    headers: dict[str, str] = field(default_factory=dict)
+    error: str | None = None
+    #: 服务端声明的总长度；未知时为 -1
+    content_length: int = -1
+
+
+#: 流式迭代产出的元素：首个是 StreamHeader，之后都是 bytes 分片。
+StreamEvent = StreamHeader | bytes
 
 
 # 单次重试等待的上限（秒）。服务端每个请求占用一个 gRPC worker 线程，
@@ -225,6 +246,37 @@ class DownloaderAdapter(ABC):
             Response: 统一的响应对象
         """
         raise NotImplementedError
+
+    def download_stream(
+        self,
+        url: str,
+        *,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        **kwargs: Any,
+    ) -> "Iterator[StreamEvent]":
+        """流式执行请求：先 yield 一个 :class:`StreamHeader`，随后 yield 若干 bytes 分片。
+
+        与 :meth:`download` 的区别在于响应体不会整个进内存。适配器可以覆写此方法
+        提供真正的流式实现；基类给出一个回退实现——先整体下载再切片，
+        接口一致但省不了内存，仅用于尚未支持流式的适配器。
+
+        注意这里**不套 @retry**：重试意味着要么缓存已发出的分片、要么让调用方
+        看到重复数据，两者都不可接受。流式请求失败就是失败，由调用方决定重来。
+
+        Yields:
+            第一个元素是 :class:`StreamHeader`，之后是 ``bytes`` 分片。
+        """
+        response = self.download(url, **kwargs)
+        yield StreamHeader(
+            url=response.url,
+            status_code=response.status_code,
+            headers=response.headers or {},
+            error=str(response.exception) if response.exception else None,
+            content_length=len(response.content) if response.content else 0,
+        )
+        content = response.content or b""
+        for start in range(0, len(content), chunk_size):
+            yield content[start : start + chunk_size]
 
     @staticmethod
     def parse_extra_kwargs(raw: str | None) -> dict[str, Any]:

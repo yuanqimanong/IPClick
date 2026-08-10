@@ -149,9 +149,16 @@ class TestChannelReuse:
         assert client._channel is None
 
     def test_use_after_close_raises(self, client: Downloader):
+        """ "客户端已关闭"是编程错误，必须抛出——不能被 request() 当成网络失败
+        吞成 status_code == -1 的响应，那样调用方会去排查网络。"""
+        from ipclick.exceptions import ClientClosedError
+
         client.close()
-        with pytest.raises(TransportError, match="已关闭"):
+        with pytest.raises(ClientClosedError, match="已关闭"):
             client._get_stub()
+        # 经由公开接口同样要抛，而不是返回错误响应
+        with pytest.raises(ClientClosedError):
+            client.get("http://example.com/x")
 
     def test_context_manager_closes(self, live_server: tuple[int, EchoAdapter]):
         port, _ = live_server
