@@ -24,15 +24,34 @@ country_code = ''
 tunnel_server = ''
 
 # ------- 集群配置 [CLUSTER] -------
-# ⚠️ 尚未实现：本节配置当前没有任何消费方，修改不会生效（详见 README「尚未实现 / 已知限制」）
+# 供 ipclick.cluster.ClusterDownloader 使用：把请求分发到多个 IPClick 服务端。
+# nodes 为空即视为未启用集群，此时用单节点的 Downloader。
 [CLUSTER]
-# 负载均衡策略 (round_robin/random/weight)
+# 负载均衡策略：round_robin / random / weight
 load_balancer = "round_robin"
+# 连续探测失败多少次才摘除节点（避免一次抖动就让流量反复横跳）
+failure_threshold = 2
+# 连续探测成功多少次才把节点加回来
+recovery_threshold = 2
+# 探活间隔与单次超时（秒）。探活走 grpc.health.v1，免鉴权。
+probe_interval = 10
+probe_timeout = 3
+# 一次请求最多换几个节点重试
+max_failover = 2
+# 节点列表。address 必填，其余可选。
 nodes = [
-    # 格式：[id, address, region(可选), zone(可选), weight(可选), tags(可选)]
-    { id = "node-101", address = "192.168.1.101:8080", region = "us-east-1", zone = "1a", weight = 100 },
+    # { id = "node-101", address = "192.168.1.101:9527", region = "us-east-1", zone = "1a", weight = 100 },
 ]
-db_uri = "mysql://..."
+
+# ------- 集群状态页 [CLUSTER.status_page] -------
+# 只读页面：节点列表、健康状态、请求统计。不提供任何变更操作——
+# 运维变更请改配置文件，网页改配置等于再开一个高价值攻击面。
+[CLUSTER.status_page]
+enabled = false
+port = 9529
+# 默认只监听本机：状态页会暴露内网节点地址与拓扑，不该默认对外。
+# 需要远程访问请自行加反向代理并做鉴权。
+host = "127.0.0.1"
 
 # ================ 服务端配置 [SERVER] ================
 [SERVER]
