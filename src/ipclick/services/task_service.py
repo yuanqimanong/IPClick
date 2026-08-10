@@ -17,7 +17,8 @@ from ipclick.dto.models import METHOD_MAP, IPClickAdapter
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, URLNotAllowedError
-from ipclick.limiter import HostLimiter, HostLimitTimeout, LimiterSettings
+from ipclick.limiter import HostLimitTimeout
+from ipclick.limiter_redis import build_limiter
 from ipclick.metrics import Metrics, get_metrics
 from ipclick.utils import json_hook
 from ipclick.utils.config_util import Settings
@@ -82,7 +83,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         self.url_policy: URLPolicy = URLPolicy.from_config(dict(self.config.get("SECURITY", {})))
 
         # 按 host 的并发与速率闸门。未配置时是零开销的空操作。
-        self.host_limiter: HostLimiter = HostLimiter(LimiterSettings.from_config(downloader_config))
+        self.host_limiter: Any = build_limiter(downloader_config)
 
         # 获取默认适配器
         self.default_adapter: DownloaderAdapter = get_default_adapter(self.adapter_settings)

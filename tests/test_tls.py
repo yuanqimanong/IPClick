@@ -215,7 +215,7 @@ class TestConfigErrors:
 
     def test_missing_file_reports_path(self, tmp_path: Path):
         missing = str(tmp_path / "nope.pem")
-        with pytest.raises(ConfigError, match="nope.pem"):
+        with pytest.raises(ConfigError, match=r"nope\.pem"):
             server_credentials(TLSSettings(enabled=True, cert_file=missing, key_file=missing))
 
     def test_non_pem_file_rejected(self, tmp_path: Path):

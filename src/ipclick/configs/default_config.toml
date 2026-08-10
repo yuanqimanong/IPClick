@@ -147,6 +147,16 @@ max_tracked_hosts = 10000
 per_host_qps = 0
 # 突发额度（桶容量）。0 = 取 ceil(per_host_qps)，即最多攒够一秒的量。
 per_host_burst = 0
+# 限额算在哪儿：
+#   memory 每个服务端进程各算各的（默认）。集群里 N 个节点 = N 倍实际并发。
+#   redis  整个集群共用一份额度。需要 pip install "ipclick[redis]"
+backend = "memory"
+redis_url = "redis://127.0.0.1:6379/0"
+# 持有者多久算陈旧（秒）。进程拿着名额崩了，靠这个超时把名额收回来。
+# ⚠️ 必须大于最长的单次请求，否则慢请求的名额会被别人抢走，短暂超出上限。
+redis_slot_ttl = 600
+redis_socket_timeout = 3
+redis_key_prefix = "ipclick:limit"
 
 # 说明：分块下载（chunk）、临时存储（storage）尚未实现，已从默认配置移除，
 # 避免"配了却不生效"。

@@ -65,6 +65,9 @@ P3 扩展传输能力，P4 做集群，P5 补齐适配器，P6 加限流与可�
   ——同步客户端、异步客户端、服务端绑定、集群健康探活。默认关闭以兼容旧部署，
   监听非回环地址却没开时会打显著告警。
   `require_client_cert` 却不配 `ca_file` 是硬错误，不静默降级。
+- **分布式限流**（`[DOWNLOADER.rate_limit].backend = "redis"`）：让整个集群共用
+  一份 per-host 额度，而不是每个进程各算各的。并发名额与令牌桶都用 Lua 保证原子性；
+  持有者带 TTL，进程崩了名额能自动收回；Redis 故障时放行而不是拒绝所有请求。
 - **断点续传**（`ipclick.resume`）：`download_to_file()` / `iter_resumable()`，
   中断后用 HTTP Range 接着下。带 `If-Range` 校验，资源变了就丢掉重来而不是把两个
   版本拼在一起；服务端不支持 Range 时退化成整体重下。
