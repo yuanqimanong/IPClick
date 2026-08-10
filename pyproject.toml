@@ -31,18 +31,19 @@ requests = ["requests>=2.32.0,<3.0.0"]
 # playwright 浏览器渲染适配器：装完还要 `playwright install chromium`
 # （或把 [BROWSER].executable_path 指向系统已有的浏览器）
 browser = ["playwright>=1.49.0,<2.0.0"]
+# 浏览器渲染引擎，装完还要各自准备浏览器本体：
+#   camoufox     python -m camoufox fetch
+#   patchright   patchright install chromium
+#   drissionpage 用本机已装的 Chrome/Chromium，无需下载
+camoufox = ["camoufox>=0.5.0,<1.0.0"]
+patchright = ["patchright>=1.52.0,<2.0.0"]
+drissionpage = ["drissionpage>=4.1.0,<5.0.0"]
 all = [
     "prometheus-client>=0.26.0,<1.0.0",
     "requests>=2.32.0,<3.0.0",
     "playwright>=1.49.0,<2.0.0",
-]
-camoufox = [
     "camoufox>=0.5.0,<1.0.0",
-]
-patchright = [
     "patchright>=1.52.0,<2.0.0",
-]
-drissionpage = [
     "drissionpage>=4.1.0,<5.0.0",
 ]
 
