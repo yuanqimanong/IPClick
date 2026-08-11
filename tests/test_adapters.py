@@ -11,7 +11,7 @@ import pytest
 
 from ipclick.adapters.curl_cffi_adapter import CURL_CFFI_AVAILABLE, CurlCffiAdapter
 from ipclick.adapters.httpx_adapter import HTTPX_AVAILABLE, HttpxAdapter
-from ipclick.adapters.requests_adapter import REQUESTS_AVAILABLE, RequestsAdapter
+from ipclick.adapters.niquests_adapter import NIQUESTS_AVAILABLE, NiquestsAdapter
 from ipclick.exceptions import ValidationError
 
 
@@ -81,7 +81,7 @@ def _pool_of(adapter: object) -> dict:
 _ADAPTERS = {
     "curl_cffi": (CURL_CFFI_AVAILABLE, CurlCffiAdapter),
     "httpx": (HTTPX_AVAILABLE, HttpxAdapter),
-    "requests": (REQUESTS_AVAILABLE, RequestsAdapter),
+    "niquests": (NIQUESTS_AVAILABLE, NiquestsAdapter),
 }
 
 

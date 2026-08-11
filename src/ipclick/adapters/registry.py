@@ -6,22 +6,24 @@ from ipclick.adapters.browser_adapter import ENGINE_ADAPTERS, BrowserAdapter
 from ipclick.adapters.browser_settings import BrowserSettings
 from ipclick.adapters.curl_cffi_adapter import CurlCffiAdapter
 from ipclick.adapters.drission_adapter import DRISSIONPAGE_AVAILABLE, DrissionPageAdapter
-from ipclick.adapters.httpx_adapter import HttpxAdapter
-from ipclick.adapters.requests_adapter import REQUESTS_AVAILABLE, RequestsAdapter
+from ipclick.adapters.httpx_adapter import HTTPX_AVAILABLE, HttpxAdapter
+from ipclick.adapters.niquests_adapter import NIQUESTS_AVAILABLE, NiquestsAdapter
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.exceptions import AdapterError, ConfigError
 
 
-# 始终可用的 HTTP 适配器（依赖是核心依赖）
+# curl_cffi 是唯一的核心适配器：它是默认值，也是唯一带浏览器指纹伪装的。
+# 其余全部按需安装，`pip install ipclick` 因此保持轻量。
 ADAPTER_CLASSES: dict[str, type[DownloaderAdapter]] = {
     CurlCffiAdapter.adapter_name: CurlCffiAdapter,
-    HttpxAdapter.adapter_name: HttpxAdapter,
 }
 
 # 可选依赖：装了才注册。否则 get_adapter() 的报错会是"尚未支持"，
 # 而真实原因是"没装"——两者的处理方式完全不同。
-if REQUESTS_AVAILABLE:
-    ADAPTER_CLASSES[RequestsAdapter.adapter_name] = RequestsAdapter
+if HTTPX_AVAILABLE:
+    ADAPTER_CLASSES[HttpxAdapter.adapter_name] = HttpxAdapter
+if NIQUESTS_AVAILABLE:
+    ADAPTER_CLASSES[NiquestsAdapter.adapter_name] = NiquestsAdapter
 if DRISSIONPAGE_AVAILABLE:
     ADAPTER_CLASSES[DrissionPageAdapter.adapter_name] = DrissionPageAdapter
 for _engine, _cls in ENGINE_ADAPTERS.items():
@@ -50,7 +52,11 @@ _ENGINE_TO_ADAPTER: dict[str, str] = {
 
 #: 声明了但因缺依赖而未注册的适配器，给出安装提示而不是笼统的"尚未支持"
 _OPTIONAL_HINTS: dict[str, str] = {
-    "requests": 'pip install "ipclick[requests]"',
+    "httpx": 'pip install "ipclick[httpx]"',
+    "niquests": 'pip install "ipclick[niquests]"',
+    # 0.2.3 里有过，之后被 niquests 取代
+    "requests": "requests 适配器已移除，请改用 niquests（API 相同，且支持 HTTP/2、HTTP/3）："
+    'pip install "ipclick[niquests]" 并把 adapter 改成 "niquests"',
     **{cls.adapter_name: browser_engines.INSTALL_HINTS[engine] for engine, cls in ENGINE_ADAPTERS.items()},
     DrissionPageAdapter.adapter_name: browser_engines.INSTALL_HINTS["drissionpage"],
 }

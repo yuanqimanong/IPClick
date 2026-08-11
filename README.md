@@ -11,7 +11,8 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 
 ## ✨ 特性
 
-- **多适配器支持**：内置 `curl_cffi`、`httpx`、`requests`、`playwright` 适配器，并可注册自定义适配器
+- **多适配器支持**：默认 `curl_cffi`，按需加装 `httpx` / `niquests` / 浏览器渲染，并可注册自定义适配器
+- **轻量安装**：`pip install ipclick` 只带 curl_cffi，其余全部走 extras
 - **浏览器指纹伪装**：基于 `curl_cffi` 实现浏览器指纹模拟，有效绕过反爬检测
 - **浏览器渲染**：起真实浏览器执行 JS，四个引擎可选（camoufox / patchright /
   playwright / DrissionPage），默认按平台挑
@@ -42,11 +43,13 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 pip install ipclick
 ```
 
-可选功能按需安装：
+`pip install ipclick` 是**轻量安装**——只带默认的 curl_cffi 适配器。其余按需加：
 
 ```bash
+pip install "ipclick[httpx]"        # httpx 适配器
+pip install "ipclick[niquests]"     # niquests 适配器（requests 的 drop-in，支持 HTTP/2、HTTP/3）
 pip install "ipclick[metrics]"      # Prometheus 指标
-pip install "ipclick[requests]"     # requests 适配器
+pip install "ipclick[redis]"        # 跨节点共享的分布式限流
 pip install "ipclick[camoufox]"     # 浏览器渲染：Firefox 反检测（Linux/macOS 默认）
 pip install "ipclick[drissionpage]" # 浏览器渲染：CDP 直连（Windows 默认）
 pip install "ipclick[patchright]"   # 浏览器渲染：Chromium 反检测
@@ -89,16 +92,15 @@ pip install -e .
 ## 🔧 系统要求
 
 - Python >= 3.11
-- 主要依赖：
-    - curl-cffi >= 0.16.0
-    - grpcio >= 1.83.0
-    - protobuf >= 6.33.2
+- 核心依赖（`pip install ipclick` 会装这些，共 17 个包）：
+    - curl-cffi >= 0.16.0（默认适配器）
+    - grpcio >= 1.83.0 / grpcio-health-checking / protobuf >= 6.33.2
     - click >= 8.4.2
-    - httpx >= 0.28.1
     - fake-useragent >= 2.2.0
     - loguru >= 0.7.3
     - python-box >= 7.4.1
     - uuid-utils >= 0.17.0
+- httpx、niquests、浏览器引擎、Prometheus、Redis 全部走 extras，不装就不引入
 
 ## 🚀 快速开始
 
@@ -330,16 +332,19 @@ from ipclick import IPClickAdapter, downloader
 response = downloader.get("https://httpbin.org/get", adapter=IPClickAdapter.HTTPX)
 ```
 
-| 适配器 | 反检测 | JS 渲染 | 安装 |
-|---|---|---|---|
-| `curl_cffi`（默认） | TLS 指纹伪装 | ❌ | 内置 |
-| `httpx` | ❌ | ❌ | 内置 |
-| `requests` | ❌ | ❌ | `ipclick[requests]` |
-| `browser` | 由服务端引擎决定 | ✅ | 见下 |
-| `camoufox` | Firefox + 完整指纹伪装 | ✅ | `ipclick[camoufox]` |
-| `patchright` | Chromium，Playwright 反检测分支 | ✅ | `ipclick[patchright]` |
-| `playwright` | ❌（原版，最稳） | ✅ | `ipclick[browser]` |
-| `DrissionPage` | Chromium，CDP 直连 | ✅ | `ipclick[drissionpage]` |
+| 适配器 | 反检测 | HTTP/2 · 3 | JS 渲染 | 安装 |
+|---|---|---|---|---|
+| `curl_cffi`（默认） | TLS 指纹伪装 | HTTP/2 | ❌ | 内置 |
+| `httpx` | ❌ | HTTP/2 | ❌ | `ipclick[httpx]` |
+| `niquests` | ❌ | **HTTP/3** | ❌ | `ipclick[niquests]` |
+| `browser` | 由服务端引擎决定 | — | ✅ | 见下 |
+| `camoufox` | Firefox + 完整指纹伪装 | — | ✅ | `ipclick[camoufox]` |
+| `patchright` | Chromium，Playwright 反检测分支 | — | ✅ | `ipclick[patchright]` |
+| `playwright` | ❌（原版，最稳） | — | ✅ | `ipclick[browser]` |
+| `DrissionPage` | Chromium，CDP 直连 | — | ✅ | `ipclick[drissionpage]` |
+
+> `requests` 适配器在 0.2.3 里有过，之后被 `niquests` 取代——后者 API 完全一致
+> 但支持 HTTP/2 和 HTTP/3。请求 `requests` 会报错并给出迁移提示。
 
 ### 浏览器渲染
 

@@ -14,7 +14,10 @@ class IPClickAdapter(Enum):
     # 定义格式: (Protobuf枚举值, 内部识别名称)
     CURL_CFFI = (task_pb2.CURL_CFFI, "curl_cffi")
     HTTPX = (task_pb2.HTTPX, "httpx")
+    #: 已移除的适配器。枚举值保留是为了兼容旧客户端——它们发来这个值时
+    #: 服务端会明确报错，而不是静默换成别的适配器。
     REQUESTS = (task_pb2.REQUESTS, "requests")
+    NIQUESTS = (task_pb2.NIQUESTS, "niquests")
     DRISSIONPAGE = (task_pb2.DRISSIONPAGE, "DrissionPage")
     UC = (task_pb2.UC, "undetected_chromedriver")
     PLAYWRIGHT = (task_pb2.PLAYWRIGHT, "playwright")

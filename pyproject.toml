@@ -14,7 +14,6 @@ dependencies = [
     "grpcio-health-checking>=1.83.0,<2.0.0",
     "protobuf>=6.33.2,<8.0.0",
     "click>=8.4.2,<9.0.0",
-    "httpx>=0.28.1,<0.29.0",
     "fake-useragent>=2.2.0,<3.0.0",
     "loguru>=0.7.3,<0.8.0",
     "python-box[all]>=7.4.1,<8.0.0",
@@ -26,8 +25,11 @@ dependencies = [
 # Prometheus 指标为可选：未安装时所有埋点降级为无操作，功能不受影响。
 # 安装：pip install "ipclick[metrics]"
 metrics = ["prometheus-client>=0.26.0,<1.0.0"]
-# requests 适配器：非核心能力（无指纹伪装、无 HTTP/2），按需安装
-requests = ["requests>=2.32.0,<3.0.0"]
+# HTTP 适配器。核心只带 curl_cffi（默认适配器，且是唯一有指纹伪装的），
+# 其余按需装——`pip install ipclick` 保持轻量。
+httpx = ["httpx>=0.28.1,<0.29.0"]
+# niquests 是 requests 的 drop-in 替代，额外支持 HTTP/2 与 HTTP/3
+niquests = ["niquests>=3.14.0,<4.0.0"]
 # playwright 浏览器渲染适配器：装完还要 `playwright install chromium`
 # （或把 [BROWSER].executable_path 指向系统已有的浏览器）
 browser = ["playwright>=1.49.0,<2.0.0"]
@@ -40,15 +42,15 @@ patchright = ["patchright>=1.52.0,<2.0.0"]
 drissionpage = ["drissionpage>=4.1.0,<5.0.0"]
 all = [
     "prometheus-client>=0.26.0,<1.0.0",
-    "requests>=2.32.0,<3.0.0",
+    "httpx>=0.28.1,<0.29.0",
+    "niquests>=3.14.0,<4.0.0",
     "playwright>=1.49.0,<2.0.0",
     "camoufox>=0.5.0,<1.0.0",
     "patchright>=1.52.0,<2.0.0",
     "drissionpage>=4.1.0,<5.0.0",
-]
-redis = [
     "redis>=5.0.0,<9.0.0",
 ]
+redis = ["redis>=5.0.0,<9.0.0"]
 
 [project.urls]
 "Homepage" = "https://github.com/yuanqimanong/IPClick"

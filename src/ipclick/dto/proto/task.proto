@@ -13,7 +13,9 @@ package task;
 enum AdapterType {
   CURL_CFFI = 0;
   HTTPX = 1;
-  REQUESTS = 2;
+  // 已移除：requests 适配器被 niquests 取代（后者 API 相同且支持 HTTP/2、HTTP/3）。
+  // 编号保留不复用——0.2.3 已发布，旧客户端仍可能发来这个值。
+  REQUESTS = 2 [deprecated = true];
   DRISSIONPAGE = 3;
   UC = 4; // undetected-chromedriver（未实现）
   PLAYWRIGHT = 5;
@@ -23,6 +25,7 @@ enum AdapterType {
   // 默认按平台选：Windows -> DrissionPage，Linux/macOS -> Camoufox。
   // 客户端不必关心服务端装了哪个内核。
   BROWSER = 8;
+  NIQUESTS = 9;
 }
 
 // HTTP 方法枚举

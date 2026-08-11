@@ -18,6 +18,7 @@ class AdapterType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     CAMOUFOX: _ClassVar[AdapterType]
     PATCHRIGHT: _ClassVar[AdapterType]
     BROWSER: _ClassVar[AdapterType]
+    NIQUESTS: _ClassVar[AdapterType]
 
 class HttpMethod(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -38,6 +39,7 @@ PLAYWRIGHT: AdapterType
 CAMOUFOX: AdapterType
 PATCHRIGHT: AdapterType
 BROWSER: AdapterType
+NIQUESTS: AdapterType
 GET: HttpMethod
 POST: HttpMethod
 PUT: HttpMethod

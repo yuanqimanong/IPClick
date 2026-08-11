@@ -59,6 +59,17 @@ P3 扩展传输能力，P4 做集群，P5 补齐适配器，P6 加限流与可�
 - CI 增加 `playwright install --with-deps chromium`，让浏览器渲染用例在 CI 上
   真的跑起来，而不是静默 skip。
 
+### 破坏性变更（P8）
+
+- **`httpx` 从核心依赖改为可选**（`pip install "ipclick[httpx]"`）。
+  `pip install ipclick` 现在只带 curl_cffi（默认适配器，也是唯一有指纹伪装的），
+  依赖从 24 个包降到 17 个。升级后如果用了 `adapter="httpx"` 又没装 extra，
+  会收到明确的 `AdapterError` 与安装命令，不会静默换成别的适配器。
+- **移除 `requests` 适配器，由 `niquests` 取代**。niquests 是 requests 的
+  drop-in 替代，API 完全一致，但底层是 urllib3-future，支持 HTTP/2 与 HTTP/3。
+  `adapter="requests"` 会报错并给出迁移提示；protobuf 枚举值 `REQUESTS = 2`
+  保留不复用（0.2.3 已发布，旧客户端仍可能发来这个值）。
+
 ### 新增（P7）
 
 - **TLS / mTLS**（`[SECURITY.tls]`）：链路加密与双向证书认证。四个建连点全覆盖
