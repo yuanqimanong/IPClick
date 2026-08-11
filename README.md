@@ -31,6 +31,7 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 - **健康检查**：实现 `grpc.health.v1` 标准协议，K8s 探针与服务网格开箱即用
 - **Prometheus 指标**：请求量 / 延迟 / 重试 / 拒绝等指标，可选依赖、优雅降级
 - **SSRF 防护**：服务端对目标 URL 做协议白名单与内网/元数据地址拦截
+- **Web 管理端**：`ipclick run --web` 起一个带登录的界面，看运行状态与集群节点
 - **命令行工具**：提供便捷的 CLI 工具，支持快速启动服务和查看配置
 - **Docker 支持**：多阶段构建、非 root 运行的镜像
 - **完整类型标注**：随包提供 `py.typed`，下游可直接享受类型检查
@@ -132,6 +133,52 @@ ipclick --example > ipclick.toml     # 或 ipclick -e
 ipclick config-info
 ```
 
+### Web 管理端
+
+```bash
+ipclick run --web        # 或 -w
+```
+
+启动时会把访问地址和登录信息打到控制台：
+
+```
+==============================================================
+  IPClick Web 管理端: http://127.0.0.1:9530/
+  用户名: admin
+  密码:   N8mSKkdPbpiGzB128At3
+
+  ⚠️ 该密码为本次启动随机生成，重启后失效。
+==============================================================
+```
+
+**没配密码就随机生成**，而不是给个 admin/admin 之类的默认值——默认弱口令是这类
+管理界面被打穿的头号原因。要固定下来用环境变量（推荐，密码不该进版本库）：
+
+```bash
+IPCLICK_WEB_USER=ops IPCLICK_WEB_PASSWORD=... ipclick run -w
+```
+
+或写进 `.env`，或配 `[WEB].username` / `password`。
+
+界面上能看到：服务端信息与可用适配器、安全配置（TLS / 鉴权 / SSRF 拦截）、
+限流与浏览器引擎、集群节点健康状态。机密一律只显示"有/无"，不回显内容。
+
+**能做什么、不能做什么**：
+
+- **能**：看状态、手动摘除 / 恢复节点（只影响当前进程的运行时状态，重启即复原）
+- **不能**：改配置文件、改令牌、改 URL 策略、加删节点 —— 一律走配置文件 + 重启
+
+这条线是刻意划的。这个服务能代任意 URL 发请求，一个能改它配置的网页就是极高价值
+的目标；而"手动摘个节点"是运行时的、可逆的，风险收益比完全不同。
+
+安全措施：会话 cookie 带 `HttpOnly` + `SameSite=Strict`，所有写操作校验 CSRF
+token，登录失败按来源 IP 限速（5 次后锁定 5 分钟，锁定期间正确密码也不放行），
+密码用常量时间比对，`X-Frame-Options: DENY` + 严格 CSP。
+
+> ⚠️ 界面本身是**明文 HTTP**。默认只监听 `127.0.0.1`；要远程访问请用 SSH 隧道，
+> 或放在做了 TLS 终止的反向代理之后。直接把 `[WEB].host` 改成 `0.0.0.0` 会让
+> 登录密码在网络上裸奔（启动时会打告警）。
+
 ### 配置优先级
 
 从高到低：
@@ -155,6 +202,7 @@ ipclick config-info
 | `IPCLICK_MODE` | `[GENERAL].mode` |
 | `IPCLICK_LOG_LEVEL` | `[LOG].level` |
 | `IPCLICK_AUTH_TOKEN` | `[SECURITY].auth_token` |
+| `IPCLICK_WEB_USER` / `IPCLICK_WEB_PASSWORD` | Web 管理端登录凭据 |
 
 `.env` 支持 `KEY=VALUE`、`export KEY=VALUE`、`#` 注释、单双引号（双引号内可转义）。
 不支持多行值和 `${VAR}` 插值——需要那些请直接用环境变量。
@@ -1000,7 +1048,8 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 | **P5** 适配器 | `requests` ✅、`playwright` ✅（连带 `[BROWSER]` 与浏览器渲染） | ✅ 已完成 |
 | **P6** 限流与引擎 | 按 host 并发 / QPS 限制 ✅、浏览器引擎可插拔（camoufox / patchright / DrissionPage）✅ | ✅ 已完成 |
 | **P7** 生产化 | TLS/mTLS ✅、断点续传 ✅、分布式限流 ✅、DNS 服务发现 ✅、客户端重试 ✅、`[GENERAL].mode` ✅ | ✅ 已完成 |
-| **P8** 待定 | 异步服务端、文件上传、Cookie 持久化、etcd/Consul 原生发现 | 计划中 |
+| **P8** 打磨 | 轻量安装 ✅、niquests ✅、`--example` ✅、`.env` ✅、Web 管理端 ✅ | ✅ 已完成 |
+| **P9** 待定 | 异步服务端、文件上传、Cookie 持久化、etcd/Consul 原生发现 | 计划中 |
 
 ## 🛠️ 开发
 

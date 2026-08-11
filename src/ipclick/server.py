@@ -2,21 +2,30 @@ from concurrent import futures
 import signal
 import sys
 from types import FrameType
-from typing import TypedDict, cast
+from typing import Any, TypedDict, cast
 
 import grpc
 from grpc import Server
 
+from ipclick import __version__
+from ipclick.adapters.browser_engines import resolve_engine
+from ipclick.adapters.browser_settings import BrowserSettings
 from ipclick.auth import AUTH_TOKEN_ENV, TokenAuthInterceptor, load_tokens
+from ipclick.cluster.discovery import create_discovery
+from ipclick.cluster.node import ClusterConfig
+from ipclick.cluster.pool import NodePool
 from ipclick.config_loader import load_config
 from ipclick.dto.proto import task_pb2_grpc
 from ipclick.exceptions import ConfigError
+from ipclick.factory import resolve_mode
 from ipclick.health import HealthReporter
+from ipclick.limiter import LimiterSettings
 from ipclick.metrics import get_metrics
 from ipclick.services import TaskService
 from ipclick.tls import TLSSettings, describe, server_credentials, warn_if_insecure
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import LogUtil, log
+from ipclick.web import WebConfig, WebCredentials, WebServer, announce
 
 
 class ServerConfig(TypedDict, total=False):
@@ -30,7 +39,7 @@ class IPClickServer:
     IPClick gRPC服务器
     """
 
-    def __init__(self, config_path: str | None = None):
+    def __init__(self, config_path: str | None = None, *, web: bool | None = None):
         self.config: Settings = load_config(config_path)
         # 按配置里的 [LOG] 节初始化日志（此前这一节完全没被读取过）；
         # [GENERAL].debug 为真时强制 DEBUG 级别
@@ -43,7 +52,141 @@ class IPClickServer:
         monitor_config = dict(self.config.get("MONITOR", {}))
         self.health: HealthReporter = HealthReporter(enabled=bool(monitor_config.get("health_check", True)))
         self._monitor_config: dict[str, object] = monitor_config
+
+        # Web 管理端：命令行 --web 优先于 [WEB].enabled
+        self.web_config: WebConfig = WebConfig(dict(self.config.get("WEB", {})))
+        if web is not None:
+            self.web_config.enabled = web
+        self._web_server: WebServer | None = None
+        self._listen_addr: str = ""
+        #: Web 端手动摘除的节点。只在内存里，重启即复原。
+        self._drained: set[str] = set()
+        #: 仅供 Web 端观测的节点池（探活，不参与任何路由）
+        self._node_pool: Any = None
+
         log.info("IPClickServer initialized")
+
+    def _start_web(self) -> None:
+        """按配置启动 Web 管理端。"""
+        if not self.web_config.enabled:
+            return
+        credentials = WebCredentials.resolve(self.web_config.as_credentials_config())
+        self._web_server = WebServer(
+            self._web_snapshot,
+            credentials,
+            action_handler=self._web_action,
+        )
+        self._start_node_pool()
+        url = self._web_server.start(self.web_config.host, self.web_config.port)
+        if url is None:
+            self._web_server = None
+            return
+        announce(credentials, url)
+
+    def _start_node_pool(self) -> None:
+        """给 Web 端建一个只读的节点池。
+
+        集群本来是**客户端**的概念，服务端进程不参与路由。但运维想在这台机器上
+        确认"我看到的集群拓扑对不对、哪些节点连得上"，为此起一个只探活、不参与
+        任何请求分发的池子是值得的。配置里没有节点就什么都不做。
+        """
+        cluster_config = dict(self.config.get("CLUSTER", {}))
+        try:
+            parsed = ClusterConfig.from_config(cluster_config)
+            discovery, discovery_config = create_discovery(cluster_config, parsed.nodes)
+            if not discovery.resolve():
+                return
+            self._node_pool = NodePool(
+                parsed,
+                tls=TLSSettings.from_config(dict(self.config.get("SECURITY", {}))),
+                discovery=discovery,
+                discovery_config=discovery_config,
+            )
+            log.info(f"Web 端节点观测已启动：{len(self._node_pool)} 个节点")
+        except Exception as e:
+            # 观测用的东西不该让服务起不来
+            log.warning(f"Web 端节点观测未启动：{e}")
+            self._node_pool = None
+
+    def _web_snapshot(self) -> dict[str, object]:
+        """给 Web 端看的运行状态。
+
+        机密（令牌、代理密码、证书内容）一律只报"有/无"，绝不回显——
+        管理界面是个比 gRPC 端口更容易被够到的地方。
+        """
+        from ipclick.adapters.registry import ADAPTER_CLASSES, DEFAULT_ADAPTER_NAME
+
+        security = dict(self.config.get("SECURITY", {}))
+        downloader_cfg = dict(self.config.get("DOWNLOADER", {}))
+        limits = LimiterSettings.from_config(downloader_cfg)
+        browser = BrowserSettings.from_config(dict(self.config.get("BROWSER", {})))
+        try:
+            engine = resolve_engine(browser.engine) if browser.enabled else "已关闭"
+        except Exception as e:
+            engine = f"配置错误: {e}"
+
+        try:
+            mode = resolve_mode(self.config)
+        except Exception as e:
+            mode = f"配置错误: {e}"
+
+        return {
+            "server": {
+                "address": self._listen_addr,
+                "version": __version__,
+                "mode": mode,
+                "max_workers": dict(self.config.get("SERVER", {})).get("max_workers", 10),
+                "default_adapter": DEFAULT_ADAPTER_NAME,
+                "adapters": sorted(ADAPTER_CLASSES),
+            },
+            "security": {
+                "tls": describe(TLSSettings.from_config(security)),
+                "auth": bool(load_tokens(security)),
+                "block_private_networks": security.get("block_private_networks", False),
+                "block_metadata_endpoints": security.get("block_metadata_endpoints", True),
+            },
+            "limits": {
+                "per_host_max_concurrent": limits.per_host_max_concurrent,
+                "per_host_qps": limits.per_host_qps,
+                "backend": str(dict(downloader_cfg.get("rate_limit") or {}).get("backend") or "memory"),
+            },
+            "browser": {
+                "engine": engine,
+                "max_pages": browser.max_pages,
+                "allow_scripts": browser.allow_scripts,
+            },
+            "cluster": {"nodes": self._cluster_nodes()},
+        }
+
+    def _cluster_nodes(self) -> list[dict[str, object]]:
+        """服务端进程本身不持有节点池——节点是**客户端**的概念。
+
+        这里展示的是本机配置里声明的节点及其可达性，方便运维确认"这台机器
+        看到的集群拓扑对不对"，而不是接管客户端的负载均衡状态。
+        """
+        pool = getattr(self, "_node_pool", None)
+        if pool is None:
+            return []
+        snapshot = pool.snapshot()
+        nodes = list(snapshot.get("nodes") or [])
+        for node in nodes:
+            node["drained"] = node.get("id") in self._drained
+        return nodes
+
+    def _web_action(self, name: str, form: dict[str, str]) -> tuple[bool, str]:
+        """处理 Web 端的可变操作。
+
+        只接受运行时的、可逆的操作。改配置一律不做——这个服务能代任意 URL
+        发请求，一个能改它配置的网页就是极高价值的目标。
+        """
+        node_id = form.get("node_id", "").strip()
+        if name == "drain" and node_id:
+            self._drained.add(node_id)
+            return True, f"已手动摘除节点 {node_id}"
+        if name == "undrain" and node_id:
+            self._drained.discard(node_id)
+            return True, f"已恢复节点 {node_id}"
+        return False, f"未知操作 {name!r}"
 
     def start(self, host: str | None = None, port: int | None = None) -> None:
         """
@@ -106,6 +249,7 @@ class IPClickServer:
             # 绑定地址。TLS 凭据在绑定之前构造：证书有问题就该在这里失败，
             # 而不是等到第一个客户端连上来才发现。
             listen_addr = f"{server_host}:{server_port}"
+            self._listen_addr = listen_addr
             if tls_settings.enabled:
                 bound_port: int = self.server.add_secure_port(listen_addr, server_credentials(tls_settings))
             else:
@@ -116,6 +260,10 @@ class IPClickServer:
             # 指标端点走独立 HTTP 端口（Prometheus 生态惯例），在 gRPC 之前起，
             # 这样即便业务端口起不来也能看到进程状态
             self._start_metrics_server()
+
+            # Web 管理端在 gRPC 之前起：起不来只是少个界面，不该让整个服务失败，
+            # 但要让人看到那条错误。
+            self._start_web()
 
             # 启动服务器
             self.server.start()
@@ -181,6 +329,12 @@ class IPClickServer:
         Args:
             grace_period: 优雅停机时间（秒）
         """
+        if self._web_server is not None:
+            self._web_server.stop()
+            self._web_server = None
+        if self._node_pool is not None:
+            self._node_pool.stop()
+            self._node_pool = None
         if self.server:
             log.info(f"Stopping gRPC server (grace period: {grace_period}s)...")
             # 先把健康状态置为 NOT_SERVING 再 stop：上游负载均衡器据此摘掉本节点，
@@ -200,7 +354,13 @@ class IPClickServer:
         log.info("IPClick server stopped")
 
 
-def serve(config_path: str | None = None, host: str | None = None, port: int | None = None):
+def serve(
+    config_path: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
+    *,
+    web: bool | None = None,
+):
     """启动IPClick服务器的便捷函数。
 
     根据提供的配置路径、主机地址和端口启动服务器。
@@ -214,7 +374,7 @@ def serve(config_path: str | None = None, host: str | None = None, port: int | N
 
     """
     try:
-        server = IPClickServer(config_path)
+        server = IPClickServer(config_path, web=web)
         server.start(host=host, port=port)
     except KeyboardInterrupt:
         pass  # 正常退出

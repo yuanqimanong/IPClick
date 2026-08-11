@@ -52,7 +52,8 @@ def main(ctx: click.Context):
 @click.option("--port", "-p", type=int, help="服务端口号")
 @click.option("--host", default=None, help="绑定地址")
 @click.option("--verbose", "-v", is_flag=True, help="输出 DEBUG 级别日志")
-def run(config: Path | None, port: int | None, host: str | None, verbose: bool):
+@click.option("--web", "-w", is_flag=True, default=None, help="同时启动 Web 管理端（登录信息打印到控制台）")
+def run(config: Path | None, port: int | None, host: str | None, verbose: bool, web: bool | None):
     """启动IPClick服务"""
     try:
         LogUtil.init(level="DEBUG" if verbose else "INFO")
@@ -65,7 +66,7 @@ def run(config: Path | None, port: int | None, host: str | None, verbose: bool):
         if host:
             click.echo(f"Override host: {host}")
 
-        serve(config_path=str(config) if config else None, port=port, host=host)
+        serve(config_path=str(config) if config else None, port=port, host=host, web=web)
 
     except KeyboardInterrupt:
         click.echo("\nShutting down...")
