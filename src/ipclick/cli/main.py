@@ -7,7 +7,7 @@ from ipclick.adapters.browser_engines import is_available, resolve_engine
 from ipclick.adapters.browser_settings import BrowserSettings
 from ipclick.auth import load_tokens
 from ipclick.config_loader import load_config
-from ipclick.config_loader.loader import example_config
+from ipclick.config_loader.loader import example_config, example_env
 from ipclick.factory import resolve_mode
 from ipclick.health import check_health
 from ipclick.limiter import LimiterSettings
@@ -16,15 +16,15 @@ from ipclick.tls import TLSSettings, describe
 from ipclick.utils.log_util import LogUtil
 
 
-def _print_example(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
-    """输出随包分发的配置模板然后退出。
+def _print_example(ctx: click.Context, _param: click.Parameter, value: str | None) -> None:
+    """输出模板然后退出。
 
-    直接打到 stdout（不加任何前缀），这样 `ipclick --example > ipclick.toml`
+    直接打到 stdout（不加任何前缀），这样 `ipclick -e > ipclick.toml`
     出来的就是一个能直接用的文件。
     """
     if not value or ctx.resilient_parsing:
         return
-    click.echo(example_config(), nl=False)
+    click.echo(example_env() if value == "env" else example_config(), nl=False)
     ctx.exit()
 
 
@@ -33,11 +33,14 @@ def _print_example(ctx: click.Context, _param: click.Parameter, value: bool) -> 
 @click.option(
     "--example",
     "-e",
-    is_flag=True,
+    type=click.Choice(["toml", "env"]),
+    is_flag=False,
+    flag_value="toml",
+    default=None,
     is_eager=True,
     expose_value=False,
     callback=_print_example,
-    help="输出配置模板到 stdout（可重定向：ipclick -e > ipclick.toml）",
+    help="输出模板到 stdout。-e 或 -e toml 出配置文件，-e env 出 .env（可重定向）",
 )
 @click.pass_context
 def main(ctx: click.Context):

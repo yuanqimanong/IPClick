@@ -121,11 +121,15 @@ ipclick run --config /path/to/ipclick.toml
 ipclick run --verbose
 ```
 
-拿一份配置模板（带完整注释）：
+拿模板（都带完整注释，可直接重定向成文件）：
 
 ```bash
-ipclick --example > ipclick.toml     # 或 ipclick -e
+ipclick -e > ipclick.toml        # 配置模板（-e 等价于 -e toml）
+ipclick -e env > .env            # 环境变量模板
 ```
+
+`.env` 模板里所有值都是空的，整份复制过去不会改变任何行为——填了才生效。
+它是**从代码里那张环境变量映射表生成的**，不会出现『模板里有但其实不生效』。
 
 查看当前**实际生效**的配置——TLS、鉴权、限流、浏览器引擎、运行模式一目了然：
 

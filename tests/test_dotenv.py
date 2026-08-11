@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from ipclick.config_loader.dotenv import find_env_file, load_dotenv, parse_env
-from ipclick.config_loader.loader import ENV_OVERRIDES, example_config, load_config
+from ipclick.config_loader.loader import ENV_OVERRIDES, example_config, example_env, load_config
 
 
 class TestParse:
@@ -186,6 +186,48 @@ class TestConfigPrecedence:
             cfg = load_config()
             assert cfg[section][key] == caster(probe), f"{name} 没有生效"
             monkeypatch.delenv(name)
+
+
+class TestExampleEnv:
+    """`.env` 模板。"""
+
+    def test_lists_every_documented_override(self):
+        """模板从 ENV_OVERRIDES 生成，表里每一项都必须出现——
+        手写模板迟早和实现失步，而"模板里有但其实不生效"比没有模板更误导人。"""
+        text = example_env()
+        for name in ENV_OVERRIDES:
+            assert f"{name}=" in text, f"模板漏了 {name}"
+
+    def test_includes_secrets_that_are_not_in_the_table(self):
+        """令牌和 Web 凭据走各自的特殊处理，不在那张通用映射表里，
+        但绝不能因此从模板里消失——那会让人以为它们不能配。"""
+        text = example_env()
+        for name in ("IPCLICK_AUTH_TOKEN", "IPCLICK_WEB_USER", "IPCLICK_WEB_PASSWORD"):
+            assert f"{name}=" in text
+
+    def test_all_values_are_empty(self):
+        """整份复制过去必须是无害的——填了值的模板会悄悄改变行为。"""
+        for line in example_env().splitlines():
+            if line and not line.startswith("#"):
+                assert line.endswith("="), f"模板里有预填值: {line!r}"
+
+    def test_parses_as_dotenv(self):
+        parsed = parse_env(example_env())
+        assert "IPCLICK_HOST" in parsed
+        assert all(v == "" for v in parsed.values())
+
+    def test_warns_about_gitignore(self):
+        assert "gitignore" in example_env().lower()
+
+    def test_dropping_it_in_changes_nothing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """核心保证：把模板原样存成 .env，配置应与没有它时完全一致。"""
+        monkeypatch.chdir(tmp_path)
+        load_config.cache_clear()
+        baseline = dict(load_config()["SERVER"])
+
+        (tmp_path / ".env").write_text(example_env(), encoding="utf-8")
+        load_config.cache_clear()
+        assert dict(load_config()["SERVER"]) == baseline
 
 
 class TestExampleConfig:

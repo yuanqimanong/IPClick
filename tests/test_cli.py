@@ -173,6 +173,22 @@ class TestExampleFlag:
 
         assert example_config().count("#") > 30
 
+    def test_env_template(self, runner: CliRunner):
+        result = runner.invoke(main, ["-e", "env"])
+        assert result.exit_code == 0
+        assert "IPCLICK_HOST=" in result.output
+        assert "IPCLICK_WEB_PASSWORD=" in result.output
+
+    def test_toml_is_the_default_format(self, runner: CliRunner):
+        assert runner.invoke(main, ["-e"]).output == runner.invoke(main, ["-e", "toml"]).output
+
+    def test_env_and_toml_differ(self, runner: CliRunner):
+        assert runner.invoke(main, ["-e", "env"]).output != runner.invoke(main, ["-e", "toml"]).output
+
+    def test_unknown_format_rejected(self, runner: CliRunner):
+        result = runner.invoke(main, ["-e", "yaml"])
+        assert result.exit_code != 0
+
     def test_bare_invocation_shows_help(self, runner: CliRunner):
         """不带子命令时给帮助，而不是静默退出。"""
         result = runner.invoke(main, [])
