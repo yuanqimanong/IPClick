@@ -1,4 +1,6 @@
+import os
 from pathlib import Path
+import unicodedata
 
 import click
 
@@ -11,9 +13,16 @@ from ipclick.config_loader.loader import example_config, example_env
 from ipclick.factory import resolve_mode
 from ipclick.health import check_health
 from ipclick.limiter import LimiterSettings
+from ipclick.secrets import SECRETS, describe_source
 from ipclick.server import serve
 from ipclick.tls import TLSSettings, describe
 from ipclick.utils.log_util import LogUtil
+from ipclick.web.auth import generate_password
+
+
+def _display_width(text: str) -> int:
+    """终端显示宽度。CJK 字符占两列，按 len() 补空格会对不齐。"""
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
 
 
 def _print_example(ctx: click.Context, _param: click.Parameter, value: str | None) -> None:
@@ -48,6 +57,51 @@ def main(ctx: click.Context):
     # 不带子命令也不带 --example 时，给出帮助而不是静默退出
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
+
+
+@main.command()
+@click.option("--force", "-f", is_flag=True, help="覆盖已存在的文件")
+@click.option("--dir", "-d", "target_dir", type=click.Path(path_type=Path), default=".", help="生成到哪个目录")
+def init(force: bool, target_dir: Path):
+    """在当前目录生成 ipclick.toml 与 .env。
+
+    比 `ipclick -e > 文件` 强在：.env 用 600 权限创建、预填一个随机的 Web 密码、
+    已存在时不会闷头覆盖、并把 .env 追加进 .gitignore。
+    """
+    target_dir.mkdir(parents=True, exist_ok=True)
+    toml_path = target_dir / "ipclick.toml"
+    env_path = target_dir / ".env"
+
+    existing = [p for p in (toml_path, env_path) if p.exists()]
+    if existing and not force:
+        for path in existing:
+            click.echo(f"已存在，跳过: {path}", err=True)
+        click.echo("要覆盖请加 --force。注意 .env 里可能有正在用的密钥。", err=True)
+        raise click.Abort()
+
+    toml_path.write_text(example_config(), encoding="utf-8")
+    click.echo(f"已生成 {toml_path}")
+
+    # 预填一个随机 Web 密码：留空的话每次重启都会重新生成，运维得盯着控制台。
+    password = generate_password()
+    env_text = example_env().replace("IPCLICK_WEB_PASSWORD=", f"IPCLICK_WEB_PASSWORD={password}")
+    # 先建成 600 再写：先写后 chmod 的话，中间那一瞬间密钥是全局可读的
+    with os.fdopen(os.open(env_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
+        f.write(env_text)
+    click.echo(f"已生成 {env_path}（权限 600，已预填随机 Web 密码）")
+
+    gitignore = target_dir / ".gitignore"
+    if gitignore.exists():
+        lines = gitignore.read_text(encoding="utf-8").splitlines()
+        if not any(line.strip() in (".env", "/.env") for line in lines):
+            with gitignore.open("a", encoding="utf-8") as f:
+                f.write("\n# IPClick 机密配置\n.env\n")
+            click.echo(f"已把 .env 追加进 {gitignore}")
+    else:
+        click.echo("提示：本目录没有 .gitignore —— 请务必确保 .env 不会被提交", err=True)
+
+    click.echo("")
+    click.echo("下一步：把令牌等机密填进 .env，行为配置改 ipclick.toml，然后 ipclick run")
 
 
 @main.command()
@@ -132,6 +186,15 @@ def config_info(config: Path | None):
         # 只说有没有，不打印令牌本身
         has_token = bool(load_tokens(security))
         click.echo(f"  令牌鉴权:     {'已配置' if has_token else '未配置（任何人都能调用）'}")
+
+        # 机密来源：配错了地方（比如以为写进 toml 生效、其实被环境变量盖了）
+        # 是很难自己发现的，这里直接摊开
+        click.echo("  机密来源:")
+        # 中文是双宽字符，按字符数补空格会对不齐，得按显示宽度算
+        width = max(_display_width(s.label) for s in SECRETS)
+        for spec in SECRETS:
+            pad = " " * (width - _display_width(spec.label))
+            click.echo(f"    {spec.label}{pad}  {describe_source(cfg, spec)}")
         click.echo(f"  拦截内网地址: {security.get('block_private_networks', False)}")
         click.echo(f"  拦截元数据端点: {security.get('block_metadata_endpoints', True)}")
 

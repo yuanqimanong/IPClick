@@ -173,11 +173,18 @@ class TestExampleFlag:
 
         assert example_config().count("#") > 30
 
-    def test_env_template(self, runner: CliRunner):
+    def test_env_template_lists_secrets(self, runner: CliRunner):
         result = runner.invoke(main, ["-e", "env"])
         assert result.exit_code == 0
-        assert "IPCLICK_HOST=" in result.output
+        assert "IPCLICK_AUTH_TOKEN=" in result.output
         assert "IPCLICK_WEB_PASSWORD=" in result.output
+
+    def test_env_template_excludes_deployment_params(self, runner: CliRunner):
+        """.env 只放机密。部署参数（HOST/PORT/…）仍然支持，但属于容器编排注入的
+        范畴，混进这个放密钥的文件只会让它变臃肿。"""
+        output = runner.invoke(main, ["-e", "env"]).output
+        assert "\nIPCLICK_HOST=" not in output
+        assert "\nIPCLICK_PORT=" not in output
 
     def test_toml_is_the_default_format(self, runner: CliRunner):
         assert runner.invoke(main, ["-e"]).output == runner.invoke(main, ["-e", "toml"]).output
@@ -194,3 +201,65 @@ class TestExampleFlag:
         result = runner.invoke(main, [])
         assert result.exit_code == 0
         assert "config-info" in result.output
+
+
+class TestInit:
+    """ipclick init：一次生成两份文件，且把机密文件的权限做对。"""
+
+    def test_creates_both_files(self, runner: CliRunner, tmp_path: Path):
+        result = runner.invoke(main, ["init", "--dir", str(tmp_path)])
+        assert result.exit_code == 0
+        assert (tmp_path / "ipclick.toml").exists()
+        assert (tmp_path / ".env").exists()
+
+    def test_env_is_created_0600(self, runner: CliRunner, tmp_path: Path):
+        """里面是密钥。`-e env > .env` 出来是 0644，全世界可读。"""
+        import stat
+
+        runner.invoke(main, ["init", "--dir", str(tmp_path)])
+        mode = stat.S_IMODE((tmp_path / ".env").stat().st_mode)
+        assert mode == 0o600, f"权限是 {oct(mode)}"
+
+    def test_web_password_is_prefilled(self, runner: CliRunner, tmp_path: Path):
+        """留空的话每次重启密码都变，运维得盯控制台。"""
+        runner.invoke(main, ["init", "--dir", str(tmp_path)])
+        line = [ln for ln in (tmp_path / ".env").read_text().splitlines() if ln.startswith("IPCLICK_WEB_PASSWORD=")][0]
+        assert len(line.split("=", 1)[1]) >= 16
+
+    def test_other_secrets_stay_empty(self, runner: CliRunner, tmp_path: Path):
+        runner.invoke(main, ["init", "--dir", str(tmp_path)])
+        text = (tmp_path / ".env").read_text()
+        assert "IPCLICK_AUTH_TOKEN=\n" in text
+
+    def test_refuses_to_overwrite(self, runner: CliRunner, tmp_path: Path):
+        """闷头覆盖会把正在用的密钥冲掉。"""
+        (tmp_path / ".env").write_text("IPCLICK_AUTH_TOKEN=precious")
+        result = runner.invoke(main, ["init", "--dir", str(tmp_path)])
+        assert result.exit_code != 0
+        assert (tmp_path / ".env").read_text() == "IPCLICK_AUTH_TOKEN=precious"
+
+    def test_force_overwrites(self, runner: CliRunner, tmp_path: Path):
+        (tmp_path / ".env").write_text("old")
+        result = runner.invoke(main, ["init", "--dir", str(tmp_path), "--force"])
+        assert result.exit_code == 0
+        assert "IPCLICK_WEB_PASSWORD=" in (tmp_path / ".env").read_text()
+
+    def test_appends_to_gitignore(self, runner: CliRunner, tmp_path: Path):
+        (tmp_path / ".gitignore").write_text("*.pyc\n")
+        runner.invoke(main, ["init", "--dir", str(tmp_path)])
+        assert ".env" in (tmp_path / ".gitignore").read_text()
+
+    def test_does_not_duplicate_gitignore_entry(self, runner: CliRunner, tmp_path: Path):
+        (tmp_path / ".gitignore").write_text(".env\n")
+        runner.invoke(main, ["init", "--dir", str(tmp_path)])
+        assert (tmp_path / ".gitignore").read_text().count(".env") == 1
+
+    def test_warns_when_no_gitignore(self, runner: CliRunner, tmp_path: Path):
+        result = runner.invoke(main, ["init", "--dir", str(tmp_path)])
+        assert "不会被提交" in result.output
+
+    def test_generated_toml_is_valid(self, runner: CliRunner, tmp_path: Path):
+        import tomllib
+
+        runner.invoke(main, ["init", "--dir", str(tmp_path)])
+        tomllib.loads((tmp_path / "ipclick.toml").read_text())

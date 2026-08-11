@@ -70,6 +70,10 @@ P3 扩展传输能力，P4 做集群，P5 补齐适配器，P6 加限流与可�
   刻意**不提供**改配置的能力——这个服务能代任意 URL 发请求，能改它配置的网页
   就是极高价值的目标。
 
+- **`ipclick init`**：一次生成 `ipclick.toml` + `.env`。`.env` 用 600 权限创建、
+  预填随机 Web 密码、自动追加进 `.gitignore`，已存在时拒绝覆盖。
+- **`ipclick config-info` 显示每项机密的来源**（环境变量 / 配置文件 / 未配置）。
+- **加载 `.env` 时检查权限**，同组或其他用户可读会告警。
 - **`ipclick --example` / `-e`**：输出模板到 stdout，可直接重定向成文件。
   `-e`（或 `-e toml`）出配置模板，`-e env` 出 `.env` 模板。
   `.env` 模板从 `ENV_OVERRIDES` 表生成，不会出现『模板里有但其实不生效』；
@@ -83,6 +87,17 @@ P3 扩展传输能力，P4 做集群，P5 补齐适配器，P6 加限流与可�
   "到底哪些环境变量有用"只能靠翻代码。有测试盯着表里每一项都真能生效。
 
 ### 破坏性变更（P8）
+
+- **机密从 `ipclick.toml` 移到 `.env` / 环境变量**。随包配置里不再有
+  `[SECURITY].auth_token`、`[WEB].username/password`、`[PROXY].auth_key/auth_password`。
+  正规位置改为 `IPCLICK_AUTH_TOKEN` / `IPCLICK_WEB_USER` / `IPCLICK_WEB_PASSWORD` /
+  `IPCLICK_PROXY_AUTH_KEY` / `IPCLICK_PROXY_AUTH_PASSWORD` / `IPCLICK_REDIS_URL`。
+
+  **写在配置文件里仍然照常生效**（不砸现有部署），但启动时会被点名——
+  `ipclick.toml` 通常要进版本库，机密会跟着进 git、备份、CI 日志。
+  `[SECURITY].allow_secrets_in_config = true` 可关掉提醒。两边都写时环境变量优先。
+- **`.env` 模板只剩机密（6 项）**。部署参数（`IPCLICK_HOST` 等）仍然支持但移出模板，
+  它们属于容器编排注入的范畴。
 
 - **`httpx` 从核心依赖改为可选**（`pip install "ipclick[httpx]"`）。
   `pip install ipclick` 现在只带 curl_cffi（默认适配器，也是唯一有指纹伪装的），

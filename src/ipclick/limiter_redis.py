@@ -18,6 +18,7 @@ N 倍的实际并发——``per_host_max_concurrent = 4`` 配在 5 个节点上�
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
+import os
 import time
 from typing import Any
 import uuid
@@ -106,7 +107,7 @@ class RedisSettings:
             return value if value > 0 else fallback
 
         return cls(
-            url=str(config.get("redis_url") or defaults.url).strip() or defaults.url,
+            url=(os.getenv("IPCLICK_REDIS_URL") or str(config.get("redis_url") or "")).strip() or defaults.url,
             slot_ttl=_float("redis_slot_ttl", defaults.slot_ttl),
             socket_timeout=_float("redis_socket_timeout", defaults.socket_timeout),
             key_prefix=str(config.get("redis_key_prefix") or defaults.key_prefix).strip() or defaults.key_prefix,

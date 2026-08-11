@@ -31,9 +31,9 @@ rpc_retry_backoff = 0.5
 scheme = 'http'
 host = ''
 port = 0
+# 账号密码是机密，不放这里 —— 用环境变量 / .env：
+#   IPCLICK_PROXY_AUTH_KEY / IPCLICK_PROXY_AUTH_PASSWORD
 # 三方隧道代理
-auth_key = ''
-auth_password = ''
 channel_name = ''
 session_ttl = ''
 country_code = ''
@@ -93,14 +93,15 @@ max_workers = 100
 # 服务端会代替调用方请求任意 URL。若监听在公网或不可信网络，
 # 请务必打开 block_private_networks，否则本服务可被当作内网跳板（SSRF）。
 [SECURITY]
-# 调用方必须携带的鉴权令牌。留空 = 不鉴权（服务端启动时会打显著告警）。
-#
-# 强烈建议用环境变量 IPCLICK_AUTH_TOKEN 提供，不要把密钥写进配置文件；
-# 环境变量优先于此处。也可以写成列表以便轮换期间新旧令牌并存：
+# 鉴权令牌是机密，不放这里 —— 用环境变量 / .env 的 IPCLICK_AUTH_TOKEN。
+# 留空 = 不鉴权（服务端启动时会打显著告警）。
+# 轮换期间要新旧并存的话，只能写在配置里（环境变量只接受单个）：
 #   auth_token = ["新令牌", "旧令牌"]
-#
 # 注意：鉴权解决的是"谁能用"，SSRF 防护解决的是"能打到哪儿"，两者不能互相替代。
-auth_token = ""
+#
+# 受信环境里就是想把机密写进本文件的话，打开下面这项可以关掉启动时的提醒。
+# 机密仍然照常生效，只是不再每次启动都被点名。
+allow_secrets_in_config = false
 # 允许的 URL 协议
 allowed_schemes = ["http", "https"]
 # 拦截云厂商实例元数据地址（169.254.169.254 等），无正当代理用途，建议保持开启
@@ -178,6 +179,7 @@ per_host_burst = 0
 #   memory 每个服务端进程各算各的（默认）。集群里 N 个节点 = N 倍实际并发。
 #   redis  整个集群共用一份额度。需要 pip install "ipclick[redis]"
 backend = "memory"
+# 带账号密码的连接串请改用环境变量 IPCLICK_REDIS_URL —— 那是机密
 redis_url = "redis://127.0.0.1:6379/0"
 # 持有者多久算陈旧（秒）。进程拿着名额崩了，靠这个超时把名额收回来。
 # ⚠️ 必须大于最长的单次请求，否则慢请求的名额会被别人抢走，短暂超出上限。
@@ -273,12 +275,10 @@ port = 9530
 # 需要远程访问请用 SSH 隧道，或放在做了 TLS 终止的反向代理之后
 # （本身是明文 HTTP，密码会在网络上裸奔）。
 host = "127.0.0.1"
-# 登录凭据。留空则每次启动**随机生成密码并打印到控制台**——
+# 登录凭据是机密，不放这里 —— 用环境变量 / .env：
+#   IPCLICK_WEB_USER / IPCLICK_WEB_PASSWORD
+# 都不设的话每次启动**随机生成密码并打印到控制台**。
 # 不设默认口令是刻意的：默认弱口令是这类管理界面被打穿的头号原因。
-# 更推荐用环境变量 IPCLICK_WEB_USER / IPCLICK_WEB_PASSWORD（或 .env），
-# 密码不该进版本库。
-username = ""
-password = ""
 
 # ================ 监控配置 [MONITOR] ================
 [MONITOR]

@@ -21,6 +21,7 @@ from ipclick.factory import resolve_mode
 from ipclick.health import HealthReporter
 from ipclick.limiter import LimiterSettings
 from ipclick.metrics import get_metrics
+from ipclick.secrets import warn_secrets_in_config
 from ipclick.services import TaskService
 from ipclick.tls import TLSSettings, describe, server_credentials, warn_if_insecure
 from ipclick.utils.config_util import Settings
@@ -215,6 +216,10 @@ class IPClickServer:
         # 传输层加密。证书读取与组合校验在这里就做掉——带着半套 TLS 配置起来，
         # 比起不来危险得多。
         tls_settings = TLSSettings.from_config(security_config)
+
+        # 机密写在配置文件里会跟着进版本库/备份/日志，启动时点一下名。
+        # 仍然照常生效，[SECURITY].allow_secrets_in_config = true 可关掉提示。
+        warn_secrets_in_config(self.config)
 
         # 创建gRPC服务器
         self.server = grpc.server(

@@ -70,8 +70,9 @@ class WebCredentials:
         ``.env`` 已经在 load_config 阶段注入过环境变量了。
         """
         config = dict(web_config or {})
+        # 环境变量优先：部署环境注入的必须能压过仓库里那份配置文件
         username = (os.getenv(ENV_USER) or str(config.get("username") or "")).strip() or "admin"
-        password = os.getenv(ENV_PASSWORD) or str(config.get("password") or "")
+        password = (os.getenv(ENV_PASSWORD) or str(config.get("password") or "")).strip()
         if password:
             return cls(username=username, password=password, generated=False)
         return cls(username=username, password=generate_password(), generated=True)

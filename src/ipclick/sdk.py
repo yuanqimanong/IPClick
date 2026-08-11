@@ -19,6 +19,7 @@ from ipclick.exceptions import (
     ValidationError,
 )
 from ipclick.limiter import HostLimitTimeout
+from ipclick.secrets import proxy_config
 from ipclick.tls import TLSSettings, channel_credentials, channel_options, describe
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
@@ -298,7 +299,7 @@ class ClientBase:
         if not proxy:
             resolved_proxy = None
         elif proxy is True:
-            resolved_proxy = ProxyConfig(**dict(self.config.get("PROXY", {}))).to_url()
+            resolved_proxy = ProxyConfig(**proxy_config(self.config)).to_url()
             if resolved_proxy is None:
                 log.warning("proxy=True 但配置文件 [PROXY] 未提供 host/tunnel_server，本次请求不走代理")
         elif isinstance(proxy, ProxyConfig):

@@ -121,15 +121,48 @@ ipclick run --config /path/to/ipclick.toml
 ipclick run --verbose
 ```
 
-拿模板（都带完整注释，可直接重定向成文件）：
+初始化配置（推荐）：
+
+```bash
+ipclick init
+```
+
+一次生成两份文件：`ipclick.toml`（行为配置）和 `.env`（机密）。`.env` 用 **600**
+权限创建、预填一个随机 Web 密码、自动追加进 `.gitignore`；文件已存在时拒绝覆盖
+（要覆盖加 `--force`）。
+
+也可以只要模板：
 
 ```bash
 ipclick -e > ipclick.toml        # 配置模板（-e 等价于 -e toml）
-ipclick -e env > .env            # 环境变量模板
+ipclick -e env > .env            # 机密模板（注意自己 chmod 600）
 ```
 
-`.env` 模板里所有值都是空的，整份复制过去不会改变任何行为——填了才生效。
-它是**从代码里那张环境变量映射表生成的**，不会出现『模板里有但其实不生效』。
+### 什么放哪儿
+
+| | 放什么 | 进版本库？ |
+|---|---|---|
+| **`ipclick.toml`** | 行为配置：超时、重试、限流、浏览器引擎、SSRF 策略 | ✅ 应该 |
+| **`.env`** | **只放机密**：令牌、密码、带凭据的连接串 | ❌ 绝不 |
+
+`.env` 里只有这 6 项：
+
+```
+IPCLICK_AUTH_TOKEN            gRPC 鉴权令牌
+IPCLICK_WEB_USER              Web 管理端用户名
+IPCLICK_WEB_PASSWORD          Web 管理端密码
+IPCLICK_PROXY_AUTH_KEY        代理账号
+IPCLICK_PROXY_AUTH_PASSWORD   代理密码
+IPCLICK_REDIS_URL             Redis 连接串（带密码时）
+```
+
+**机密写在 `ipclick.toml` 里仍然生效**——受信环境里图省事是合理的。只是启动时会
+点名提醒（`ipclick.toml` 通常要进版本库，机密会跟着进 git、备份、CI 日志）。
+确实想这么放就设 `[SECURITY].allow_secrets_in_config = true` 关掉提醒。
+两边都写时**环境变量优先**。
+
+`ipclick config-info` 会逐项显示每个机密**来自哪里**（环境变量 / 配置文件 / 未配置）
+——配错了地方是最难自己发现的一类问题。
 
 查看当前**实际生效**的配置——TLS、鉴权、限流、浏览器引擎、运行模式一目了然：
 
@@ -197,7 +230,8 @@ token，登录失败按来源 IP 限速（5 次后锁定 5 分钟，锁定期间
 `.env` 排在真实环境变量之后是有意的：容器编排、CI、systemd 注入的变量必须能压过
 仓库里那个用于本地开发的 `.env`，否则部署环境会被开发默认值悄悄改掉。
 
-支持的环境变量：
+**部署参数**（非机密）也可以用环境变量覆盖。它们**刻意不进 `.env` 模板**——那是
+放密钥的文件，这些是给容器编排 / K8s / systemd 注入的：
 
 | 变量 | 覆盖 |
 |---|---|
@@ -205,8 +239,6 @@ token，登录失败按来源 IP 限速（5 次后锁定 5 分钟，锁定期间
 | `IPCLICK_MAX_WORKERS` | `[SERVER].max_workers` |
 | `IPCLICK_MODE` | `[GENERAL].mode` |
 | `IPCLICK_LOG_LEVEL` | `[LOG].level` |
-| `IPCLICK_AUTH_TOKEN` | `[SECURITY].auth_token` |
-| `IPCLICK_WEB_USER` / `IPCLICK_WEB_PASSWORD` | Web 管理端登录凭据 |
 
 `.env` 支持 `KEY=VALUE`、`export KEY=VALUE`、`#` 注释、单双引号（双引号内可转义）。
 不支持多行值和 `${VAR}` 插值——需要那些请直接用环境变量。

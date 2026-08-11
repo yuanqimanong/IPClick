@@ -20,6 +20,8 @@
 import os
 from pathlib import Path
 
+from ipclick.utils.log_util import log
+
 
 #: 默认查找的文件名
 DEFAULT_ENV_FILENAME = ".env"
@@ -99,6 +101,22 @@ def find_env_file(explicit: str | Path | None = None, start: Path | None = None)
     return candidate if candidate.is_file() else None
 
 
+def _warn_if_world_readable(path: Path) -> None:
+    """``.env`` 里是密钥，同组或其他用户可读就该提醒。
+
+    只警告不改权限——擅自 chmod 别人的文件是更糟的行为。
+    Windows 上 st_mode 的权限位没有 POSIX 语义，直接跳过。
+    """
+    if os.name != "posix":
+        return
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return
+    if mode & 0o077:
+        log.warning(f"{path} 权限为 {oct(mode & 0o777)}，同组或其他用户可读——里面是密钥。建议 chmod 600 {path}")
+
+
 def load_dotenv(path: str | Path | None = None, *, override: bool = False) -> dict[str, str]:
     """把 ``.env`` 里的变量注入 ``os.environ``。
 
@@ -113,6 +131,8 @@ def load_dotenv(path: str | Path | None = None, *, override: bool = False) -> di
     env_file = find_env_file(path)
     if env_file is None:
         return {}
+
+    _warn_if_world_readable(env_file)
 
     try:
         text = env_file.read_text(encoding="utf-8")
