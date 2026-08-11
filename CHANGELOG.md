@@ -59,6 +59,18 @@ P3 扩展传输能力，P4 做集群，P5 补齐适配器，P6 加限流与可�
 - CI 增加 `playwright install --with-deps chromium`，让浏览器渲染用例在 CI 上
   真的跑起来，而不是静默 skip。
 
+### 新增（P8）
+
+- **`ipclick --example` / `-e`**：输出带完整注释的配置模板到 stdout，
+  可直接 `ipclick -e > ipclick.toml`。
+- **`.env` 支持**：当前工作目录的 `.env` 会被加载进环境变量。
+  **不覆盖**已存在的环境变量——容器编排 / CI / systemd 注入的必须能压过仓库里
+  那个用于本地开发的 `.env`。自己实现了四十行解析器而不是引 python-dotenv，
+  以维持轻量安装。
+- **环境变量覆盖集中成一张表**（`ENV_OVERRIDES`），新增 `IPCLICK_MAX_WORKERS`、
+  `IPCLICK_MODE`、`IPCLICK_LOG_LEVEL`。此前散在各处 `os.getenv`，
+  "到底哪些环境变量有用"只能靠翻代码。有测试盯着表里每一项都真能生效。
+
 ### 破坏性变更（P8）
 
 - **`httpx` 从核心依赖改为可选**（`pip install "ipclick[httpx]"`）。

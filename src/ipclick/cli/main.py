@@ -7,6 +7,7 @@ from ipclick.adapters.browser_engines import is_available, resolve_engine
 from ipclick.adapters.browser_settings import BrowserSettings
 from ipclick.auth import load_tokens
 from ipclick.config_loader import load_config
+from ipclick.config_loader.loader import example_config
 from ipclick.factory import resolve_mode
 from ipclick.health import check_health
 from ipclick.limiter import LimiterSettings
@@ -15,10 +16,35 @@ from ipclick.tls import TLSSettings, describe
 from ipclick.utils.log_util import LogUtil
 
 
-@click.group()
+def _print_example(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
+    """输出随包分发的配置模板然后退出。
+
+    直接打到 stdout（不加任何前缀），这样 `ipclick --example > ipclick.toml`
+    出来的就是一个能直接用的文件。
+    """
+    if not value or ctx.resilient_parsing:
+        return
+    click.echo(example_config(), nl=False)
+    ctx.exit()
+
+
+@click.group(invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="IPClick")
-def main():
+@click.option(
+    "--example",
+    "-e",
+    is_flag=True,
+    is_eager=True,
+    expose_value=False,
+    callback=_print_example,
+    help="输出配置模板到 stdout（可重定向：ipclick -e > ipclick.toml）",
+)
+@click.pass_context
+def main(ctx: click.Context):
     """IPClick - 分布式HTTP请求代理工具"""
+    # 不带子命令也不带 --example 时，给出帮助而不是静默退出
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
 
 
 @main.command()

@@ -145,3 +145,36 @@ class TestConfigInfo:
         result = runner.invoke(main, ["config-info"])
         assert result.exit_code == 0
         assert "Current configuration" in result.output
+
+
+class TestExampleFlag:
+    """ipclick --example / -e：输出配置模板。"""
+
+    def test_outputs_valid_toml(self, runner: CliRunner):
+        import tomllib
+
+        result = runner.invoke(main, ["--example"])
+        assert result.exit_code == 0
+        tomllib.loads(result.output)
+
+    def test_short_flag(self, runner: CliRunner):
+        assert runner.invoke(main, ["-e"]).output == runner.invoke(main, ["--example"]).output
+
+    def test_output_is_redirectable(self, runner: CliRunner):
+        """`ipclick -e > ipclick.toml` 出来的必须是能直接用的文件——
+        不能带任何日志前缀或提示语。"""
+        output = runner.invoke(main, ["--example"]).output
+        assert output.lstrip().startswith("#"), f"模板开头混进了别的东西: {output[:60]!r}"
+        assert "Starting" not in output
+
+    def test_keeps_comments(self):
+        """模板的价值一大半在注释上。"""
+        from ipclick.config_loader.loader import example_config
+
+        assert example_config().count("#") > 30
+
+    def test_bare_invocation_shows_help(self, runner: CliRunner):
+        """不带子命令时给帮助，而不是静默退出。"""
+        result = runner.invoke(main, [])
+        assert result.exit_code == 0
+        assert "config-info" in result.output

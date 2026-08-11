@@ -120,11 +120,44 @@ ipclick run --config /path/to/ipclick.toml
 ipclick run --verbose
 ```
 
-查看当前生效的配置：
+拿一份配置模板（带完整注释）：
+
+```bash
+ipclick --example > ipclick.toml     # 或 ipclick -e
+```
+
+查看当前**实际生效**的配置——TLS、鉴权、限流、浏览器引擎、运行模式一目了然：
 
 ```bash
 ipclick config-info
 ```
+
+### 配置优先级
+
+从高到低：
+
+1. 命令行参数 / 构造函数参数
+2. 环境变量
+3. 当前目录的 `.env`（**不覆盖**已存在的环境变量）
+4. `ipclick.toml` / `.ipclick.toml`，或 `--config` 指定的文件
+5. `~/.ipclick/config.toml`
+6. 包内默认配置
+
+`.env` 排在真实环境变量之后是有意的：容器编排、CI、systemd 注入的变量必须能压过
+仓库里那个用于本地开发的 `.env`，否则部署环境会被开发默认值悄悄改掉。
+
+支持的环境变量：
+
+| 变量 | 覆盖 |
+|---|---|
+| `IPCLICK_HOST` / `IPCLICK_PORT` | `[SERVER].host` / `port` |
+| `IPCLICK_MAX_WORKERS` | `[SERVER].max_workers` |
+| `IPCLICK_MODE` | `[GENERAL].mode` |
+| `IPCLICK_LOG_LEVEL` | `[LOG].level` |
+| `IPCLICK_AUTH_TOKEN` | `[SECURITY].auth_token` |
+
+`.env` 支持 `KEY=VALUE`、`export KEY=VALUE`、`#` 注释、单双引号（双引号内可转义）。
+不支持多行值和 `${VAR}` 插值——需要那些请直接用环境变量。
 
 ### 客户端使用
 
