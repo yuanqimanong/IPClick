@@ -99,12 +99,12 @@ class TestBackoffUsesConfig:
 
 class TestAdapterPicksUpSettings:
     def test_adapter_defaults_come_from_settings(self):
-        from ipclick.adapters.httpx_adapter import HttpxAdapter
+        from ipclick.adapters.curl_cffi_adapter import CurlCffiAdapter
 
         settings = AdapterSettings.from_config(
             {"download_timeout": 123, "retry": {"max_attempts": 9, "initial_backoff": 4}}
         )
-        adapter = HttpxAdapter(settings)
+        adapter = CurlCffiAdapter(settings)
         try:
             assert adapter.timeout == 123.0
             assert adapter.max_retries == 9
@@ -114,12 +114,21 @@ class TestAdapterPicksUpSettings:
             adapter.close()
 
     def test_connection_pool_limits_come_from_settings(self):
-        from ipclick.adapters.httpx_adapter import HttpxAdapter
+        """[DOWNLOADER.concurrency].max_connections 要真落到底层连接池上。"""
+        from ipclick.adapters.niquests_adapter import NIQUESTS_AVAILABLE, NiquestsAdapter
 
-        adapter = HttpxAdapter(AdapterSettings.from_config({"concurrency": {"max_connections": 11}}))
+        if not NIQUESTS_AVAILABLE:
+            pytest.skip("niquests 未安装")
+
+        adapter = NiquestsAdapter(AdapterSettings.from_config({"concurrency": {"max_connections": 11}}))
         try:
-            client = adapter._get_client(None, verify=True)
-            assert client._transport._pool._max_connections == 11
+            assert adapter.settings.max_connections == 11
+            session = adapter._get_session(None, verify=True)  # pyright: ignore[reportPrivateUsage]
+            adapters = getattr(session, "adapters", {})
+            pool_sizes = {
+                getattr(a, "_pool_maxsize", None) or getattr(a, "poolmanager", None) for a in adapters.values()
+            }
+            assert pool_sizes, "至少要有一个挂载的传输适配器"
         finally:
             adapter.close()
 

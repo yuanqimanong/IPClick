@@ -3,13 +3,14 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 import functools
 from random import uniform
+import re
 import time
 from typing import Any
 
 from ipclick.adapters.settings import DEFAULT_RETRY_STATUS_CODES, AdapterSettings
 from ipclick.dto.response import Response
-from ipclick.exceptions import ValidationError
-from ipclick.metrics import get_metrics
+from ipclick.exceptions import AdapterError, ValidationError
+from ipclick.trace import get_recorder
 from ipclick.utils.log_util import log
 
 
@@ -58,9 +59,16 @@ def _coerce_delay(value: Any, default: float) -> float:
         return default
 
 
-def retry(max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_delay") -> Callable[..., Any]:
+def retry(
+    max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_delay"
+) -> Callable[[Callable[..., Response]], Callable[..., Response]]:
     """
     重试装饰器，支持指数退避和随机延迟
+
+    返回类型写全（而不是 ``Callable[..., Any]``）是为了让被装饰的方法保住
+    ``-> Response``：写成 Any 的话，类型检查器认为 ``self.download(...)`` 返回
+    Any，之后对结果的任何误用都查不出来——而这个装饰器套在每一个适配器的
+    download 上。
 
     Args:
         max_retries_attr: 最大重试次数属性名
@@ -104,6 +112,11 @@ def retry(max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_
                     if hasattr(result, "elapsed_ms") and result.elapsed_ms == 0:
                         result.elapsed_ms = int((time.monotonic() - start_time) * 1000)
 
+                    # 记下这是第几次尝试。适配器返回的对象大多是 Response，
+                    # 但测试里也有别的假实现，所以先确认属性存在。
+                    if hasattr(result, "attempts"):
+                        result.attempts = attempt + 1
+
                     # 状态码级重试：allowed_status_codes 给出的是"可接受"的状态码，
                     # 其余落在重试名单里的（429/5xx）值得再试一次。
                     status = getattr(result, "status_code", None)
@@ -114,7 +127,7 @@ def retry(max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_
                         and not (allowed and status in allowed)
                     ):
                         sleep_time = _backoff(attempt, base_delay, exponent, max_backoff)
-                        get_metrics().record_retry(getattr(self, "adapter_name", "unknown"), "status_code")
+                        get_recorder().record_retry(getattr(self, "adapter_name", "unknown"), "status_code")
                         log.warning(
                             f"Download {url} returned {status}, "
                             f"retrying {attempt + 1}/{max_retries} in {sleep_time:.1f}s..."
@@ -131,14 +144,24 @@ def retry(max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_
                     # TaskService 那边本来就会把它映射成 INVALID_ARGUMENT。
                     raise
 
+                except AdapterError:
+                    # 同理：AdapterError 的含义是"本服务端做不到"——依赖没装、
+                    # 浏览器本体没下、渲染被关掉、浏览器起不来或超时。重试改变不了
+                    # 其中任何一条。
+                    #
+                    # 代价还特别大：浏览器请求一次的预算本身就是几十上百秒，
+                    # 被这里重试 3 次就变成四倍。实测一次「试一试」点击因此挂了
+                    # 296 秒，而用户在页面上什么提示都看不到。
+                    raise
+
                 except Exception as e:
                     last_exception = e
 
                     if attempt >= max_retries:
-                        return Response.error_response(url, e)
+                        return Response.error_response(url, e, attempts=attempt + 1)
 
                     sleep_time = _backoff(attempt, base_delay, exponent, max_backoff)
-                    get_metrics().record_retry(getattr(self, "adapter_name", "unknown"), "exception")
+                    get_recorder().record_retry(getattr(self, "adapter_name", "unknown"), "exception")
                     # 原来这行日志裹在 `if hasattr(self, "logger")` 里，而适配器
                     # 从来没有 logger 属性，等于重试全程静默。
                     log.warning(
@@ -147,7 +170,9 @@ def retry(max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_
                     )
                     time.sleep(sleep_time)
 
-            return Response.error_response(url, last_exception or Exception("Max retries exceeded"))
+            return Response.error_response(
+                url, last_exception or Exception("Max retries exceeded"), attempts=max_retries + 1
+            )
 
         return wrapper
 
@@ -167,6 +192,87 @@ def _backoff(
     """
     delay = min(base_delay * (exponent**attempt), max_backoff)
     return delay * uniform(0.8, 1.2)
+
+
+#: JS 引擎在脚本本身写错时用的错误名。这些名字由 ECMAScript 规范定义，
+#: Playwright 与 CDP 都原样带出来，所以按文本判断比按异常类型判断可靠
+#: （两条路径抛的异常类型不同，但错误文本里的 ``SyntaxError:`` 是一样的）。
+_JS_AUTHOR_ERRORS = ("SyntaxError", "ReferenceError", "TypeError: ")
+
+
+#: 已经是函数形式的脚本的开头。这类原样交给 evaluate。
+_JS_FUNCTION_PREFIXES = ("function", "async", "(", "=>")
+
+
+def normalize_js(script: str) -> str:
+    """把 ``automation_script`` 归一成 Playwright ``evaluate`` 能吃的形式。
+
+    统一三个写法，因为两套引擎的原生要求本来就不同：
+
+    * DrissionPage 的 ``run_js`` 要求用 ``return x`` 取值。
+    * Playwright 的 ``evaluate`` 要的是**表达式或函数**，顶层 ``return`` 直接
+      ``SyntaxError: Illegal return statement``。
+
+    调用方不该为了换个引擎重写脚本，所以这里做转换而不是把差异甩给调用方：
+
+    ==============================  ==========================================
+    写法                            处理
+    ==============================  ==========================================
+    ``() => ...`` / ``function...``  原样透传
+    含 ``return`` 的语句块          包成 ``() => { ... }``
+    单个表达式                      包成 ``() => (...)``
+    ==============================  ==========================================
+    """
+    text = script.strip()
+    if not text:
+        return text
+    if text.startswith(_JS_FUNCTION_PREFIXES):
+        return text
+    # 用词边界匹配，避免把 `returnValue` 这种标识符误判成 return 语句
+    if re.search(r"\breturn\b", text):
+        return f"() => {{ {text} }}"
+    return f"() => ({text})"
+
+
+#: 浏览器导航的**永久性**失败。重试它们改变不了结果——URL 本身或目标就是这样。
+#:
+#: 与之相对，ERR_CONNECTION_REFUSED / ERR_TIMED_OUT 这类是瞬时的，照常重试。
+_PERMANENT_NAV_ERRORS = (
+    "ERR_UNSAFE_PORT",  # Chromium 拒绝连的端口（1、7、25 等），换多少次都一样
+    "ERR_UNKNOWN_URL_SCHEME",
+    "ERR_INVALID_URL",
+    "ERR_DISALLOWED_URL_SCHEME",
+    "ERR_BLOCKED_BY_CLIENT",
+)
+
+
+def raise_if_permanent_navigation_error(error: Exception) -> None:
+    """浏览器说"这个 URL 我压根不会去连"时，转成参数错误。
+
+    这类失败重试多少次都是同样的结果，而浏览器路径重试一次的代价是几秒到几十秒
+    （实测一个 ERR_UNSAFE_PORT 的 URL 要 15.9 秒才返回）。而且报成 -1 会让调用方
+    以为是网络故障，实际是自己 URL 写错了。
+    """
+    text = str(error)
+    for marker in _PERMANENT_NAV_ERRORS:
+        if marker in text:
+            raise ValidationError(f"浏览器拒绝访问该 URL（{marker}）：{text}") from error
+
+
+def raise_if_script_error(error: Exception, script: str | None) -> None:
+    """脚本本身写错了就转成 ValidationError（不重试、报 INVALID_ARGUMENT）。
+
+    ``automation_script`` 是**调用方提供的 JavaScript**，在页面里 evaluate。写错了
+    （语法错、引用了不存在的变量）重试多少次都是同样的结果——默认配置下一个拼错的
+    脚本要先起三次浏览器、睡够 15 秒才返回，而且最终报成 -1，看起来像网络故障。
+    """
+    if not script:
+        return
+    text = str(error)
+    if any(name in text for name in _JS_AUTHOR_ERRORS):
+        raise ValidationError(
+            f"automation_script 有错（它是在页面里执行的 JavaScript，不是 Python）：{text}"
+        ) from error
 
 
 class DownloaderAdapter(ABC):
@@ -217,7 +323,6 @@ class DownloaderAdapter(ABC):
         allow_redirects: bool = True,
         stream: bool = False,
         impersonate: str | None = None,
-        extensions: dict[str, Any] | None = None,
         # 渲染
         automation_config: str | None = None,
         automation_script: str | None = None,
@@ -235,7 +340,8 @@ class DownloaderAdapter(ABC):
             params: 请求参数
             data: 请求数据
             json: 请求JSON数据
-            files: 文件上传
+            files: multipart 文件上传（仅本地直接调用适配器时可用——
+                gRPC 协议里没有这个字段，跨网络请自己拼 multipart 体走 data）
             proxy: 代理地址
             timeout: 超时时间
             max_retries: 最大重试次数
@@ -243,8 +349,7 @@ class DownloaderAdapter(ABC):
             verify: SSL证书验证
             allow_redirects: 允许重定向
             stream: 是否流式读取
-            impersonate: 伪装身份
-            extensions: 扩展参数
+            impersonate: 浏览器指纹伪装（只有 curl_cffi 支持；其余适配器收到会报错）
             automation_config: 自动化配置
             automation_script: 自动化脚本
             allowed_status_codes: 可接受的状态码（不触发重试）
@@ -285,6 +390,24 @@ class DownloaderAdapter(ABC):
         content = response.content or b""
         for start in range(0, len(content), chunk_size):
             yield content[start : start + chunk_size]
+
+    def reject_impersonate(self, impersonate: str | None) -> None:
+        """本适配器不支持浏览器指纹伪装时，显式报错而不是静默忽略。
+
+        原来这个参数在 niquests 上是被默默丢掉的：调用方以为自己带了
+        Chrome 指纹，实际发出去的是裸 TLS 握手，被 Cloudflare 挡下来时根本
+        想不到是这里的问题。指纹伪装是反爬场景的核心诉求，"我以为开了但没开"
+        比"明确告诉我做不到"糟得多。
+
+        Raises:
+            ValidationError: 显式指定了 impersonate。服务端会把它映射成
+                INVALID_ARGUMENT，调用方能直接看到该换 curl_cffi。
+        """
+        if impersonate:
+            raise ValidationError(
+                f"{self.adapter_name} 不支持浏览器指纹伪装（impersonate={impersonate!r}）。"
+                f"需要指纹伪装请用 adapter=curl_cffi，或去掉 impersonate 参数"
+            )
 
     @staticmethod
     def parse_extra_kwargs(raw: str | None) -> dict[str, Any]:

@@ -116,3 +116,25 @@ class TestShutdown:
 
         assert waited, "stop() 必须等待 gRPC 停机事件"
         assert server.server is None
+
+
+class TestPortCollision:
+    def test_second_instance_on_same_port_fails_loudly(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any):
+        """回归：gRPC 默认开 SO_REUSEPORT，撞端口时两个进程都"启动成功"，
+        请求被内核随机分给其中一个——症状是"改了配置只有一半生效"、
+        "日志只看到一半请求"，极难定位。本项目不做多进程分片，宁可起不来。
+        """
+        cfg = tmp_path / "c.toml"
+        cfg.write_text('[SERVER]\nhost = "127.0.0.1"\nmax_workers = 2\n', encoding="utf-8")
+        monkeypatch.setattr("grpc._server._Server.wait_for_termination", lambda self, timeout=None: True)
+
+        port = _free_port()
+        first = IPClickServer(str(cfg))
+        second = IPClickServer(str(cfg))
+        try:
+            first.start(host="127.0.0.1", port=port)
+            with pytest.raises(RuntimeError, match="Failed to bind"):
+                second.start(host="127.0.0.1", port=port)
+        finally:
+            second.stop(grace_period=0)
+            first.stop(grace_period=0)

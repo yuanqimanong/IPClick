@@ -23,6 +23,9 @@ class Response:
     raw_response: Any | None = None
     exception: Exception | None = None
     elapsed_ms: int = 0
+    #: 实际发起了几次（1 = 一次成功，没重试）。由 @retry 装饰器填写，
+    #: 服务端把它放进 TaskResp.trace，让调用方能看出"慢是因为重试了 3 次"。
+    attempts: int = 1
 
     def __post_init__(self):
         """初始化后处理"""
@@ -110,7 +113,7 @@ class Response:
         return "utf-8"
 
     @classmethod
-    def error_response(cls, url: str, exception: Exception, status_code: int = -1) -> "Response":
+    def error_response(cls, url: str, exception: Exception, status_code: int = -1, attempts: int = 1) -> "Response":
         """
         创建错误响应
 
@@ -118,6 +121,7 @@ class Response:
             url:  请求URL
             exception: 异常对象
             status_code: 状态码（默认-1表示网络错误）
+            attempts: 实际尝试次数
 
         Returns:
             Response: 错误响应对象
@@ -130,6 +134,7 @@ class Response:
             headers={},
             raw_response=None,
             exception=exception,
+            attempts=attempts,
         )
 
     @classmethod
@@ -166,6 +171,7 @@ class Response:
             "headers": self.headers,
             "text": self.text,
             "elapsed_ms": self.elapsed_ms,
+            "attempts": self.attempts,
             "ok": self.ok,
             "exception": str(self.exception) if self.exception else None,
         }

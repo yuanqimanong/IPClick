@@ -1,19 +1,30 @@
 """Web 管理端。
 
-``ipclick run --web`` 起一个带登录的网页界面，展示服务端运行状态、生效配置与
-集群节点。只用标准库——为一个几百行的页面拉进 FastAPI 那一串依赖不划算，
-而且这个包刚把核心依赖精简到 17 个。
+``ipclick run --web`` 起一个带登录的网页界面。只用标准库——为几个页面拉进
+FastAPI 那一串依赖不划算，而且这个包刚把核心依赖精简到 17 个。页面里**一行
+JavaScript 都没有**，自动刷新用 ``<meta refresh>``，CSP 收到
+``default-src 'none'``：管理端后面就是一个能代发任意请求的服务，攻击面比页面
+炫酷重要。
 
-能做什么、不能做什么
+页面
+----
+* ``/`` 总览：吞吐、成功率、在途、各适配器、引擎安装状态、集群、最近请求。
+* ``/trace`` 请求流：实时（3 秒刷新）看请求打进来，可按状态 / 适配器 / URL 过滤。
+* ``/test`` 试一试：填个网址就地发一次请求，看链路与源码。走的是本进程
+  TaskService 的**同一条**代码路径——包括 SSRF 准入、限流、以及开了转发时的分发。
+* ``/config`` 配置：白名单内的行为配置可改，**写回 ipclick.toml**（保留注释）。
+* ``/nodes`` 节点：集群节点的增删改，同样写回 toml。
+
+能改什么、不能改什么
 --------------------
-**能**：看服务端信息、看生效配置（机密只显示"有/无"）、看集群节点健康状态、
-手动摘除/恢复节点（仅影响当前进程的运行时状态）。
+**能**：超时、重试、限流、日志级别、浏览器引擎、链路记录、集群策略与节点列表。
 
-**不能**：改配置文件、改令牌、改 URL 策略、加删节点。这些一律走配置文件 + 重启。
+**不能**：``[SECURITY]`` 全部（令牌、TLS、SSRF 三个开关）、Web 自己的登录凭据、
+集群共享密钥与各节点 token、``[BROWSER].allow_scripts``。名单在
+:mod:`ipclick.web.editable`，那里也写了每一项为什么在哪一侧。
 
-这条线是刻意划的。这个服务能代任意 URL 发请求，一个能改它配置的网页就是极高
-价值的目标；而"手动摘个节点"这类操作是运行时的、可逆的、重启即复原，风险和
-收益的比值完全不同。
+**不装东西**：引擎的安装状态只展示，附上安装命令让人自己去机器上跑。
+让网页能执行安装命令等于给它一个任意命令执行的入口。
 """
 
 from collections.abc import Callable
@@ -21,23 +32,44 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import sys
 import threading
-from typing import Any
+from typing import Any, final
 from urllib.parse import parse_qs
 
 from typing_extensions import override
 
 from ipclick.utils.log_util import log
 from ipclick.web.auth import SessionStore, WebCredentials
+from ipclick.web.pages import WebPages
 from ipclick.web.templates import render_dashboard, render_login
 
 
 #: 会话 cookie 名
 COOKIE_NAME = "ipclick_session"
 
-#: 单次请求体上限。登录表单撑死几百字节，给 64KB 已经很宽松——
-#: 不设上限的话一个大 POST 就能把内存吃掉。
-MAX_BODY_BYTES = 64 * 1024
+#: 单次请求体上限。最大的表单是"试一试"页面（可以贴请求体和请求头）与配置页，
+#: 256KB 足够宽松；不设上限的话一个大 POST 就能把内存吃掉。
+MAX_BODY_BYTES = 256 * 1024
+
+
+@final
+class _QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """把处理请求时的异常收进本项目的日志。
+
+    ``handle_error`` 是 :class:`socketserver.BaseServer` 的方法（**不是** handler 的），
+    默认实现把完整堆栈打到 stderr —— 绕过日志配置，还带上服务端源码路径。
+    最常触发它的正是"用户等不及了，关掉标签页"，而那恰恰是排查慢请求时最需要
+    干净日志的时刻。
+    """
+
+    @override
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        error = sys.exc_info()[1]
+        if isinstance(error, (BrokenPipeError, ConnectionResetError)):
+            log.debug(f"Web 端客户端提前断开：{client_address}")
+            return
+        log.exception(f"Web 端处理请求出错（来自 {client_address}）：{error}")
 
 
 class WebConfig:
@@ -80,11 +112,15 @@ class WebServer:
         *,
         action_handler: Callable[[str, dict[str, str]], tuple[bool, str]] | None = None,
         sessions: SessionStore | None = None,
+        pages: WebPages | None = None,
     ):
         self._provider: Callable[[], dict[str, Any]] = snapshot_provider
         self._credentials: WebCredentials = credentials
         self._actions: Callable[[str, dict[str, str]], tuple[bool, str]] | None = action_handler
         self.sessions: SessionStore = sessions or SessionStore()
+        #: 请求流 / 试一试 / 配置这几页需要的数据源与写入口。为 None 时那些页面
+        #: 直接返回 404——库模式下起一个只看状态的 Web 端是合法用法。
+        self.pages: WebPages | None = pages
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -97,7 +133,7 @@ class WebServer:
         if self._httpd is not None:
             return f"http://{host}:{port}/"
         try:
-            self._httpd = ThreadingHTTPServer((host, port), self._make_handler())
+            self._httpd = _QuietThreadingHTTPServer((host, port), self._make_handler())
         except OSError as e:
             log.error(f"Web 管理端启动失败 {host}:{port}: {e}")
             return None
@@ -196,6 +232,10 @@ class WebServer:
 
             # -------------------- 路由 -------------------- #
 
+            def _query(self) -> dict[str, str]:
+                _, _, raw = self.path.partition("?")
+                return {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True).items()}
+
             def do_GET(self) -> None:
                 path = self.path.split("?", 1)[0].rstrip("/") or "/"
                 session = server.sessions.get(self._session_id())
@@ -216,6 +256,32 @@ class WebServer:
                 if path == "/api/status":
                     payload = json.dumps(server._safe_snapshot(), ensure_ascii=False, indent=2, default=str)
                     return self._send(HTTPStatus.OK, payload.encode(), "application/json; charset=utf-8")
+
+                pages = server.pages
+                if pages is None:
+                    return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain; charset=utf-8")
+
+                if path == "/trace":
+                    body = pages.trace_page(self._query(), session.username, session.csrf_token)
+                    return self._send(HTTPStatus.OK, body.encode())
+
+                if path == "/api/trace":
+                    payload = json.dumps(pages.trace_json(self._query()), ensure_ascii=False, indent=2, default=str)
+                    return self._send(HTTPStatus.OK, payload.encode(), "application/json; charset=utf-8")
+
+                if path == "/test":
+                    # 带 r= 的是 POST 之后重定向回来的，把那次结果取出来渲染
+                    form, result = pages.take_test_result(self._query().get("r", ""))
+                    body = pages.test_page(form, result, session.username, session.csrf_token)
+                    return self._send(HTTPStatus.OK, body.encode())
+
+                if path == "/config":
+                    body = pages.config_page(session.username, session.csrf_token)
+                    return self._send(HTTPStatus.OK, body.encode())
+
+                if path == "/nodes":
+                    body = pages.nodes_page(session.username, session.csrf_token)
+                    return self._send(HTTPStatus.OK, body.encode())
 
                 return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain; charset=utf-8")
 
@@ -244,6 +310,25 @@ class WebServer:
 
                 if path == "/action":
                     return self._handle_action(form)
+
+                pages = server.pages
+                if pages is None:
+                    return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain; charset=utf-8")
+
+                if path == "/test":
+                    # Post/Redirect/Get：结果存起来再 303 回去。直接渲染的话用户按
+                    # F5 会把整次请求重新提交一遍——而这一页的一次提交可能是几十秒
+                    # 的真实浏览器渲染，用户还以为自己"只是刷新了一下"。
+                    result = pages.run_test(form)
+                    return self._redirect(f"/test?r={pages.stash_test_result(form, result)}")
+
+                if path == "/config":
+                    body = pages.save_config(form, session.username, session.csrf_token)
+                    return self._send(HTTPStatus.OK, body.encode())
+
+                if path == "/nodes":
+                    body = pages.save_nodes(form, session.username, session.csrf_token)
+                    return self._send(HTTPStatus.OK, body.encode())
 
                 return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain; charset=utf-8")
 

@@ -32,7 +32,14 @@ from ipclick.exceptions import AdapterError, ValidationError
 from ipclick.utils.url_util import merge_query_params
 
 
-pytestmark = pytest.mark.skipif(not browser_engines.available_engines(), reason="没有任何浏览器引擎")
+def _any_engine_usable() -> bool:
+    """有没有任何一个引擎能用（按本文件的设置，也就是允许用系统 chromium）。
+
+    必须带上 settings：这套用例把 executable_path 指向系统 chromium，
+    不带的话 is_available 只会去查 playwright 自己的下载目录，那里通常是空的。
+    """
+    return bool(browser_engines.available_engines(_settings()))
+
 
 #: 系统里常见的 chromium 位置。找不到就退回 playwright 自己下载的那份。
 _SYSTEM_BROWSERS = ("/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome")
@@ -116,6 +123,9 @@ def _settings(engine: str = "playwright", **overrides: object) -> BrowserSetting
     return BrowserSettings(**base)  # pyright: ignore[reportArgumentType]
 
 
+pytestmark = pytest.mark.skipif(not _any_engine_usable(), reason="没有任何可用的浏览器引擎")
+
+
 #: 参与渲染用例参数化的引擎。装了哪个就测哪个，一个都没有时整组 skip。
 #:
 #: camoufox 默认**不在**列表里：它是 Firefox 加一整套扩展，单个 context 的内存
@@ -138,10 +148,15 @@ def browser(request: pytest.FixtureRequest) -> Iterator[BrowserAdapter]:
     camoufox 换了 Firefox 内核，很多 Chromium 下想当然的行为在它那里不成立。
     """
     engine = str(request.param)
-    if not browser_engines.is_available(engine):
-        pytest.skip(f"{engine} 未安装")
+    settings = _settings(engine, allow_scripts=True)
+    # 必须把 settings 一起传进去：这套用例用的是系统 chromium
+    # （executable_path 指过去），而 is_available 不看 settings 时只会去查
+    # playwright 自己的下载目录，那里是空的
+    if not browser_engines.is_available(engine, settings):
+        status = browser_engines.engine_status(engine, settings)
+        pytest.skip(f"{engine} 不可用：{status.label} —— {status.detail}")
 
-    adapter = ENGINE_ADAPTERS[engine](browser_settings=_settings(engine, allow_scripts=True))
+    adapter = ENGINE_ADAPTERS[engine](browser_settings=settings)
     try:
         # 先探一次：浏览器装不上就整组 skip，而不是让每个用例各报一次错
         with socket.socket() as s:
@@ -465,3 +480,237 @@ class TestRendering:
     def test_close_without_any_request(self):
         """浏览器是懒启动的，没发过请求就 close() 不该炸。"""
         PlaywrightAdapter(browser_settings=_settings()).close()
+
+
+class TestScriptNormalization:
+    """automation_script 的三种写法都要能用。
+
+    两套引擎的原生要求不同（DrissionPage 要 `return x`，Playwright 要表达式或
+    函数），调用方不该为了换引擎重写脚本。
+    """
+
+    def test_arrow_function_passes_through(self):
+        from ipclick.adapters.base import normalize_js
+
+        assert normalize_js("() => document.title") == "() => document.title"
+
+    def test_function_keyword_passes_through(self):
+        from ipclick.adapters.base import normalize_js
+
+        assert normalize_js("function(){return 1}") == "function(){return 1}"
+
+    def test_return_statement_is_wrapped(self):
+        """回归：顶层 return 在 Playwright 下是 SyntaxError: Illegal return statement。"""
+        from ipclick.adapters.base import normalize_js
+
+        assert normalize_js("return document.title") == "() => { return document.title }"
+
+    def test_multi_statement_with_return(self):
+        from ipclick.adapters.base import normalize_js
+
+        assert normalize_js("const x = 1; return x") == "() => { const x = 1; return x }"
+
+    def test_bare_expression_is_wrapped_as_expression(self):
+        from ipclick.adapters.base import normalize_js
+
+        assert normalize_js("document.title") == "() => (document.title)"
+
+    def test_identifier_containing_return_is_not_a_statement(self):
+        """`returnValue` 不是 return 语句，不能按语句块处理（那样会返回 undefined）。"""
+        from ipclick.adapters.base import normalize_js
+
+        assert normalize_js("returnValue") == "() => (returnValue)"
+
+    def test_empty_stays_empty(self):
+        from ipclick.adapters.base import normalize_js
+
+        assert normalize_js("   ") == ""
+
+
+class TestScriptErrorClassification:
+    """脚本写错是调用方的参数错误，不是网络故障。"""
+
+    def test_syntax_error_becomes_validation_error(self):
+        from ipclick.adapters.base import raise_if_script_error
+        from ipclick.exceptions import ValidationError
+
+        with pytest.raises(ValidationError, match="automation_script"):
+            raise_if_script_error(RuntimeError("Page.evaluate: SyntaxError: bad"), "return x")
+
+    def test_reference_error_becomes_validation_error(self):
+        from ipclick.adapters.base import raise_if_script_error
+        from ipclick.exceptions import ValidationError
+
+        with pytest.raises(ValidationError):
+            raise_if_script_error(RuntimeError("ReferenceError: nope is not defined"), "nope()")
+
+    def test_network_error_is_left_alone(self):
+        """真的网络故障要继续走重试，不能被误判成参数错误。"""
+        from ipclick.adapters.base import raise_if_script_error
+
+        raise_if_script_error(RuntimeError("net::ERR_CONNECTION_REFUSED"), "return 1")
+
+    def test_no_script_means_nothing_to_blame(self):
+        from ipclick.adapters.base import raise_if_script_error
+
+        raise_if_script_error(RuntimeError("SyntaxError: whatever"), None)
+
+
+class TestTimeoutBudget:
+    """预算要按这次请求**真正会做的事**算。
+
+    以前是 page_timeout + script_timeout + 60 无条件相加：调用方填 30 秒、
+    实际单次能挂 150 秒——5 倍偏差，页面上还没有任何地方解释这个数字从哪来。
+    再被 retry 乘 4，一次「试一试」点击实测挂了 296 秒。
+    """
+
+    def _adapter(self) -> PlaywrightAdapter:
+        return PlaywrightAdapter(browser_settings=_settings("playwright", allow_scripts=True))
+
+    def _plan(self, adapter: PlaywrightAdapter, **kwargs: object):
+        base: dict[str, object] = {
+            "headers": None,
+            "cookies": None,
+            "params": None,
+            "proxy": None,
+            "timeout": 30,
+            "verify": True,
+            "automation_config": None,
+            "automation_script": None,
+        }
+        base.update(kwargs)
+        return adapter._build_plan("http://example.com", **base)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+
+    def test_no_script_means_no_script_timeout(self):
+        adapter = self._adapter()
+        try:
+            plain = adapter._budget_for(self._plan(adapter))  # pyright: ignore[reportPrivateUsage]
+            scripted = adapter._budget_for(  # pyright: ignore[reportPrivateUsage]
+                self._plan(adapter, automation_script="return 1")
+            )
+            assert scripted > plain, "带脚本才该加脚本超时"
+            assert scripted - plain == pytest.approx(adapter.browser_settings.script_timeout)
+        finally:
+            adapter.close()
+
+    def test_cold_start_allowance_only_before_the_browser_is_up(self, monkeypatch: pytest.MonkeyPatch):
+        from ipclick.adapters import browser_adapter as ba
+
+        adapter = self._adapter()
+        try:
+            cold = adapter._budget_for(self._plan(adapter))  # pyright: ignore[reportPrivateUsage]
+            monkeypatch.setattr(type(adapter._worker), "browser_started", property(lambda self: True))  # pyright: ignore[reportPrivateUsage]
+            warm = adapter._budget_for(self._plan(adapter))  # pyright: ignore[reportPrivateUsage]
+            assert cold - warm == pytest.approx(ba._COLD_START_ALLOWANCE)  # pyright: ignore[reportPrivateUsage]
+        finally:
+            adapter.close()
+
+    def test_explicit_wait_is_counted(self):
+        """调用方自己要求的等待也得算进预算，否则必然被自己的预算掐死。"""
+        adapter = self._adapter()
+        try:
+            plain = adapter._budget_for(self._plan(adapter))  # pyright: ignore[reportPrivateUsage]
+            waiting = adapter._budget_for(  # pyright: ignore[reportPrivateUsage]
+                self._plan(adapter, automation_config='{"wait_for_timeout": 5000}')
+            )
+            assert waiting - plain == pytest.approx(5.0)
+        finally:
+            adapter.close()
+
+    def test_wait_for_timeout_has_an_upper_bound(self):
+        """没有上界的话一个请求就能死占一个页面额度直到预算耗尽。"""
+        from ipclick.adapters import browser_adapter as ba
+
+        adapter = self._adapter()
+        try:
+            plan = self._plan(adapter, automation_config='{"wait_for_timeout": 999999999}')
+            assert plan.wait_for_timeout_ms == ba._MAX_WAIT_FOR_TIMEOUT_MS  # pyright: ignore[reportPrivateUsage]
+        finally:
+            adapter.close()
+
+    def test_wait_for_selector_gets_its_own_page_timeout(self):
+        """wait_for_selector 是导航之后的第二段等待，用的也是 page_timeout。
+
+        不给它留预算的话，选择器一直等不到的请求会先撞上外层预算，报成
+        "浏览器任务超过 N 秒未返回"——把排查方向从"选择器写错了"引到
+        "浏览器是不是卡了"。
+        """
+        adapter = self._adapter()
+        try:
+            plain = adapter._budget_for(self._plan(adapter))  # pyright: ignore[reportPrivateUsage]
+            with_selector = adapter._budget_for(  # pyright: ignore[reportPrivateUsage]
+                self._plan(adapter, automation_config='{"wait_for_selector": "#app"}')
+            )
+            assert with_selector - plain == pytest.approx(30.0), "该再留一份 page_timeout"
+        finally:
+            adapter.close()
+
+
+class TestAutomationConfigNumbers:
+    """automation_config 里的数值项写错要报参数错误，不能漏一个裸 ValueError 出去。"""
+
+    def _plan(self, config: str):
+        adapter = PlaywrightAdapter(browser_settings=_settings("playwright"))
+        try:
+            return adapter._build_plan(  # pyright: ignore[reportPrivateUsage]
+                "http://example.com",
+                headers=None,
+                cookies=None,
+                params=None,
+                proxy=None,
+                timeout=30,
+                verify=True,
+                automation_config=config,
+                automation_script=None,
+            )
+        finally:
+            adapter.close()
+
+    @pytest.mark.parametrize("bad", ['{"wait_for_timeout": "abc"}', '{"wait_for_timeout": [1]}'])
+    def test_non_numeric_is_a_validation_error(self, bad: str):
+        with pytest.raises(ValidationError, match="wait_for_timeout"):
+            _ = self._plan(bad)
+
+    def test_infinity_is_rejected(self):
+        """float("inf") 过得了 float()，但 int(inf) 会抛 OverflowError。"""
+        with pytest.raises(ValidationError, match="有限数字"):
+            _ = self._plan('{"wait_for_timeout": "inf"}')
+
+    @pytest.mark.parametrize(("raw", "expected"), [("null", 0), ('""', 0), ("-5", 0), ("1500.7", 1500)])
+    def test_accepted_values(self, raw: str, expected: int):
+        plan = self._plan(f'{{"wait_for_timeout": {raw}}}')
+        assert plan.wait_for_timeout_ms == expected
+
+
+class TestBrowserStartedMatchesEnsureBrowser:
+    """browser_started 的判据必须和 _ensure_browser 一致，都用 is_connected。
+
+    只看 `is not None` 的话，浏览器被 OOM killer 杀掉之后这里会说"已经起来了"，
+    于是不给冷启动余量；而 _ensure_browser 那边判定失联、正在重建——这次请求
+    要付完整的冷启动代价却只拿到热路径的预算，必然超时。
+    """
+
+    def test_a_dead_browser_does_not_count_as_started(self):
+        adapter = PlaywrightAdapter(browser_settings=_settings("playwright"))
+        try:
+            worker = adapter._worker  # pyright: ignore[reportPrivateUsage]
+            assert worker.browser_started is False
+
+            class _Dead:
+                @staticmethod
+                def is_connected() -> bool:
+                    return False
+
+            class _Alive:
+                @staticmethod
+                def is_connected() -> bool:
+                    return True
+
+            worker._browser = _Dead()  # pyright: ignore[reportPrivateUsage]
+            assert worker.browser_started is False, "失联的浏览器不算已启动"
+
+            worker._browser = _Alive()  # pyright: ignore[reportPrivateUsage]
+            assert worker.browser_started is True
+        finally:
+            adapter._worker._browser = None  # pyright: ignore[reportPrivateUsage]
+            adapter.close()

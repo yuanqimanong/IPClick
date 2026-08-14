@@ -26,7 +26,7 @@ class TestDownloadTaskValidation:
             DownloadTask(url=url)
 
     def test_multiple_body_types_rejected(self):
-        with pytest.raises(ValidationError, match="multiple body types"):
+        with pytest.raises(ValidationError, match="both data and json"):
             DownloadTask(url="http://a.com", data={"a": 1}, json={"b": 2})
 
     def test_negative_retries_rejected(self):
@@ -93,18 +93,27 @@ class TestToProtobuf:
             DownloadTask(url="http://a.com", proxy=True).to_protobuf()
 
     def test_adapter_accepts_string_name(self):
-        pb = DownloadTask(url="http://a.com", adapter="httpx").to_protobuf()
-        assert pb.adapter == IPClickAdapter.HTTPX.pb_value
+        pb = DownloadTask(url="http://a.com", adapter="niquests").to_protobuf()
+        assert pb.adapter == IPClickAdapter.NIQUESTS.pb_value
 
     def test_falsy_body_values_still_transmitted(self):
         """data=0 / json={} 是有意义的请求体，不能因为 falsy 就被丢掉。"""
-        assert DownloadTask(url="http://a.com", data=0).to_protobuf().data == "0"
+        # data 在 proto 里是 bytes（见 task.proto 里那段说明），所以这里是 b"0"
+        assert DownloadTask(url="http://a.com", data=0).to_protobuf().data == b"0"
         assert DownloadTask(url="http://a.com", json={}).to_protobuf().json == "{}"
+
+    def test_binary_body_survives_round_trip(self):
+        """回归：data 曾是 proto3 string，装二进制体会在 json.dumps 就抛错。"""
+        raw = bytes([0x1F, 0x8B, 0x08, 0x00, 0xFF, 0xFE])
+        assert DownloadTask(url="http://a.com", data=raw).to_protobuf().data == raw
+
+    def test_text_body_encoded_as_utf8(self):
+        assert DownloadTask(url="http://a.com", data="世界").to_protobuf().data == "世界".encode()
 
 
 class TestAdapterEnum:
     def test_from_str_is_case_insensitive(self):
-        assert IPClickAdapter.from_str("HTTPX") is IPClickAdapter.HTTPX
+        assert IPClickAdapter.from_str("NIQUESTS") is IPClickAdapter.NIQUESTS
 
     def test_unknown_name_raises_instead_of_silent_fallback(self):
         """回归：拼错适配器名以前会静默退回 curl_cffi。"""
@@ -145,12 +154,12 @@ class TestDownloadResponse:
         """回归：adapter_type 以前直接塞 protobuf 枚举整数。"""
         pb = task_pb2.TaskResp(
             request_uuid="u1",
-            adapter=IPClickAdapter.HTTPX.pb_value,
+            adapter=IPClickAdapter.NIQUESTS.pb_value,
             status_code=200,
             content=b'{"ok": true}',
         )
         resp = DownloadResponse.from_protobuf(pb)
-        assert resp.adapter_type == "httpx"
+        assert resp.adapter_type == "niquests"
         assert resp.json() == {"ok": True}
 
     def test_from_response_does_not_crash(self):
@@ -158,11 +167,11 @@ class TestDownloadResponse:
         resp = DownloadResponse.from_response(
             Response(url="http://a.com", status_code=200, content=b"hi"),
             request_uuid="u1",
-            adapter_type="httpx",
+            adapter_type="niquests",
         )
         assert resp.status_code == 200
         assert resp.text == "hi"
-        assert resp.adapter_type == "httpx"
+        assert resp.adapter_type == "niquests"
 
     def test_from_response_rejects_wrong_type(self):
         with pytest.raises(TypeError):

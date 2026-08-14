@@ -12,21 +12,24 @@ from ipclick.adapters.browser_engines import resolve_engine
 from ipclick.adapters.browser_settings import BrowserSettings
 from ipclick.auth import AUTH_TOKEN_ENV, TokenAuthInterceptor, load_tokens
 from ipclick.cluster.discovery import create_discovery
+from ipclick.cluster.forwarder import ForwardingTaskService, resolve_self_id
 from ipclick.cluster.node import ClusterConfig
 from ipclick.cluster.pool import NodePool
+from ipclick.cluster.tokens import cluster_secret, self_tokens
+from ipclick.compression import CompressionPolicy
 from ipclick.config_loader import load_config
 from ipclick.dto.proto import task_pb2_grpc
 from ipclick.exceptions import ConfigError
 from ipclick.factory import resolve_mode
 from ipclick.health import HealthReporter
 from ipclick.limiter import LimiterSettings
-from ipclick.metrics import get_metrics
 from ipclick.secrets import warn_secrets_in_config
 from ipclick.services import TaskService
 from ipclick.tls import TLSSettings, describe, server_credentials, warn_if_insecure
+from ipclick.trace import TraceRecorder, TraceSettings, init_recorder
 from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import LogUtil, log
-from ipclick.web import WebConfig, WebCredentials, WebServer, announce
+from ipclick.web import WebConfig, WebCredentials, WebPages, WebServer, announce
 
 
 class ServerConfig(TypedDict, total=False):
@@ -41,6 +44,7 @@ class IPClickServer:
     """
 
     def __init__(self, config_path: str | None = None, *, web: bool | None = None):
+        self._config_path: str | None = config_path
         self.config: Settings = load_config(config_path)
         # 按配置里的 [LOG] 节初始化日志（此前这一节完全没被读取过）；
         # [GENERAL].debug 为真时强制 DEBUG 级别
@@ -48,8 +52,18 @@ class IPClickServer:
             dict(self.config.get("LOG", {})),
             debug=bool(dict(self.config.get("GENERAL", {})).get("debug", False)),
         )
+        # 链路记录器必须在 TaskService 之前初始化：后者在构造时就取了单例，
+        # 晚一步的话所有埋点都会落到默认（纯内存）实例上，[TRACE] 配置形同虚设。
+        self.recorder: TraceRecorder = init_recorder(
+            TraceSettings.from_config(
+                dict(self.config.get("TRACE", {})),
+                node_id=str(dict(self.config.get("CLUSTER", {})).get("self_id", "") or ""),
+            )
+        )
         self.server: Server | None = None
         self.task_service: TaskService | None = None
+        #: [CLUSTER] 解析结果。start() 里会重新解析一次（那时才知道最终的监听地址）
+        self.cluster_config: ClusterConfig = ClusterConfig.from_config(dict(self.config.get("CLUSTER", {})))
         monitor_config = dict(self.config.get("MONITOR", {}))
         self.health: HealthReporter = HealthReporter(enabled=bool(monitor_config.get("health_check", True)))
         self._monitor_config: dict[str, object] = monitor_config
@@ -59,6 +73,7 @@ class IPClickServer:
         if web is not None:
             self.web_config.enabled = web
         self._web_server: WebServer | None = None
+        self._web_pages: WebPages | None = None
         self._listen_addr: str = ""
         #: Web 端手动摘除的节点。只在内存里，重启即复原。
         self._drained: set[str] = set()
@@ -72,10 +87,19 @@ class IPClickServer:
         if not self.web_config.enabled:
             return
         credentials = WebCredentials.resolve(self.web_config.as_credentials_config())
+        # 把 TaskService 交给页面层："试一试"要走的是真实的处理路径，
+        # 而不是另开一个只在页面上成立的分支。
+        self._web_pages = WebPages(
+            self.config,
+            self.recorder,
+            task_service=self.task_service,
+            config_path=self._config_path,
+        )
         self._web_server = WebServer(
             self._web_snapshot,
             credentials,
             action_handler=self._web_action,
+            pages=self._web_pages,
         )
         self._start_node_pool()
         url = self._web_server.start(self.web_config.host, self.web_config.port)
@@ -131,15 +155,22 @@ class IPClickServer:
         except Exception as e:
             mode = f"配置错误: {e}"
 
+        extras: dict[str, Any] = self._web_pages.dashboard_extras() if self._web_pages is not None else {}
         return {
             "server": {
                 "address": self._listen_addr,
                 "version": __version__,
                 "mode": mode,
+                "node_id": getattr(self.task_service, "node_id", self.recorder.node_id),
                 "max_workers": dict(self.config.get("SERVER", {})).get("max_workers", 10),
                 "default_adapter": DEFAULT_ADAPTER_NAME,
                 "adapters": sorted(ADAPTER_CLASSES),
+                "compression": CompressionPolicy(dict(self.config.get("CLIENT", {}))).describe(),
+                "config_path": extras.get("config_path", "—"),
             },
+            "trace": extras.get("trace") or self.recorder.stats(),
+            "recent": extras.get("recent") or self.recorder.recent(limit=12),
+            "engines": extras.get("engines") or [],
             "security": {
                 "tls": describe(TLSSettings.from_config(security)),
                 "auth": bool(load_tokens(security)),
@@ -149,14 +180,36 @@ class IPClickServer:
             "limits": {
                 "per_host_max_concurrent": limits.per_host_max_concurrent,
                 "per_host_qps": limits.per_host_qps,
-                "backend": str(dict(downloader_cfg.get("rate_limit") or {}).get("backend") or "memory"),
+                "wait_timeout": limits.wait_timeout,
             },
             "browser": {
                 "engine": engine,
                 "max_pages": browser.max_pages,
                 "allow_scripts": browser.allow_scripts,
             },
-            "cluster": {"nodes": self._cluster_nodes()},
+            "cluster": self._cluster_summary(),
+        }
+
+    def _cluster_summary(self) -> dict[str, Any]:
+        """集群展示数据。开了服务端转发时用转发器自己的快照——那才是真正在
+        路由的那份状态；否则只报配置里声明的节点及其可达性。
+        """
+        service = self.task_service
+        # 只有 ForwardingTaskService 有 snapshot()；用 isinstance 而不是 getattr
+        # 探测，这样类型检查器也能看懂返回值是什么。
+        if isinstance(service, ForwardingTaskService):
+            data: dict[str, Any] = service.snapshot()
+            nodes = cast(list[dict[str, Any]], data.get("nodes") or [])
+            for node in nodes:
+                node["drained"] = node.get("id") in self._drained
+                node["is_self"] = node.get("id") == service.self_id
+            return data
+        return {
+            "forward": False,
+            "strategy": self.cluster_config.strategy,
+            "self_id": getattr(service, "node_id", ""),
+            "internal_auth": bool(cluster_secret(dict(self.config.get("CLUSTER", {})))),
+            "nodes": self._cluster_nodes(),
         }
 
     def _cluster_nodes(self) -> list[dict[str, object]]:
@@ -210,8 +263,17 @@ class IPClickServer:
 
         # 鉴权：令牌来自环境变量 IPCLICK_AUTH_TOKEN 或 [SECURITY].auth_token
         security_config = dict(self.config.get("SECURITY", {}))
-        tokens = load_tokens(security_config)
+        cluster_section = dict(self.config.get("CLUSTER", {}))
+        self.cluster_config = ClusterConfig.from_config(cluster_section)
+        # 集群内部令牌：本节点接受由共享密钥派生出的、属于自己的那一个。
+        # 这样五台机器可以共用同一份配置 + 同一个 .env，各自算出的令牌却互不相同。
+        self_id = resolve_self_id(self.cluster_config, server_host, server_port)
+        self_node = self.cluster_config.node_by_id(self_id)
+        internal = self_tokens(self_id, self_node.token if self_node else "", cluster_secret(cluster_section))
+        tokens = tuple(dict.fromkeys((*load_tokens(security_config), *internal)))
         auth_interceptor = TokenAuthInterceptor(tokens)
+        if internal:
+            log.info(f"已接受集群内部令牌（节点 {self_id}）")
 
         # 传输层加密。证书读取与组合校验在这里就做掉——带着半套 TLS 配置起来，
         # 比起不来危险得多。
@@ -239,13 +301,29 @@ class IPClickServer:
                 ("grpc.max_receive_message_length", 500 * 1024 * 1024),
                 ("grpc.max_concurrent_streams", 100),
                 ("grpc.enable_http_proxy", 0),
+                # 关掉 SO_REUSEPORT。gRPC 默认开着它（为了多进程分片同一端口），
+                # 后果是端口撞了也能"启动成功"：两个进程都在监听，请求被内核
+                # 随机分给其中一个。症状是"配置改了一半生效"、"日志只看到一半
+                # 请求"，极难定位。本项目不提供多进程分片，所以宁可撞端口时
+                # 直接起不来。
+                ("grpc.so_reuseport", 0),
             ],
             compression=grpc.Compression.Gzip,
         )
 
         try:
-            # 创建任务服务
-            self.task_service = TaskService(self.config)
+            # 创建任务服务。开了服务端转发就换成会分发的那个子类——它只覆写
+            # Send，本地执行路径与单机完全一致。
+            if self.cluster_config.forwarding_enabled:
+                self.task_service = ForwardingTaskService(
+                    self.config,
+                    self.cluster_config,
+                    tls=tls_settings,
+                    server_host=server_host,
+                    server_port=server_port,
+                )
+            else:
+                self.task_service = TaskService(self.config)
 
             # 注册服务
             task_pb2_grpc.add_TaskServiceServicer_to_server(self.task_service, self.server)
@@ -261,10 +339,6 @@ class IPClickServer:
                 bound_port = self.server.add_insecure_port(listen_addr)
             if bound_port == 0:
                 raise RuntimeError(f"Failed to bind to address {listen_addr}")
-
-            # 指标端点走独立 HTTP 端口（Prometheus 生态惯例），在 gRPC 之前起，
-            # 这样即便业务端口起不来也能看到进程状态
-            self._start_metrics_server()
 
             # Web 管理端在 gRPC 之前起：起不来只是少个界面，不该让整个服务失败，
             # 但要让人看到那条错误。
@@ -301,14 +375,6 @@ class IPClickServer:
             log.exception(f"Failed to start server: {e}")
             self.stop()
             raise
-
-    def _start_metrics_server(self) -> None:
-        """按 [MONITOR] 配置启动 Prometheus 指标端点。"""
-        if not bool(self._monitor_config.get("metrics_enabled", False)):
-            return
-        port = int(self._monitor_config.get("metrics_port", 9528) or 9528)  # pyright: ignore[reportArgumentType]
-        host = str(self._monitor_config.get("metrics_host", "0.0.0.0") or "0.0.0.0")
-        get_metrics().start_http_server(port, host)
 
     def _setup_signal_handlers(self):
         """设置信号处理器"""
@@ -355,6 +421,9 @@ class IPClickServer:
         if self.task_service:
             self.task_service.cleanup()
             self.task_service = None
+
+        # 最后关：前面的清理动作本身也可能落链路记录
+        self.recorder.close()
 
         log.info("IPClick server stopped")
 

@@ -1,6 +1,6 @@
 """niquests 适配器专属测试。
 
-与 curl_cffi / httpx 的行为一致性由 ``test_adapters.py`` 的参数化用例覆盖，
+与 curl_cffi 的行为一致性由 ``test_adapters.py`` 的参数化用例覆盖，
 这里只测 niquests 特有的部分：可选依赖、Session 配置、真流式。
 """
 

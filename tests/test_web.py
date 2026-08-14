@@ -34,7 +34,7 @@ _SNAPSHOT: dict[str, Any] = {
         "mode": "standalone",
         "max_workers": 100,
         "default_adapter": "curl_cffi",
-        "adapters": ["curl_cffi", "httpx"],
+        "adapters": ["curl_cffi", "niquests"],
     },
     "security": {
         "tls": "未启用（明文）",
@@ -218,9 +218,20 @@ class TestTemplates:
         html = render_login()
         assert "http://" not in html and "https://" not in html
 
-    def test_dashboard_states_it_cannot_edit_config(self):
-        """这条声明是给运维看的边界，必须在页面上。"""
-        assert "不能修改配置" in render_dashboard(_SNAPSHOT, "admin", "t", True)
+    def test_dashboard_states_the_secret_boundary(self):
+        """边界声明必须在页面上。
+
+        0.3 起配置**可以**从网页改（会写回 toml），但机密仍然一律不显示、
+        不接受写入——页面上要把这条边界说清楚，否则没人知道该去哪儿改令牌。
+        """
+        html = render_dashboard(_SNAPSHOT, "admin", "t", True)
+        assert "机密" in html
+        assert ".env" in html
+
+    def test_dashboard_has_nav_to_every_page(self):
+        html = render_dashboard(_SNAPSHOT, "admin", "t", True)
+        for path in ("/trace", "/test", "/config", "/nodes"):
+            assert f'href="{path}"' in html
 
 
 class TestWebConfig:

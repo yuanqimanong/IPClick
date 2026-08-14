@@ -5,7 +5,7 @@ import unicodedata
 import click
 
 from ipclick import __version__
-from ipclick.adapters.browser_engines import is_available, resolve_engine
+from ipclick.adapters.browser_engines import engine_status, resolve_engine
 from ipclick.adapters.browser_settings import BrowserSettings
 from ipclick.auth import load_tokens
 from ipclick.config_loader import load_config
@@ -16,6 +16,7 @@ from ipclick.limiter import LimiterSettings
 from ipclick.secrets import SECRETS, describe_source
 from ipclick.server import serve
 from ipclick.tls import TLSSettings, describe
+from ipclick.trace import TraceSettings
 from ipclick.utils.log_util import LogUtil
 from ipclick.web.auth import generate_password
 
@@ -102,6 +103,10 @@ def init(force: bool, target_dir: Path):
 
     click.echo("")
     click.echo("下一步：把令牌等机密填进 .env，行为配置改 ipclick.toml，然后 ipclick run")
+    click.echo("")
+    click.echo("组集群时：在**一台**机器上生成共享密钥，再原样复制到其余机器的 .env——")
+    click.echo(f"  IPCLICK_CLUSTER_SECRET={generate_password()}")
+    click.echo("（刻意不自动写进 .env：每台机器各自生成一个就对不上了）")
 
 
 @main.command()
@@ -200,14 +205,12 @@ def config_info(config: Path | None):
 
         # --- 限流 ---
         limits = LimiterSettings.from_config(downloader_cfg)
-        rate_cfg = dict(downloader_cfg.get("rate_limit") or {})
-        backend = str(rate_cfg.get("backend") or "memory")
         click.echo("")
         click.echo("Per-host limits:")
         if limits.enabled:
             click.echo(f"  并发上限:     {limits.per_host_max_concurrent or '不限'}")
             click.echo(f"  QPS 上限:     {limits.per_host_qps or '不限'}")
-            click.echo(f"  后端:         {backend}{'（每进程各算各的）' if backend != 'redis' else '（集群共享）'}")
+            click.echo(f"  等待超时:     {limits.wait_timeout}s")
         else:
             click.echo("  未启用")
 
@@ -218,10 +221,13 @@ def config_info(config: Path | None):
         if browser.enabled:
             try:
                 engine = resolve_engine(browser.engine)
-                ready = "可用" if is_available(engine) else "依赖未安装"
+                status = engine_status(engine, browser)
+                click.echo(f"  引擎:         {engine}（配置为 {browser.engine}）— {status.label}")
+                # 浏览器本体单独一行：只装 Python 包不下本体是最常见的半成品状态，
+                # 而 camoufox 在那种状态下第一次用会当场下 1.3 GB
+                click.echo(f"  浏览器本体:   {status.detail or '—'}")
             except Exception as e:  # 引擎名配错
-                engine, ready = browser.engine, f"配置错误: {e}"
-            click.echo(f"  引擎:         {engine}（配置为 {browser.engine}）— {ready}")
+                click.echo(f"  引擎:         {browser.engine} — 配置错误: {e}")
             click.echo(f"  页面上限:     {browser.max_pages}")
             click.echo(f"  允许页内 JS:  {browser.allow_scripts}")
         else:
@@ -244,13 +250,19 @@ def config_info(config: Path | None):
         if proxy.get("auth_key"):
             click.echo("  代理鉴权:     已配置（已隐藏）")
 
-        # --- 监控 ---
+        # --- 监控与链路 ---
         click.echo("")
         click.echo("Monitoring:")
         click.echo(f"  健康检查:     {monitor.get('health_check', True)}")
-        metrics_on = monitor.get("metrics_enabled", False)
-        endpoint = f"{monitor.get('metrics_host', '0.0.0.0')}:{monitor.get('metrics_port', 9528)}"
-        click.echo(f"  Prometheus:   {endpoint if metrics_on else '未启用'}")
+        trace = TraceSettings.from_config(dict(cfg.get("TRACE", {})))
+        click.echo(f"  链路内存缓冲: {f'最近 {trace.memory_size} 条' if trace.memory_size else '已关闭'}")
+        if trace.sqlite_enabled:
+            retention = f"保留 {trace.retention_days} 天" if trace.retention_days else "永久保留"
+            click.echo(f"  链路落盘:     {trace.sqlite_path}（{retention}）")
+        else:
+            click.echo("  链路落盘:     未启用（[TRACE].sqlite_enabled = false）")
+        if trace.only_errors:
+            click.echo("  记录范围:     仅失败请求")
 
     except click.Abort:
         raise

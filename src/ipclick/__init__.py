@@ -6,6 +6,7 @@ from ipclick.dto.models import (
     HttpMethod,
     IPClickAdapter,
     ProxyConfig,
+    ResponseTrace,
 )
 from ipclick.dto.response import Response
 from ipclick.exceptions import (
@@ -28,7 +29,7 @@ try:
     __version__ = importlib.metadata.version("ipclick")
     __author__ = importlib.metadata.metadata("ipclick")["Author"]
 except importlib.metadata.PackageNotFoundError:  # pragma: no cover - 仅在未安装时走到
-    __version__ = "0.2.3"
+    __version__ = "0.3.0"
     __author__ = "元气码农少女酱"
 
 
@@ -42,6 +43,7 @@ __all__ = [  # noqa: RUF022 - 按用途分组比字母序更易读
     # 数据模型
     "DownloadTask",
     "DownloadResponse",
+    "ResponseTrace",
     "Response",
     "HttpMethod",
     "IPClickAdapter",

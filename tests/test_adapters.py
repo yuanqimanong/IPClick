@@ -10,7 +10,6 @@ import time
 import pytest
 
 from ipclick.adapters.curl_cffi_adapter import CURL_CFFI_AVAILABLE, CurlCffiAdapter
-from ipclick.adapters.httpx_adapter import HTTPX_AVAILABLE, HttpxAdapter
 from ipclick.adapters.niquests_adapter import NIQUESTS_AVAILABLE, NiquestsAdapter
 from ipclick.exceptions import ValidationError
 
@@ -70,7 +69,7 @@ def http_server() -> Iterator[str]:
 
 
 def _pool_of(adapter: object) -> dict:
-    """取适配器的连接池字典（curl_cffi 叫 _sessions，httpx 叫 _clients）。
+    """取适配器的连接池字典（curl_cffi 叫 _sessions，niquests 叫 _sessions）。
 
     注意不能写成 ``_sessions or _clients``——池为空时是 falsy，会误取到另一个。
     """
@@ -80,7 +79,6 @@ def _pool_of(adapter: object) -> dict:
 
 _ADAPTERS = {
     "curl_cffi": (CURL_CFFI_AVAILABLE, CurlCffiAdapter),
-    "httpx": (HTTPX_AVAILABLE, HttpxAdapter),
     "niquests": (NIQUESTS_AVAILABLE, NiquestsAdapter),
 }
 
@@ -98,7 +96,9 @@ def adapter(request: pytest.FixtureRequest) -> Iterator[object]:
 
 
 class TestAdapterBehaviour:
-    """所有适配器必须表现一致——过去 httpx 会静默丢掉一堆参数。"""
+    """所有适配器必须表现一致——历史上 httpx 适配器会静默丢掉一堆参数
+    （json 体、allow_redirects），这组参数化用例就是为了让这种事再也发生不了。
+    httpx 适配器已在 0.3.0 移除，但这些一致性断言对留下的适配器同样有效。"""
 
     def test_basic_get(self, adapter, http_server: str):
         resp = adapter.download(f"{http_server}/hello", method="GET", kwargs="{}")
@@ -106,7 +106,7 @@ class TestAdapterBehaviour:
         assert resp.json()["method"] == "GET"
 
     def test_json_body_is_sent(self, adapter, http_server: str):
-        """回归：httpx 适配器完全忽略 json 参数，请求体直接丢失。"""
+        """回归：曾有适配器完全忽略 json 参数，请求体直接丢失。"""
         resp = adapter.download(f"{http_server}/x", method="POST", json={"ping": "pong"}, kwargs="{}")
         assert json.loads(resp.json()["body"]) == {"ping": "pong"}
 
@@ -132,7 +132,7 @@ class TestAdapterBehaviour:
         assert resp.json()["path"] == "/landed"
 
     def test_allow_redirects_false_stops(self, adapter, http_server: str):
-        """回归：httpx 适配器忽略 allow_redirects，永远跟随重定向。"""
+        """回归：曾有适配器忽略 allow_redirects，永远跟随重定向。"""
         resp = adapter.download(f"{http_server}/redirect", method="GET", allow_redirects=False, kwargs="{}")
         assert resp.status_code == 302
 
@@ -186,22 +186,13 @@ class TestAdapterBehaviour:
         assert len(b.content) > 0
 
     def test_user_agent_fallback_without_generator(self, adapter, http_server: str):
-        """回归：httpx 适配器 fallback 到不存在的 self.user_agent，必 AttributeError。"""
+        """回归：曾有适配器 fallback 到不存在的 self.user_agent，必 AttributeError。"""
         adapter.ua_generator = None
         assert adapter._get_user_agent()
 
 
 class TestProxyParameter:
-    """回归：httpx 0.28 移除了 proxies= 参数，旧代码一走代理就 TypeError。"""
-
-    @pytest.mark.skipif(not HTTPX_AVAILABLE, reason="httpx 未安装")
-    def test_httpx_client_accepts_proxy(self):
-        adapter = HttpxAdapter()
-        try:
-            client = adapter._get_client("http://127.0.0.1:9", verify=True)
-            assert client is not None
-        finally:
-            adapter.close()
+    """代理参数要真能传到底层客户端上。"""
 
     @pytest.mark.skipif(not CURL_CFFI_AVAILABLE, reason="curl_cffi 未安装")
     def test_curl_cffi_session_accepts_proxy(self):
@@ -264,28 +255,6 @@ class TestProxyParameter:
             assert adapter._get_session(None, True, "chrome") is not None
             assert adapter._get_session("http://127.0.0.1:9", True, "chrome") is not None
             assert len(adapter._sessions) == 2
-        finally:
-            adapter.close()
-
-    @pytest.mark.skipif(not HTTPX_AVAILABLE, reason="httpx 未安装")
-    def test_httpx_does_not_trust_env_by_default(self):
-        """回归：httpx trust_env 默认 True 会捡起环境里的 ALL_PROXY，
-        本机若配了 socks5 还会直接 ImportError。"""
-        adapter = HttpxAdapter()
-        try:
-            assert adapter.trust_env is False
-            client = adapter._get_client(None, verify=True)
-            assert client.trust_env is False
-        finally:
-            adapter.close()
-
-    @pytest.mark.skipif(not HTTPX_AVAILABLE, reason="httpx 未安装")
-    def test_separate_clients_per_proxy(self):
-        adapter = HttpxAdapter()
-        try:
-            adapter._get_client(None, True)
-            adapter._get_client("http://127.0.0.1:9", True)
-            assert len(adapter._clients) == 2
         finally:
             adapter.close()
 

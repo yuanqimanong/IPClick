@@ -34,7 +34,7 @@ import time
 from typing import Any, final
 from urllib.parse import urlsplit
 
-from ipclick.exceptions import IPClickError
+from ipclick.exceptions import ConfigError, IPClickError
 from ipclick.utils.log_util import log
 
 
@@ -296,4 +296,25 @@ class HostLimiter:
             }
 
 
-__all__ = ["HostLimitTimeout", "HostLimiter", "LimiterSettings", "host_of"]
+def build_limiter(downloader_config: dict[str, Any] | None) -> HostLimiter:
+    """按 ``[DOWNLOADER]`` 配置造出限流器。
+
+    这里曾经支持 ``backend = redis``（用 Lua 脚本做跨节点共享额度）。集群改成
+    "主节点转发"之后不再需要中间件：所有任务都从入口节点进来，额度在那一台上
+    算就是全局的，多引入一个 Redis 只是多一个会挂的部件。
+
+    显式写了 ``backend`` 且不是内存后端时直接报错——静默降级的话，以为开了
+    共享限额、实际每个节点各算各的，问题要到把对方站点打挂才会暴露。
+    """
+    config = dict(downloader_config or {})
+    rate = dict(config.get("rate_limit") or {})
+    backend = str(rate.get("backend") or "memory").strip().lower()
+    if backend not in ("", "memory", "local"):
+        raise ConfigError(
+            f"未知的限流后端 {backend!r}。0.3 起只支持 memory——"
+            f"集群限流由入口节点统一计算，不再需要 Redis。请删掉 [DOWNLOADER.rate_limit].backend"
+        )
+    return HostLimiter(LimiterSettings.from_config(config))
+
+
+__all__ = ["HostLimitTimeout", "HostLimiter", "LimiterSettings", "build_limiter", "host_of"]

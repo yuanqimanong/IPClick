@@ -12,6 +12,7 @@ import pytest
 from ipclick.secrets import (
     SECRETS,
     SUPPRESS_KEY,
+    SecretSpec,
     audit,
     describe_source,
     env_template,
@@ -76,9 +77,14 @@ class TestResolve:
         assert resolve(config, _spec("IPCLICK_AUTH_TOKEN"))[0] == "from-env"
 
     def test_nested_section(self):
-        """redis_url 在子表 [DOWNLOADER.rate_limit] 里，取值要能钻进去。"""
-        config = Settings({"DOWNLOADER": {"rate_limit": {"redis_url": "redis://x"}}})
-        assert resolve(config, _spec("IPCLICK_REDIS_URL")) == ("redis://x", "config")
+        """section 支持 "A.b" 形式的子表，取值要能钻进去。"""
+        spec = SecretSpec("IPCLICK_X", "DOWNLOADER.rate_limit", "secret_thing", "测试项")
+        config = Settings({"DOWNLOADER": {"rate_limit": {"secret_thing": "v"}}})
+        assert resolve(config, spec) == ("v", "config")
+
+    def test_cluster_secret_from_config(self):
+        config = Settings({"CLUSTER": {"secret": "s3cret"}})
+        assert resolve(config, _spec("IPCLICK_CLUSTER_SECRET")) == ("s3cret", "config")
 
     def test_blank_config_value_is_unset(self):
         config = Settings({"SECURITY": {"auth_token": "   "}})
@@ -120,15 +126,9 @@ class TestWarning:
             logger.remove(sink)
         assert any("IPCLICK_AUTH_TOKEN" in m for m in messages)
 
-    def test_plain_redis_url_is_not_flagged(self):
-        """默认那个不含凭据的本地地址写在配置里没问题——
-        误报会让人对真正的告警脱敏。"""
-        config = Settings({"DOWNLOADER": {"rate_limit": {"redis_url": "redis://127.0.0.1:6379/0"}}})
-        assert warn_secrets_in_config(config) == []
-
-    def test_redis_url_with_credentials_is_flagged(self):
-        config = Settings({"DOWNLOADER": {"rate_limit": {"redis_url": "redis://user:pw@host:6379/0"}}})
-        assert [s.env for s in warn_secrets_in_config(config)] == ["IPCLICK_REDIS_URL"]
+    def test_cluster_secret_in_config_is_flagged(self):
+        config = Settings({"CLUSTER": {"secret": "shared"}})
+        assert [s.env for s in warn_secrets_in_config(config)] == ["IPCLICK_CLUSTER_SECRET"]
 
 
 class TestDescribeSource:
@@ -139,10 +139,6 @@ class TestDescribeSource:
     def test_config_is_marked(self):
         config = Settings({"SECURITY": {"auth_token": "t"}})
         assert "⚠️" in describe_source(config, _spec("IPCLICK_AUTH_TOKEN"))
-
-    def test_plain_redis_url_not_marked(self):
-        config = Settings({"DOWNLOADER": {"rate_limit": {"redis_url": "redis://127.0.0.1:6379/0"}}})
-        assert "⚠️" not in describe_source(config, _spec("IPCLICK_REDIS_URL"))
 
     def test_unset(self):
         assert describe_source(Settings({}), _spec("IPCLICK_WEB_PASSWORD")) == "未配置"

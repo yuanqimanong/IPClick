@@ -161,6 +161,31 @@ def ensure_configured(func: F) -> F:
     return cast(F, wrapper)
 
 
+def _validate_format(value: object) -> str | None:
+    """校验 ``[LOG].format``。返回 None 表示用内置格式。
+
+    底层是 loguru，占位符写法是 ``{time}`` / ``{level}`` / ``{message}``，
+    不是标准库 logging 的 ``%(asctime)s``。这两种写错了症状完全不同：
+    loguru 会把 ``%(asctime)s`` 当普通文本原样打出来，于是每行日志都变成
+    一串字面量而看不到时间——所以这里显式识别并拒绝，而不是默默照用。
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if "%(" in text:
+        logger.warning(
+            "[LOG].format 用的是标准库 logging 的 %(...)s 写法，本项目底层是 loguru，"
+            "占位符应写成 {time}/{level}/{message}。已忽略该配置，改用内置格式"
+        )
+        return None
+    if "{message}" not in text:
+        logger.warning("[LOG].format 里没有 {message}，日志正文会丢失。已忽略该配置，改用内置格式")
+        return None
+    return text
+
+
 class LogUtil:
     """日志工具类
 
@@ -340,6 +365,7 @@ class LogUtil:
         cls.init(
             level="DEBUG" if debug else str(config.get("level", "INFO")),
             logger_name=logger_name,
+            format=_validate_format(config.get("format")),
             log_file=None if output in ("stdout", "stderr", "") else output,
             rotation=f"{max_size} MB",
             # max_backups 是"保留几个历史文件"，loguru 的 retention 传 int 正是此意

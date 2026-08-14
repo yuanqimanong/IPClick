@@ -155,3 +155,51 @@ class TestParseExtraKwargs:
 
     def test_valid_kwargs_parsed(self):
         assert DownloaderAdapter.parse_extra_kwargs('{"a": 1}') == {"a": 1}
+
+
+class TestAdapterErrorIsNotRetried:
+    """AdapterError = "本服务端做不到"，重试改变不了任何一条。
+
+    代价特别大：浏览器请求一次的预算就是几十上百秒，被重试 3 次变成四倍。
+    实测一次「试一试」点击因此挂了 296 秒。
+    """
+
+    def test_adapter_error_propagates_immediately(self):
+        from ipclick.adapters.base import retry
+        from ipclick.exceptions import AdapterError
+
+        calls: list[int] = []
+
+        class Boom:
+            adapter_name = "fake"
+            max_retries = 3
+            retry_delay = 0.01
+
+            @retry()
+            def download(self, url: str, **kwargs: object) -> Response:
+                calls.append(1)
+                raise AdapterError("浏览器任务超过 150 秒未返回")
+
+        with pytest.raises(AdapterError):
+            _ = Boom().download("http://example.com")
+        assert calls == [1], f"只该尝试一次，实际 {len(calls)} 次"
+
+    def test_transient_errors_are_still_retried(self):
+        """别把重试整个关掉了——真的网络抖动仍然要重试。"""
+        from ipclick.adapters.base import retry
+
+        calls: list[int] = []
+
+        class Flaky:
+            adapter_name = "fake"
+            max_retries = 2
+            retry_delay = 0.01
+
+            @retry()
+            def download(self, url: str, **kwargs: object) -> Response:
+                calls.append(1)
+                raise ConnectionError("connection reset")
+
+        resp = Flaky().download("http://example.com")
+        assert resp.status_code == -1
+        assert len(calls) == 3, f"应该尝试 1+2 次，实际 {len(calls)} 次"

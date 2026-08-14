@@ -23,6 +23,18 @@ rpc_retry_backoff = 0.5
 # DEADLINE_EXCEEDED 刻意不重试——请求可能已经在服务端执行了，只是回复没赶上，
 # 这时重发一个 POST 就是重复下单。
 
+# 请求压缩（gRPC 消息级 gzip，服务端透明解压，无需协议改动）。
+#   auto  够大且看起来可压缩才压（默认）
+#   gzip  一律压。链路带宽紧、CPU 富余时用
+#   none  一律不压。同机通信、或链路上已有压缩时用
+# 主要收益在自动化脚本上：automation_script 传的是整个脚本文件，
+# 实测 8158 字节压到 350 字节。批量发几百个带脚本的请求时差出一个数量级。
+compression = "auto"
+# auto 的体积门槛（字节）。一个普通 GET 请求约 200~400 字节，压它省不下什么。
+# 另外：请求体主要是已压缩的二进制（图片、gzip 包）时会自动跳过——
+# 再压一遍只会变大还费 CPU。
+compression_threshold = 1024
+
 # ------- 代理配置 [PROXY] -------
 # 供 downloader.get(url, proxy=True) 使用。默认留空表示"未配置代理"，
 # 此时 proxy=True 会打一条警告并直连——不要在这里预置某台机器的本地代理地址，
@@ -40,9 +52,39 @@ country_code = ''
 tunnel_server = ''
 
 # ------- 集群配置 [CLUSTER] -------
-# 供 ipclick.cluster.ClusterDownloader 使用：把请求分发到多个 IPClick 服务端。
-# nodes 为空即视为未启用集群，此时用单节点的 Downloader。
+# 有两种集群形态，用 forward 选：
+#
+#   forward = "off"（默认）客户端分发。调用方（ClusterDownloader）自己持有全部
+#     节点地址，直连每一台。少一跳、不占入口带宽，前提是调用方能连到所有节点。
+#
+#   forward = "on"  服务端转发。调用方只需要知道一个地址，比如 A。A 按策略挑节点：
+#     挑到自己就本地干，挑到别人就把请求原样转过去，拿到结果再回给调用方。
+#     不需要 Redis 之类的中间件——任务从哪进来，分发和限流就在那一台算。
+#
+# 服务端转发的三条性质，配之前值得知道：
+#   1. 只转一跳。转发时带 ipclick-forwarded 标记，收到带标记的请求一律本地执行，
+#      所以环路在协议层就不可能出现。
+#   2. 任意节点都能当入口。五台机器可以用**完全相同**的这份配置 + 相同的 .env，
+#      谁被访问谁就是入口；平时只把流量打给 A，A 挂了直接改指向 B 即可。
+#   3. 入口自己也干活（只要它在下面的 nodes 里）。子节点全挂时入口会自己兜底，
+#      而不是让请求失败。
+#   4. 流式下载（stream=True）不转发，永远由收到请求的节点自己执行——把每个分片
+#      再中转一次会让入口带宽翻倍。要让子节点出流量就用客户端分发模式直连它。
 [CLUSTER]
+forward = "off"
+# 本节点在下面 nodes 列表里的 id。留空则按 [SERVER] 的监听端口 + 本机地址自动识别；
+# 识别不出来会打警告，且本节点只转发不执行任务。
+# 多台机器共用一份配置时，用环境变量区分更省事：IPCLICK_CLUSTER_SELF_ID
+self_id = ""
+# 转发一次请求的超时（秒）。0 = 按任务自身的 timeout × (重试次数+1) + 15s 余量推算。
+forward_timeout = 0
+# 集群内部鉴权：所有节点放同一个共享密钥，每个节点的令牌由它派生：
+#     token = HMAC-SHA256(secret, "ipclick-node:" + node_id)
+# 于是每台机器的令牌**各不相同**（拿到 B 的令牌不能调 C），但谁都不用抄谁的令牌，
+# 加机器也不用发新凭据。密钥是机密，请放 .env：IPCLICK_CLUSTER_SECRET
+# 也可以在某个 nodes 条目里写 token = "..." 单独指定，那会覆盖派生值。
+# secret = ""   # ← 别写在这里，写了启动时会告警
+
 # 负载均衡策略：round_robin / random / weight
 load_balancer = "round_robin"
 # 连续探测失败多少次才摘除节点（避免一次抖动就让流量反复横跳）
@@ -55,8 +97,12 @@ probe_timeout = 3
 # 一次请求最多换几个节点重试
 max_failover = 2
 # 节点列表。address 必填，其余可选。
+# forward = "on" 时这份列表就是集群全貌，包括本机自己——本机也要列进来才会分到活。
 nodes = [
     # { id = "node-101", address = "192.168.1.101:9527", region = "us-east-1", zone = "1a", weight = 100 },
+    # { id = "node-102", address = "192.168.1.102:9527" },
+    # 这台的令牌不由共享密钥管（比如是别人维护的节点）：
+    # { id = "node-103", address = "192.168.1.103:9527", token = "..." },
 ]
 
 # ------- 节点发现 [CLUSTER.discovery] -------
@@ -175,24 +221,15 @@ max_tracked_hosts = 10000
 per_host_qps = 0
 # 突发额度（桶容量）。0 = 取 ceil(per_host_qps)，即最多攒够一秒的量。
 per_host_burst = 0
-# 限额算在哪儿：
-#   memory 每个服务端进程各算各的（默认）。集群里 N 个节点 = N 倍实际并发。
-#   redis  整个集群共用一份额度。需要 pip install "ipclick[redis]"
-backend = "memory"
-# 带账号密码的连接串请改用环境变量 IPCLICK_REDIS_URL —— 那是机密
-redis_url = "redis://127.0.0.1:6379/0"
-# 持有者多久算陈旧（秒）。进程拿着名额崩了，靠这个超时把名额收回来。
-# ⚠️ 必须大于最长的单次请求，否则慢请求的名额会被别人抢走，短暂超出上限。
-redis_slot_ttl = 600
-redis_socket_timeout = 3
-redis_key_prefix = "ipclick:limit"
+# 限额只在本进程内计算。集群模式下任务统一从入口节点进来，在那一台上算就是
+# 全局的，所以不需要 Redis 之类的中间件（0.3 起已移除 redis 后端）。
 
 # 说明：分块下载（chunk）、临时存储（storage）尚未实现，已从默认配置移除，
 # 避免"配了却不生效"。
 
 # ------- 浏览器渲染配置 [BROWSER] -------
-# 供 playwright 适配器使用（adapter = "playwright"）。
-# 需要额外安装：pip install "ipclick[browser]"，再 playwright install chromium
+# 供浏览器渲染适配器使用（adapter = "browser" 或点名某个引擎）。
+# 引擎按需单独安装，见下面 engine 的说明；每个引擎还要各自准备浏览器本体
 # （或把 executable_path 指向系统已有的浏览器，省掉那 150MB 下载）。
 [BROWSER]
 # 总开关。关掉后即使装了引擎，请求浏览器适配器也会被拒绝——
@@ -201,13 +238,20 @@ enabled = true
 
 # 渲染引擎。客户端请求 adapter = "browser"（通用）时用这里的设置决定引擎；
 # 客户端也可以直接点名 camoufox / patchright / playwright / DrissionPage。
+#
+# ⚠️ 每个引擎都是**两步**安装：pip 装 Python 包，再单独准备浏览器本体。
+#    只做第一步的话 ipclick config-info 会显示"包已装，浏览器本体未就绪"，
+#    请求会直接报 FAILED_PRECONDITION 并告诉你该跑哪条命令——
+#    刻意不让它在请求里自己去下载（camoufox 的本体约 1 GB，
+#    那会让第一个请求卡几分钟然后超时，而下载还在后台继续）。
 #   auto         按平台选：Windows -> drissionpage，Linux/macOS -> camoufox
 #   camoufox     Firefox 内核，反检测最彻底，自带指纹伪装
 #                pip install "ipclick[camoufox]" && python -m camoufox fetch
+#                （fetch 下的是它自己那份 Firefox，约 1 GB，装在 ~/.cache/camoufox）
 #   patchright   Playwright 的反检测分支，API 完全兼容
 #                pip install "ipclick[patchright]" && patchright install chromium
 #   playwright   原版，最稳、行为最可预期，无反检测处理
-#                pip install "ipclick[browser]" && playwright install chromium
+#                pip install "ipclick[playwright]" && playwright install chromium
 #   drissionpage CDP 直连本机 Chrome，不额外下浏览器；Windows 上最省事
 #                pip install "ipclick[drissionpage]"
 engine = "auto"
@@ -239,7 +283,11 @@ block_resources = ["image", "media", "font"]
 #    内存紧张的机器（≤4GB）用 camoufox 时建议设成 1~2，否则会开始换页——请求
 #    从几秒变成几分钟，看起来像卡死。
 max_pages = 4
-# 是否允许请求携带 automation_script（在页面里执行任意 JS）。
+# 是否允许请求携带 automation_script。
+# automation_script 是**在页面里执行的 JavaScript**（不是 Python）：
+#     automation_script = "return document.querySelector('#price').innerText"
+# 返回值经 x-ipclick-script-result 响应头带回。脚本写错（SyntaxError / ReferenceError）
+# 会被判为参数错误直接报 INVALID_ARGUMENT，不重试。
 # ⚠️ 默认关闭。页面内的 JS 会自己发请求，[SECURITY] 那套 URL 策略（禁云元数据、
 # 禁内网）对它完全不起作用——放开它等于把 SSRF 防线让开一整条。
 # 只有在确认调用方全部可信时才打开。
@@ -286,21 +334,39 @@ host = "127.0.0.1"
 # 关闭后探活会收到 UNIMPLEMENTED。
 health_check = true
 
-# Prometheus 指标端点。需要可选依赖：pip install "ipclick[metrics]"
-# 默认关闭：指标端点通常比业务端口设防更少，应由部署方显式决定是否开、开在哪。
-metrics_enabled = false
-metrics_port = 9528
-# 容器内 Prometheus 从外部抓取，所以默认监听所有网卡；
-# 若只允许本机抓取（如通过 sidecar），改成 127.0.0.1
-metrics_host = "0.0.0.0"
+
+# ================ 链路记录 [TRACE] ================
+# 每个请求处理完记一条：谁处理的、用了哪个适配器、状态码、耗时、重试几次。
+# 刻意不记请求头 / cookie / 请求体 / 代理串——那些含机密，而这些记录是要在
+# Web 端展示的。要看完整请求内容请把 [LOG].level 调成 debug。
+[TRACE]
+# 内存里保留最近多少条。始终开启、零磁盘、上限固定，进程重启即丢。
+# Web 端在不开落盘时就是看这个。0 = 关掉内存缓冲。
+memory_size = 500
+
+# 落盘到 SQLite。开了之后 Web 端才能查历史记录和跨天统计。
+# 默认关：多数人只需要"刚才发生了什么"，不该默认在工作目录里造一个数据库文件。
+sqlite_enabled = false
+# 数据库路径（相对当前工作目录）。会额外生成 -wal / -shm 两个同名文件。
+sqlite_path = "ipclick-trace.db"
+# 保留天数，超期的每小时清理一次。0 = 永久保留（不推荐，库会一直长）。
+retention_days = 30
+# 只记失败的请求。成功量极大又只关心异常时打开，能把库缩小一两个数量级。
+only_errors = false
+# 写队列容量。写盘跟不上时超出的记录会被丢弃并计数（绝不反压业务请求）。
+queue_size = 5000
+# 是否记录完整 URL。关掉后只记 host——不想把抓取目标落盘时用。
+record_url = true
 
 
 # ================ 日志配置 [LOG] ================
 [LOG]
 # 日志级别 (debug/info/warn/error)
 level = "info"
-# 日志格式
-format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+# 日志格式。底层是 loguru，占位符是 {time}/{level}/{message} 这种花括号写法，
+# 不是标准库 logging 的 %(asctime)s。留空则用内置格式（带颜色、含文件行号）。
+# 例：format = "[{time:YYYY-MM-DD HH:mm:ss}] {level: <8} | {message}"
+format = ""
 # 日志输出位置 (stdout 或文件路径)
 output = "stdout"
 # 日志轮转配置 (当 output 为文件时生效)

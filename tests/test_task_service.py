@@ -126,7 +126,7 @@ class TestAdapterCache:
 
         service.cleanup()
         assert "curl_cffi" in ADAPTER_CLASSES
-        assert "httpx" in ADAPTER_CLASSES
+        assert "niquests" in ADAPTER_CLASSES
 
 
 class TestErrorHandling:
@@ -175,7 +175,11 @@ class TestErrorHandling:
 
 class TestResponseBuilding:
     def test_proxy_credentials_not_echoed_back(self, service: TaskService):
-        """回归：original_request 被整个塞回响应，代理账号密码随之泄漏。"""
+        """回归：original_request 被整个塞回响应，代理账号密码随之泄漏。
+
+        该字段已从协议中移除（编号 3 保留不复用），改由 trace 承载链路信息——
+        所以这里连字段名都不该再存在。
+        """
         request = task_pb2.ReqTask(
             url="http://example.com",
             uuid="u1",
@@ -183,7 +187,15 @@ class TestResponseBuilding:
         )
         response = service.Send(request, FakeContext())
         assert "secret" not in str(response)
-        assert not response.HasField("original_request")
+        assert "original_request" not in {f.name for f in response.DESCRIPTOR.fields}
+
+    def test_trace_reports_executing_node_and_adapter(self, service: TaskService):
+        response = service.Send(task_pb2.ReqTask(url="http://example.com", uuid="u1"), FakeContext())
+        assert response.HasField("trace")
+        assert response.trace.node_id
+        assert response.trace.adapter == _adapter_of(service).adapter_name
+        assert response.trace.attempts >= 1
+        assert response.trace.forwarded is False
 
     def test_response_carries_headers_and_body(self, service: TaskService):
         response = service.Send(task_pb2.ReqTask(url="http://example.com", uuid="u1"), FakeContext())
@@ -193,9 +205,15 @@ class TestResponseBuilding:
         assert response.request_uuid == "u1"
 
     def test_non_json_body_passed_through_as_string(self, service: TaskService):
-        request = task_pb2.ReqTask(url="http://example.com", uuid="u1", data="raw=1&b=2")
+        request = task_pb2.ReqTask(url="http://example.com", uuid="u1", data=b"raw=1&b=2")
         service.Send(request, FakeContext())
         assert _adapter_of(service).last_kwargs["data"] == "raw=1&b=2"
+
+    def test_binary_body_passed_through_as_bytes(self, service: TaskService):
+        """非 UTF-8 的请求体必须原样交给适配器，不能报错也不能损坏。"""
+        raw = bytes([0x1F, 0x8B, 0x08, 0x00, 0xFF, 0xFE])
+        service.Send(task_pb2.ReqTask(url="http://example.com", uuid="u1", data=raw), FakeContext())
+        assert _adapter_of(service).last_kwargs["data"] == raw
 
     def test_json_body_decoded(self, service: TaskService):
         request = task_pb2.ReqTask(url="http://example.com", uuid="u1", json='{"a": 1}')
@@ -211,3 +229,65 @@ class TestResponseBuilding:
         request = task_pb2.ReqTask(url="http://example.com", uuid="u1", adapter=IPClickAdapter.CURL_CFFI.pb_value)
         response = service.Send(request, FakeContext())
         assert response.adapter == IPClickAdapter.CURL_CFFI.pb_value
+
+
+class TestAdapterCacheKey:
+    """adapter="browser" 和 adapter="playwright" 必须落到**同一个**适配器实例。
+
+    缓存键用的是请求里写的名字，而 get_adapter 内部才把 "browser" 解析成具体
+    引擎——于是两者各建一个实例。浏览器适配器每个实例自带一个浏览器进程，
+    集群里 3 个节点就是 6 个 chromium，小内存机器直接被挤爆。
+    """
+
+    def test_generic_and_concrete_share_one_instance(self):
+        from ipclick.adapters.registry import ADAPTER_CLASSES
+
+        engine = next((e for e in ("playwright", "camoufox", "patchright") if e in ADAPTER_CLASSES), None)
+        if engine is None:
+            pytest.skip("没有可用的浏览器引擎")
+
+        service = TaskService(Settings({"BROWSER": {"engine": engine, "executable_path": "/usr/bin/chromium"}}))
+        try:
+            generic = service._get_cached_adapter("browser")  # pyright: ignore[reportPrivateUsage]
+            concrete = service._get_cached_adapter(engine)  # pyright: ignore[reportPrivateUsage]
+            assert generic is concrete
+            assert "browser" not in service._adapter_cache  # pyright: ignore[reportPrivateUsage]
+        finally:
+            service.cleanup()
+
+    def test_http_adapter_key_is_unchanged(self):
+        service = TaskService(Settings({}))
+        try:
+            _ = service._get_cached_adapter("curl_cffi")  # pyright: ignore[reportPrivateUsage]
+            assert "curl_cffi" in service._adapter_cache  # pyright: ignore[reportPrivateUsage]
+        finally:
+            service.cleanup()
+
+
+class TestCallerGone:
+    """调用方已经走了就别开工。
+
+    浏览器渲染一次能占几十秒和一个页面额度；用户关掉标签页之后还接着跑，
+    在小内存机器上反复几次就能把浏览器额度和内存全占死。
+    """
+
+    def test_inactive_caller_skips_the_download(self, service: TaskService):
+        class Gone(FakeContext):
+            def is_active(self) -> bool:
+                return False
+
+        before = _adapter_of(service).call_count
+        response = service.Send(task_pb2.ReqTask(url="http://example.com", uuid="u1"), Gone())
+        assert response.status_code == -1
+        assert "断开" in response.error_message
+        assert _adapter_of(service).call_count == before, "不该真的发出去"
+
+    def test_active_caller_proceeds(self, service: TaskService):
+        response = service.Send(task_pb2.ReqTask(url="http://example.com", uuid="u1"), FakeContext())
+        assert response.status_code == 200
+
+    def test_unprobeable_context_is_treated_as_waiting(self, service: TaskService):
+        """批量路径和测试里传的都是假 context，误判成断开会让正常请求凭空失败。"""
+        from ipclick.services.task_service import _caller_still_waiting
+
+        assert _caller_still_waiting(object()) is True

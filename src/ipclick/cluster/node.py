@@ -34,6 +34,9 @@ class Node:
     region: str = ""
     zone: str = ""
     tags: tuple[str, ...] = ()
+    #: 调用该节点时使用的令牌。留空则由 [CLUSTER].secret 派生
+    #: （见 :mod:`ipclick.cluster.tokens`），这样加节点不需要发放新凭据。
+    token: str = ""
 
     @property
     def address(self) -> str:
@@ -75,6 +78,7 @@ class Node:
             region=str(entry.get("region", "")),
             zone=str(entry.get("zone", "")),
             tags=tags,
+            token=str(entry.get("token", "") or ""),
         )
 
 
@@ -194,7 +198,22 @@ class ClusterConfig:
     probe_timeout: float = 3.0
     #: 一次请求最多换几个节点重试
     max_failover: int = 2
+    #: 服务端转发开关。见 :data:`FORWARD_MODES`。
+    forward: str = "off"
+    #: 本节点在 nodes 里的 id。留空则按 [SERVER] 的监听地址自动识别。
+    self_id: str = ""
+    #: 转发一次请求的超时（秒）。0 = 按任务自身超时 + 余量自动推算。
+    forward_timeout: float = 0.0
+    #: 集群共享密钥（机密，正规位置是 .env 的 IPCLICK_CLUSTER_SECRET）
+    secret: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def forwarding_enabled(self) -> bool:
+        return self.forward == "on" and bool(self.nodes)
+
+    def node_by_id(self, node_id: str) -> Node | None:
+        return next((n for n in self.nodes if n.id == node_id), None)
 
     @property
     def enabled(self) -> bool:
@@ -228,6 +247,14 @@ class ClusterConfig:
                 return fallback
             return value if value >= 1 else fallback
 
+        forward = str(config.get("forward", defaults.forward) or defaults.forward).strip().lower()
+        if forward in ("true", "yes", "1"):
+            forward = "on"
+        elif forward in ("false", "no", "0"):
+            forward = "off"
+        if forward not in FORWARD_MODES:
+            raise ConfigError(f"未知的 [CLUSTER].forward {forward!r}，可选：{'、'.join(sorted(FORWARD_MODES))}")
+
         return cls(
             nodes=tuple(nodes),
             strategy=str(config.get("load_balancer", defaults.strategy) or defaults.strategy).lower(),
@@ -236,8 +263,29 @@ class ClusterConfig:
             probe_interval=_num("probe_interval", defaults.probe_interval),
             probe_timeout=_num("probe_timeout", defaults.probe_timeout),
             max_failover=_count("max_failover", defaults.max_failover),
+            forward=forward,
+            self_id=str(config.get("self_id", "") or ""),
+            # 这个可以是 0（表示自动推算），所以不能用 _num（它把 0 当非法）
+            forward_timeout=max(0.0, _as_float(config.get("forward_timeout"), defaults.forward_timeout)),
+            secret=str(config.get("secret", "") or ""),
             extra={k: v for k, v in config.items() if k not in _KNOWN_KEYS},
         )
+
+
+def _as_float(value: Any, fallback: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+#: ``[CLUSTER].forward`` 的取值。
+#:
+#: * ``off``（默认）——服务端不转发。任务由谁收到就由谁执行；分发交给客户端侧的
+#:   :class:`~ipclick.cluster.client.ClusterDownloader`。
+#: * ``on`` ——服务端转发。入口节点按策略挑一个节点，挑到自己就本地执行、挑到
+#:   别人就把 ReqTask 原样转过去。调用方只需要知道一个地址。
+FORWARD_MODES = frozenset({"off", "on"})
 
 
 _KNOWN_KEYS = frozenset(
@@ -249,8 +297,12 @@ _KNOWN_KEYS = frozenset(
         "probe_interval",
         "probe_timeout",
         "max_failover",
+        "forward",
+        "self_id",
+        "forward_timeout",
+        "secret",
     }
 )
 
 
-__all__ = ["ClusterConfig", "Node", "NodeState", "NodeStatus"]
+__all__ = ["FORWARD_MODES", "ClusterConfig", "Node", "NodeState", "NodeStatus"]

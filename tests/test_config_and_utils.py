@@ -94,7 +94,7 @@ class TestLoadConfigPrecedence:
 class TestRegistry:
     def test_known_adapters_resolve(self):
         assert get_adapter("curl_cffi").adapter_name == "curl_cffi"
-        assert get_adapter("httpx").adapter_name == "httpx"
+        assert get_adapter("niquests").adapter_name == "niquests"
 
     def test_default_adapter_is_curl_cffi(self):
         assert get_default_adapter().adapter_name == "curl_cffi"
@@ -186,3 +186,37 @@ class TestJsonHelpers:
         from ipclick.utils import json_hook
 
         assert json_hook({"s": "hello"})["s"] == "hello"
+
+
+class TestRemovedAdapters:
+    """已移除的适配器要给出"改用什么"，而不是"需要额外依赖"或"尚未支持"。
+
+    枚举值在 proto 里保留（标 deprecated）不复用，所以旧客户端发来这些名字时
+    请求能一路走到 get_adapter，在这里拿到一句有用的话。
+    """
+
+    @pytest.mark.parametrize(("name", "replacement"), [("httpx", "niquests"), ("requests", "niquests")])
+    def test_removed_adapter_points_at_the_replacement(self, name: str, replacement: str):
+        from ipclick.exceptions import AdapterError
+
+        with pytest.raises(AdapterError) as excinfo:
+            _ = get_adapter(name)
+        message = str(excinfo.value)
+        assert "已移除" in message
+        assert replacement in message
+        assert "需要额外依赖" not in message, "已移除的东西装依赖也没用，别这么说"
+
+    def test_enum_value_is_kept_for_wire_compatibility(self):
+        """枚举编号绝不复用：旧客户端发 HTTPX(1) 时必须还能被解析出来，
+        然后在 get_adapter 那一步拿到明确的"已移除"，而不是"未知枚举值"。
+        """
+        from ipclick.dto.models import IPClickAdapter
+
+        assert IPClickAdapter.from_pb(1) is IPClickAdapter.HTTPX
+        assert IPClickAdapter.from_pb(2) is IPClickAdapter.REQUESTS
+
+    def test_removed_adapters_are_not_registered(self):
+        from ipclick.adapters.registry import ADAPTER_CLASSES
+
+        assert "httpx" not in ADAPTER_CLASSES
+        assert "requests" not in ADAPTER_CLASSES

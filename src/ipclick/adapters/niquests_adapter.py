@@ -49,7 +49,7 @@ _PASSTHROUGH_KWARGS = frozenset({"auth", "cert", "hooks"})
 class NiquestsAdapter(DownloaderAdapter):
     """基于 ``niquests`` 的适配器。
 
-    相比 curl_cffi / httpx 的取舍：
+    相比 curl_cffi 的取舍：
     - 没有浏览器指纹伪装（``impersonate`` 参数会被忽略）
     - 支持 HTTP/2 与 HTTP/3（本项目里唯一支持 HTTP/3 的适配器）
     - API 与 requests 完全一致，适合对接已有 requests 代码
@@ -137,13 +137,13 @@ class NiquestsAdapter(DownloaderAdapter):
         allow_redirects: bool = True,
         stream: bool = False,
         impersonate: str | None = None,
-        extensions: dict[str, Any] | None = None,
         automation_config: str | None = None,
         automation_script: str | None = None,
         allowed_status_codes: list[int] | None = None,
         kwargs: str | None = None,
     ) -> Response:
         """使用 niquests 执行 HTTP 请求。"""
+        self.reject_impersonate(impersonate)
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
             raise ValidationError(f"Unsupported HTTP method: {method}")

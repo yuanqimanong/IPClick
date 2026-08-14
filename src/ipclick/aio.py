@@ -230,11 +230,13 @@ class AsyncDownloader(ClientBase):
             AuthenticationError: 鉴权失败。
         """
         stub = self._get_stub()
+        pb_request = task.to_protobuf()
         try:
             pb_response = await stub.Send(
-                task.to_protobuf(),
+                pb_request,
                 timeout=self._deadline(task),
                 metadata=self._metadata or None,
+                compression=self.compression.for_request(pb_request),
             )
             return DownloadResponse.from_protobuf(pb_response)
         except grpc.RpcError as e:
@@ -248,11 +250,13 @@ class AsyncDownloader(ClientBase):
         """流式下载，返回可异步迭代的响应句柄。"""
         task = self._build_task(url=url, **kwargs)
         stub = self._get_stub()
+        pb_request = task.to_protobuf()
         try:
             call = stub.SendStream(
-                task.to_protobuf(),
+                pb_request,
                 timeout=self._deadline(task),
                 metadata=self._metadata or None,
+                compression=self.compression.for_request(pb_request),
             )
             return await AsyncStreamedResponse.create(call)
         except grpc.RpcError as e:
@@ -275,7 +279,12 @@ class AsyncDownloader(ClientBase):
                 yield task.to_protobuf()
 
         try:
-            call = stub.SendBatch(_requests(), timeout=timeout, metadata=self._metadata or None)
+            call = stub.SendBatch(
+                _requests(),
+                timeout=timeout,
+                metadata=self._metadata or None,
+                compression=self.compression.for_stream(),
+            )
             async for pb_response in call:
                 yield DownloadResponse.from_protobuf(pb_response)
         except grpc.RpcError as e:

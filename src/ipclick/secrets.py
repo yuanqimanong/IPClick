@@ -36,8 +36,6 @@ class SecretSpec:
     key: str
     #: 给人看的名字
     label: str
-    #: 这一项即使写在配置里也不算机密泄漏（如不含密码的本地 Redis 地址）
-    only_if_sensitive: bool = False
 
 
 #: 全部机密。``.env`` 模板、启动警告、config-info 三处都从这里生成，
@@ -49,13 +47,10 @@ SECRETS: tuple[SecretSpec, ...] = (
     SecretSpec("IPCLICK_PROXY_AUTH_KEY", "PROXY", "auth_key", "代理账号"),
     SecretSpec("IPCLICK_PROXY_AUTH_PASSWORD", "PROXY", "auth_password", "代理密码"),
     SecretSpec(
-        "IPCLICK_REDIS_URL",
-        "DOWNLOADER.rate_limit",
-        "redis_url",
-        "Redis 连接串",
-        # 默认那个 redis://127.0.0.1:6379/0 不含凭据，写在配置里没问题；
-        # 只有带了账号密码才算机密。
-        only_if_sensitive=True,
+        "IPCLICK_CLUSTER_SECRET",
+        "CLUSTER",
+        "secret",
+        "集群共享密钥",
     ),
 )
 
@@ -71,12 +66,6 @@ def _dig(config: Any, path: str) -> dict[str, Any]:
             node = dict(node or {})
         node = dict(node or {}).get(part) or {}
     return dict(node or {})
-
-
-def _looks_sensitive(value: Any) -> bool:
-    """连接串里是否真的带了凭据。"""
-    text = str(value or "")
-    return "@" in text and "//" in text
 
 
 def config_value(config: Any, spec: SecretSpec) -> Any:
@@ -102,18 +91,12 @@ def resolve(config: Any, spec: SecretSpec) -> tuple[str | None, str]:
 
 
 def describe_source(config: Any, spec: SecretSpec) -> str:
-    """一项机密来自哪里，给人看的说法。
-
-    ``only_if_sensitive`` 的项（如不含凭据的本地 Redis 地址）写在配置文件里
-    并不算问题，不该挂告警标记——误报会让人对真正的告警脱敏。
-    """
+    """一项机密来自哪里，给人看的说法。"""
     _, origin = resolve(config, spec)
     if origin == "env":
         return "环境变量 / .env"
     if origin == "unset":
         return "未配置"
-    if spec.only_if_sensitive and not _looks_sensitive(config_value(config, spec)):
-        return "配置文件（不含凭据）"
     return "配置文件 ⚠️ 建议改用环境变量"
 
 
@@ -132,8 +115,6 @@ def warn_secrets_in_config(config: Any) -> list[SecretSpec]:
     for spec in SECRETS:
         raw = config_value(config, spec)
         if not raw:
-            continue
-        if spec.only_if_sensitive and not _looks_sensitive(raw):
             continue
         found.append(spec)
 
@@ -188,8 +169,9 @@ def env_template() -> str:
         "#",
         "# 留空 = 不设置。文件权限建议 600（ipclick init 会自动设好）。",
         "#",
-        "# 部署参数（IPCLICK_HOST / PORT / MAX_WORKERS / MODE / LOG_LEVEL）同样支持，",
-        "# 但那些是给容器编排注入的，刻意不放进这里——见 README。",
+        "# 部署参数（IPCLICK_HOST / PORT / MAX_WORKERS / MODE / LOG_LEVEL /",
+        "# CLUSTER_SELF_ID）同样支持，但那些不是机密，是给容器编排注入的，",
+        "# 刻意不预置在这里——见 README。",
         "",
     ]
     for spec in SECRETS:

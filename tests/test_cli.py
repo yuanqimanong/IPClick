@@ -102,13 +102,12 @@ class TestConfigInfo:
     def test_shows_host_limits(self, runner: CliRunner, tmp_path: Path):
         cfg = tmp_path / "c.toml"
         cfg.write_text(
-            "[DOWNLOADER.concurrency]\nper_host_max_concurrent = 7\n"
-            '\n[DOWNLOADER.rate_limit]\nper_host_qps = 3\nbackend = "redis"\n',
+            "[DOWNLOADER.concurrency]\nper_host_max_concurrent = 7\n\n[DOWNLOADER.rate_limit]\nper_host_qps = 3\n",
             encoding="utf-8",
         )
         result = runner.invoke(main, ["config-info", "--config", str(cfg)])
         assert "并发上限:     7" in result.output
-        assert "集群共享" in result.output
+        assert "QPS 上限:     3" in result.output
 
     def test_limits_off_by_default(self, runner: CliRunner, tmp_path: Path):
         cfg = tmp_path / "c.toml"
@@ -223,7 +222,8 @@ class TestInit:
     def test_web_password_is_prefilled(self, runner: CliRunner, tmp_path: Path):
         """留空的话每次重启密码都变，运维得盯控制台。"""
         runner.invoke(main, ["init", "--dir", str(tmp_path)])
-        line = [ln for ln in (tmp_path / ".env").read_text().splitlines() if ln.startswith("IPCLICK_WEB_PASSWORD=")][0]
+        lines = (tmp_path / ".env").read_text().splitlines()
+        line = next(ln for ln in lines if ln.startswith("IPCLICK_WEB_PASSWORD="))
         assert len(line.split("=", 1)[1]) >= 16
 
     def test_other_secrets_stay_empty(self, runner: CliRunner, tmp_path: Path):

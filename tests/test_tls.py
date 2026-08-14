@@ -10,11 +10,12 @@ from concurrent import futures
 import datetime
 import ipaddress
 from pathlib import Path
+from typing import Any
 
 import grpc
 import pytest
 
-from ipclick.dto.proto import task_pb2_grpc
+from ipclick.dto.proto import task_pb2, task_pb2_grpc
 from ipclick.exceptions import ConfigError, TransportError
 from ipclick.health import check_health
 from ipclick.sdk import Downloader
@@ -492,12 +493,13 @@ class TestShippedConfig:
 def test_no_plaintext_fallback_anywhere():
     """回归护栏：新增连接点时别忘了走 TLS。
 
-    只允许四个已知位置出现 insecure：两个客户端、服务端绑定、健康探活。
-    每一处都必须是 if tls.enabled 的 else 分支。
+    只允许已知位置出现 insecure：两个客户端、服务端绑定、健康探活、
+    集群转发。每一处都必须是 if tls.enabled 的 else 分支——
+    转发那处由 test_forwarding_uses_tls 正面验证。
     """
     src = Path(__file__).resolve().parent.parent / "src" / "ipclick"
     offenders: list[str] = []
-    allowed = {"sdk.py", "aio.py", "server.py", "health.py", "tls.py"}
+    allowed = {"sdk.py", "aio.py", "server.py", "health.py", "tls.py", "forwarder.py"}
     for file in src.rglob("*.py"):
         if "_pb2" in file.name or file.name in allowed:
             continue
@@ -505,3 +507,69 @@ def test_no_plaintext_fallback_anywhere():
         if "insecure_channel" in text or "add_insecure_port" in text:
             offenders.append(str(file.relative_to(src)))
     assert not offenders, f"这些文件绕过了 TLS 通路: {offenders}"
+
+
+def test_forwarding_uses_tls(pki: dict[str, str], monkeypatch: pytest.MonkeyPatch):
+    """集群转发这一跳必须真的走 TLS，而不是在允许清单里挂个名。
+
+    正面证据：目标节点只接受 TLS。带 TLS 的转发器能成功转过去；
+    不带 TLS 的转发器连不上（于是入口自己兜底执行，落点是本机）。
+    """
+    from ipclick.cluster.forwarder import ForwardingTaskService
+    from ipclick.cluster.node import ClusterConfig
+
+    server_tls = TLSSettings(
+        enabled=True,
+        cert_file=pki["server_cert"],
+        key_file=pki["server_key"],
+    )
+    client_tls = TLSSettings(
+        enabled=True,
+        ca_file=pki["ca"],
+        # 证书里的 SAN 是 localhost，而连的是 127.0.0.1
+        server_name_override="localhost",
+    )
+
+    for port in _serve(server_tls, monkeypatch):
+        section: dict[str, Any] = {
+            "nodes": [{"id": "peer", "address": f"127.0.0.1:{port}"}],
+            "forward": "on",
+            # 本节点不在 nodes 里 -> 只会转发，不会自己抢活，落点因此可判定
+            "self_id": "entry",
+            "probe_interval": 3600,
+            "max_failover": 0,
+        }
+        request = task_pb2.ReqTask(uuid="u1", url="http://example.com/x")
+
+        with_tls = ForwardingTaskService(
+            Settings({"CLUSTER": section}), ClusterConfig.from_config(section), tls=client_tls
+        )
+        try:
+            ok = with_tls.Send(request, _FakeContext())
+        finally:
+            with_tls.cleanup()
+        assert ok.status_code == 200, "带 TLS 应该能转发成功"
+        assert ok.trace.forwarded is True
+
+        plaintext = ForwardingTaskService(Settings({"CLUSTER": section}), ClusterConfig.from_config(section))
+        try:
+            failed = plaintext.Send(request, _FakeContext())
+        finally:
+            plaintext.cleanup()
+        # 明文连不上只接受 TLS 的端口，转发失败后入口自己兜底 —— 而入口没有
+        # 真适配器，所以状态码不会是 200。关键是它确实没能连上。
+        assert failed.trace.forwarded is False, "明文不该能连上只接受 TLS 的节点"
+
+
+class _FakeContext:
+    """转发测试用的最小 ServicerContext。"""
+
+    def set_code(self, _code: object) -> None: ...
+
+    def set_details(self, _details: str) -> None: ...
+
+    def is_active(self) -> bool:
+        return True
+
+    def invocation_metadata(self) -> tuple[tuple[str, str], ...]:
+        return ()

@@ -6,7 +6,7 @@
 完全共用。DrissionPage 是另一套 API，单独在
 :mod:`ipclick.adapters.drission_adapter`。
 
-**它解决的问题**：curl_cffi / httpx / requests 拿到的是服务端返回的原始 HTML。
+**它解决的问题**：curl_cffi / niquests 拿到的是服务端返回的原始 HTML。
 对于内容全靠 JS 渲染出来的页面，那份 HTML 里什么都没有。这里起一个真正的浏览器
 把页面跑完，返回渲染后的 DOM。
 
@@ -40,7 +40,13 @@ from typing import Any
 from typing_extensions import override
 
 from ipclick.adapters import browser_engines
-from ipclick.adapters.base import DownloaderAdapter, retry
+from ipclick.adapters.base import (
+    DownloaderAdapter,
+    normalize_js,
+    raise_if_permanent_navigation_error,
+    raise_if_script_error,
+    retry,
+)
 from ipclick.adapters.browser_settings import BLOCKABLE_RESOURCES, WAIT_UNTIL_CHOICES, BrowserSettings
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
@@ -54,6 +60,17 @@ _SUPPORTED_METHODS = frozenset({"GET"})
 
 #: 等待浏览器优雅关闭的上限（秒）。超时就放弃，不能让 close() 卡住调用方。
 _SHUTDOWN_TIMEOUT = 30.0
+
+#: 冷启动浏览器的余量（秒）。只在浏览器尚未启动时计入——起过一次之后
+#: 不该继续付这个代价。小内存机器上实测过 37 秒的冷启动，所以留得比常见值宽。
+_COLD_START_ALLOWANCE = 60.0
+
+#: 排队等页面额度、建 context 这些零碎开销的余量（秒）。
+_OVERHEAD_ALLOWANCE = 15.0
+
+#: ``automation_config.wait_for_timeout`` 的上界（毫秒）。
+#: 没有上界的话一个请求就能死占一个页面额度直到预算耗尽。
+_MAX_WAIT_FOR_TIMEOUT_MS = 60_000
 
 
 class _BrowserWorker:
@@ -106,19 +123,76 @@ class _BrowserWorker:
             return self._loop
 
     async def _ensure_browser(self) -> Any:
-        """在事件循环线程里启动浏览器（只启动一次）。"""
+        """在事件循环线程里拿到一个**活着的**浏览器，必要时重建。
+
+        以前这里只判 ``is not None``，于是浏览器进程一旦死掉（小内存机器上被
+        OOM killer 干掉是常事，日志里会出现 "Network service crashed"），这个节点
+        之后每个浏览器请求都必败，而且要走满重试才返回——运维现象是"browser
+        适配器突然全挂，重启进程才好"。
+
+        判定用 ``is_connected()``：它查的是 CDP/WebSocket 连接还在不在，
+        进程被杀之后这个连接必然断，比自己去 poll 进程状态可靠。
+        """
         if self._browser_lock is None:
             self._browser_lock = asyncio.Lock()
 
         async with self._browser_lock:
             if self._browser is not None:
-                return self._browser
+                if self._is_alive(self._browser):
+                    return self._browser
+                log.warning(f"{self._engine} 浏览器进程已失联（可能被 OOM killer 杀掉），正在重建")
+                await self._discard_browser()
 
             launched = await browser_engines.launch(self._engine, self._settings)
             self._playwright = launched.driver
             self._browser = launched.browser
+            # 信号量跟着浏览器一起重建：旧的那个可能还扣着已经消失的页面的额度
             self._semaphore = asyncio.Semaphore(self._settings.max_pages)
             return self._browser
+
+    @staticmethod
+    def _is_alive(browser: Any) -> bool:
+        """浏览器连接还在不在。探测失败时按"还活着"处理——
+        误判成死掉会白白重启一个好浏览器，代价比多失败一次大。
+        """
+        checker = getattr(browser, "is_connected", None)
+        if not callable(checker):
+            return True
+        try:
+            return bool(checker())
+        except Exception:  # pragma: no cover - 驱动自身出问题
+            return False
+
+    async def _discard_browser(self) -> None:
+        """扔掉当前这套浏览器 + driver，失败也要把引用清干净。
+
+        清不干净的后果是下次 ``_ensure_browser`` 又拿到那个死对象，
+        于是永远重建不了。
+        """
+        browser, driver = self._browser, self._playwright
+        self._browser = None
+        self._playwright = None
+        self._semaphore = None
+        for closer, what in ((getattr(browser, "close", None), "浏览器"), (getattr(driver, "stop", None), "driver")):
+            if closer is None:
+                continue
+            try:
+                await closer()
+            except Exception as e:
+                log.debug(f"回收已失联的{what}时报错（忽略）：{e}")
+
+    @property
+    def browser_started(self) -> bool:
+        """浏览器**当前可用**吗。用来决定要不要给这次请求留冷启动余量。
+
+        判据必须和 :meth:`_ensure_browser` 完全一致（都用 ``is_connected``），
+        否则会错在最糟的方向上：浏览器被 OOM killer 杀掉后 ``self._browser``
+        仍然非 None，只看它的话这里说"已经起来了"→ 不给冷启动余量，而
+        ``_ensure_browser`` 那边判定失联、正在重建 → 这次请求要付完整的冷启动
+        代价却只拿到热路径的预算，必然超时。而这恰好是内存最紧张、最需要它
+        成功的时候。
+        """
+        return self._browser is not None and self._is_alive(self._browser)
 
     def run(self, make_coro: Any, timeout: float) -> Any:
         """把一个协程投递到浏览器线程执行，并等待结果。"""
@@ -127,8 +201,14 @@ class _BrowserWorker:
         try:
             return future.result(timeout=timeout)
         except TimeoutError:
+            # Python 3.11 起 asyncio.wait_for 超时抛的也是内建 TimeoutError，
+            # 于是协程内部的**脚本超时**会一路传到这里，被报成"整体预算耗尽"，
+            # 把排查方向指向错误的数字。用 future.done() 区分：已完成说明异常
+            # 来自协程内部，原样上抛；没完成才是真的等超时了。
+            if future.done():
+                raise
             future.cancel()
-            raise AdapterError(f"浏览器任务超过 {timeout} 秒未返回") from None
+            raise AdapterError(f"浏览器任务超过 {timeout:.0f} 秒未返回") from None
 
     def close(self) -> None:
         """关闭浏览器并停掉事件循环。可重复调用。"""
@@ -137,17 +217,30 @@ class _BrowserWorker:
             return
 
         async def shutdown() -> None:
+            # 两步各自 try：浏览器关不掉（进程已经僵了）也必须继续停 driver，
+            # 否则 playwright 的 node 子进程会留下来，反复重启服务就是一堆孤儿。
             if self._browser is not None:
-                await self._browser.close()
-                self._browser = None
+                try:
+                    await self._browser.close()
+                except Exception as e:
+                    log.debug(f"关闭 {self._engine} 浏览器时报错（继续停 driver）：{e}")
+                finally:
+                    self._browser = None
             if self._playwright is not None:
-                await self._playwright.stop()
-                self._playwright = None
+                try:
+                    await self._playwright.stop()
+                finally:
+                    self._playwright = None
 
         try:
             asyncio.run_coroutine_threadsafe(shutdown(), loop).result(timeout=_SHUTDOWN_TIMEOUT)
         except Exception as e:
             log.warning(f"关闭 {self._engine} 浏览器失败: {e}")
+        finally:
+            # 无论关得成关不成，引用都要清掉：留着一个已经停了事件循环的浏览器对象，
+            # 下次再用这个 worker 只会拿到一个不能用的东西
+            self._browser = None
+            self._playwright = None
 
         loop.call_soon_threadsafe(loop.stop)
         if self._thread is not None:
@@ -163,9 +256,13 @@ class _BrowserWorker:
 
     async def render(self, plan: _RenderPlan) -> Response:
         browser = await self._ensure_browser()
-        assert self._semaphore is not None
+        semaphore = self._semaphore
+        if semaphore is None:
+            # assert 在 python -O 下会被去掉，那时会变成 `async with None` 的
+            # TypeError；而且 AssertionError 没有文本，调用方只会拿到一个空消息的 -1
+            raise AdapterError(f"{self._engine} 浏览器未就绪（页面额度未初始化），请重试")
 
-        async with self._semaphore:
+        async with semaphore:
             # 每个请求一个全新的 context：cookie、localStorage、缓存彼此隔离。
             # 共用 context 会让上一个调用方的登录态泄漏给下一个。
             context = await browser.new_context(**plan.context_options)
@@ -190,7 +287,12 @@ class _BrowserWorker:
             await context.route("**/*", route_handler)
 
         page = await context.new_page()
-        response = await page.goto(plan.url, wait_until=plan.wait_until, timeout=plan.page_timeout_ms)
+        try:
+            response = await page.goto(plan.url, wait_until=plan.wait_until, timeout=plan.page_timeout_ms)
+        except Exception as e:
+            # 有些导航失败是永久的（URL 写错、端口被 Chromium 拉黑），重试纯属浪费
+            raise_if_permanent_navigation_error(e)
+            raise
         if response is None:
             raise AdapterError(f"浏览器没有为 {plan.url} 产生任何响应（可能是下载或 about: 跳转）")
 
@@ -203,7 +305,15 @@ class _BrowserWorker:
 
         script_result: Any = None
         if plan.script:
-            script_result = await asyncio.wait_for(page.evaluate(plan.script), timeout=plan.script_timeout)
+            # 归一成 evaluate 能吃的形式：调用方可以照 DrissionPage 的习惯写
+            # `return x`，也可以写单个表达式或箭头函数
+            js = normalize_js(plan.script)
+            try:
+                script_result = await asyncio.wait_for(page.evaluate(js), timeout=plan.script_timeout)
+            except Exception as e:
+                # 脚本写错了不该重试三次再报成网络故障
+                raise_if_script_error(e, plan.script)
+                raise
 
         headers = dict(await response.all_headers())
         if plan.screenshot:
@@ -274,7 +384,7 @@ class BrowserAdapter(DownloaderAdapter):
 
     与 HTTP 适配器的差异（都是浏览器本身的限制，不是没写）：
 
-    - 只支持 GET。浏览器导航就是 GET，其余方法请走 curl_cffi / httpx / requests。
+    - 只支持 GET。浏览器导航就是 GET，其余方法请走 curl_cffi / niquests。
     - 不支持 ``allow_redirects=False``。浏览器总是跟随重定向。
     - ``stream=True`` 无意义：渲染必须等页面跑完才有结果。
     """
@@ -297,8 +407,13 @@ class BrowserAdapter(DownloaderAdapter):
         if engine not in browser_engines.PLAYWRIGHT_FAMILY:
             # 只有 registry 绕过 get_adapter 直接实例化才会走到这里
             raise AdapterError(f"{type(self).__name__} 不支持引擎 {engine!r}")
-        if not browser_engines.is_available(engine):
-            raise AdapterError(f"浏览器引擎 {engine!r} 不可用：{browser_engines.INSTALL_HINTS.get(engine, '缺少依赖')}")
+        # 构造时只查 Python 包（一次 import 判定，不碰文件系统）。浏览器本体的检查
+        # 留给 launch()——它就在真正要用浏览器的前一步，那里查才有意义，
+        # 而且构造适配器不该因为"本体还没下"就失败（消息一样，时机更晚更准）。
+        if not browser_engines.package_installed(engine):
+            raise AdapterError(
+                f"浏览器引擎 {engine!r} 的 Python 包未安装：{browser_engines.INSTALL_HINTS.get(engine, '缺少依赖')}"
+            )
 
         super().__init__(settings)
         self.browser_settings: BrowserSettings = resolved
@@ -308,6 +423,26 @@ class BrowserAdapter(DownloaderAdapter):
     # ------------------------------------------------------------------ #
     # 参数解析
     # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _positive_number(config: dict[str, Any], key: str) -> int:
+        """从 automation_config 里取一个非负数值项。
+
+        直接 ``int(float(...))`` 的话，``{"wait_for_timeout": "abc"}`` 会抛一个
+        裸的 ValueError 冒出适配器——调用方看到的是一句 Python 内部错误，而不是
+        "你这个参数写错了"。JSON 里塞列表/字典还会变成 TypeError。统一转成
+        ValidationError，和 automation_config 本身解析失败的处理保持一致。
+        """
+        raw = config.get(key)
+        if raw is None or raw == "":
+            return 0
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as e:
+            raise ValidationError(f"automation_config.{key} 必须是数字，收到 {raw!r}") from e
+        if value != value or value == float("inf") or value == float("-inf"):  # NaN / ±inf
+            raise ValidationError(f"automation_config.{key} 必须是有限数字，收到 {raw!r}")
+        return max(0, int(value))
 
     def _parse_automation_config(self, automation_config: str | None) -> dict[str, Any]:
         if not automation_config:
@@ -319,6 +454,33 @@ class BrowserAdapter(DownloaderAdapter):
         if not isinstance(parsed, dict):
             raise ValidationError(f"automation_config 必须是 JSON 对象，收到 {type(parsed).__name__}")
         return parsed
+
+    def _budget_for(self, plan: _RenderPlan) -> float:
+        """这次渲染最多给多少秒。
+
+        以前是 ``page_timeout + script_timeout + 60`` 无条件相加，于是调用方填
+        30 秒、实际单次能挂 150 秒——5 倍偏差，页面上还没有任何地方解释这个数字
+        从哪来。现在按**这次请求真正会做的事**算：
+
+        * 页面加载：总是要留。
+        * 等元素出现：``wait_for_selector`` 用的也是 ``page_timeout_ms``，是**导航
+          之后**的第二段等待，所以要再留一份。漏掉它的话，选择器一直等不到的
+          请求会先撞上外层预算，报成"浏览器任务超过 N 秒未返回"——把排查方向从
+          "这个选择器不对"引到"浏览器是不是卡了"。
+        * 脚本执行：只有真带了 ``automation_script`` 才留。
+        * 显式的等待：调用方自己要求的 ``wait_for_timeout`` 也得算进去。
+        * 冷启动：只有浏览器还没起来时才留，起过一次之后不再付。
+        """
+        budget = plan.page_timeout_ms / 1000
+        if plan.wait_for_selector:
+            budget += plan.page_timeout_ms / 1000
+        if plan.script:
+            budget += plan.script_timeout
+        if plan.wait_for_timeout_ms:
+            budget += plan.wait_for_timeout_ms / 1000
+        if not self._worker.browser_started:
+            budget += _COLD_START_ALLOWANCE
+        return budget + _OVERHEAD_ALLOWANCE
 
     def _build_plan(
         self,
@@ -388,7 +550,10 @@ class BrowserAdapter(DownloaderAdapter):
             wait_until=wait_until,
             page_timeout_ms=int(page_timeout * 1000),
             wait_for_selector=(str(config["wait_for_selector"]) if config.get("wait_for_selector") else None),
-            wait_for_timeout_ms=max(0, int(float(config.get("wait_for_timeout") or 0))),
+            # 上界必须有：调用方传 wait_for_timeout=240000 就能死占一个页面额度
+            # 直到预算耗尽，max_pages 默认 4，四个这样的请求就把节点的渲染能力打满。
+            # 注意这一项的单位是**毫秒**，而同一配置节里的 page_load / script_exec 是秒。
+            wait_for_timeout_ms=min(_MAX_WAIT_FOR_TIMEOUT_MS, self._positive_number(config, "wait_for_timeout")),
             scroll_to_bottom=bool(config.get("scroll_to_bottom")),
             screenshot=bool(config.get("screenshot")),
             script=automation_script or None,
@@ -420,23 +585,22 @@ class BrowserAdapter(DownloaderAdapter):
         allow_redirects: bool = True,
         stream: bool = False,
         impersonate: str | None = None,
-        extensions: dict[str, Any] | None = None,
         automation_config: str | None = None,
         automation_script: str | None = None,
         allowed_status_codes: list[int] | None = None,
         kwargs: str | None = None,
     ) -> Response:
         """用真实浏览器打开页面，返回渲染后的 DOM。"""
+        # 同 drission：浏览器引擎的反检测与 curl_cffi 的 TLS 指纹伪装是两码事。
+        self.reject_impersonate(impersonate)
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
             raise ValidationError(
                 f"浏览器渲染只支持 GET，收到 {method}。"
-                "浏览器导航本身就是 GET，需要其他方法请改用 curl_cffi / httpx / requests 适配器。"
+                "浏览器导航本身就是 GET，需要其他方法请改用 curl_cffi / niquests 适配器。"
             )
         if not allow_redirects:
-            raise ValidationError(
-                "浏览器渲染无法禁用重定向。需要看原始 3xx 响应请改用 curl_cffi / httpx / requests 适配器。"
-            )
+            raise ValidationError("浏览器渲染无法禁用重定向。需要看原始 3xx 响应请改用 curl_cffi / niquests 适配器。")
         if data is not None or json is not None or files is not None:
             raise ValidationError("浏览器渲染不能携带请求体（data / json / files），请改用 HTTP 适配器。")
 
@@ -452,8 +616,7 @@ class BrowserAdapter(DownloaderAdapter):
             automation_script=automation_script,
         )
 
-        # 给渲染留出比页面超时更宽的余量：启动浏览器、排队等页面额度都算在里面。
-        budget = plan.page_timeout_ms / 1000 + self.browser_settings.script_timeout + 60
+        budget = self._budget_for(plan)
         try:
             return self._worker.run(lambda: self._worker.render(plan), timeout=budget)
         except AdapterError:

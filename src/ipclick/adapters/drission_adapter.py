@@ -28,7 +28,7 @@ from typing import Any
 
 from typing_extensions import override
 
-from ipclick.adapters.base import DownloaderAdapter, retry
+from ipclick.adapters.base import DownloaderAdapter, raise_if_script_error, retry
 from ipclick.adapters.browser_settings import BrowserSettings
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
@@ -170,23 +170,23 @@ class DrissionPageAdapter(DownloaderAdapter):
         allow_redirects: bool = True,
         stream: bool = False,
         impersonate: str | None = None,
-        extensions: dict[str, Any] | None = None,
         automation_config: str | None = None,
         automation_script: str | None = None,
         allowed_status_codes: list[int] | None = None,
         kwargs: str | None = None,
     ) -> Response:
         """用真实浏览器打开页面，返回渲染后的 DOM。"""
+        # 浏览器引擎自带的反检测处理不是 curl_cffi 那种 TLS/HTTP2 指纹伪装，
+        # impersonate 在这里无从生效，所以明确报错。
+        self.reject_impersonate(impersonate)
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
             raise ValidationError(
                 f"浏览器渲染只支持 GET，收到 {method}。"
-                "浏览器导航本身就是 GET，需要其他方法请改用 curl_cffi / httpx / requests 适配器。"
+                "浏览器导航本身就是 GET，需要其他方法请改用 curl_cffi / niquests 适配器。"
             )
         if not allow_redirects:
-            raise ValidationError(
-                "浏览器渲染无法禁用重定向。需要看原始 3xx 响应请改用 curl_cffi / httpx / requests 适配器。"
-            )
+            raise ValidationError("浏览器渲染无法禁用重定向。需要看原始 3xx 响应请改用 curl_cffi / niquests 适配器。")
         if data is not None or json is not None or files is not None:
             raise ValidationError("浏览器渲染不能携带请求体（data / json / files），请改用 HTTP 适配器。")
 
@@ -262,7 +262,11 @@ class DrissionPageAdapter(DownloaderAdapter):
             if wait_ms > 0:
                 tab.wait(wait_ms / 1000)
 
-            script_result = tab.run_js(script) if script else None
+            try:
+                script_result = tab.run_js(script) if script else None
+            except Exception as e:
+                raise_if_script_error(e, script)
+                raise
 
             if config.get("screenshot"):
                 body = tab.get_screenshot(as_bytes="png", full_page=True)

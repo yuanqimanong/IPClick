@@ -9,9 +9,17 @@
 IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基于 gRPC 协议构建。它提供了统一的请求接口，支持多种 HTTP
 客户端适配器，帮助开发者更高效地处理网络请求。
 
+> 📚 **完整文档在 [Wiki](https://github.com/yuanqimanong/IPClick/wiki)** ——
+> [安装](https://github.com/yuanqimanong/IPClick/wiki/Installation) ·
+> [快速开始](https://github.com/yuanqimanong/IPClick/wiki/Quick-Start) ·
+> [配置体系](https://github.com/yuanqimanong/IPClick/wiki/Configuration) ·
+> [集群](https://github.com/yuanqimanong/IPClick/wiki/Cluster) ·
+> [浏览器渲染](https://github.com/yuanqimanong/IPClick/wiki/Browser-Rendering) ·
+> [故障排查](https://github.com/yuanqimanong/IPClick/wiki/Troubleshooting)
+
 ## ✨ 特性
 
-- **多适配器支持**：默认 `curl_cffi`，按需加装 `httpx` / `niquests` / 浏览器渲染，并可注册自定义适配器
+- **多适配器支持**：默认 `curl_cffi`，按需加装 `niquests` / 浏览器渲染，并可注册自定义适配器
 - **轻量安装**：`pip install ipclick` 只带 curl_cffi，其余全部走 extras
 - **浏览器指纹伪装**：基于 `curl_cffi` 实现浏览器指纹模拟，有效绕过反爬检测
 - **浏览器渲染**：起真实浏览器执行 JS，四个引擎可选（camoufox / patchright /
@@ -29,9 +37,10 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 - **令牌鉴权**：gRPC 标准 Bearer 令牌，支持环境变量注入与多令牌轮换
 - **TLS / mTLS**：链路加密与双向证书认证，客户端、服务端、集群探活全通路覆盖
 - **健康检查**：实现 `grpc.health.v1` 标准协议，K8s 探针与服务网格开箱即用
-- **Prometheus 指标**：请求量 / 延迟 / 重试 / 拒绝等指标，可选依赖、优雅降级
+- **链路记录**：每个请求记一条（谁执行的、重试几次、排队多久），内存环形缓冲 + 可选 SQLite，零第三方依赖
 - **SSRF 防护**：服务端对目标 URL 做协议白名单与内网/元数据地址拦截
-- **Web 管理端**：`ipclick run --web` 起一个带登录的界面，看运行状态与集群节点
+- **Web 管理端**：`ipclick run --web` 起一个带登录的界面——总览看板、实时请求流、
+  「试一试」就地发请求看源码、配置改完写回 `ipclick.toml`、集群节点增删
 - **命令行工具**：提供便捷的 CLI 工具，支持快速启动服务和查看配置
 - **Docker 支持**：多阶段构建、非 root 运行的镜像
 - **完整类型标注**：随包提供 `py.typed`，下游可直接享受类型检查
@@ -47,25 +56,39 @@ pip install ipclick
 `pip install ipclick` 是**轻量安装**——只带默认的 curl_cffi 适配器。其余按需加：
 
 ```bash
-pip install "ipclick[httpx]"        # httpx 适配器
 pip install "ipclick[niquests]"     # niquests 适配器（requests 的 drop-in，支持 HTTP/2、HTTP/3）
-pip install "ipclick[metrics]"      # Prometheus 指标
-pip install "ipclick[redis]"        # 跨节点共享的分布式限流
 pip install "ipclick[camoufox]"     # 浏览器渲染：Firefox 反检测（Linux/macOS 默认）
 pip install "ipclick[drissionpage]" # 浏览器渲染：CDP 直连（Windows 默认）
 pip install "ipclick[patchright]"   # 浏览器渲染：Chromium 反检测
-pip install "ipclick[browser]"      # 浏览器渲染：原版 playwright
-pip install "ipclick[all]"          # 以上全部
+pip install "ipclick[playwright]"   # 浏览器渲染：原版 playwright
+
+# 按平台打包好的组合
+pip install "ipclick[win]"          # curl_cffi + DrissionPage
+pip install "ipclick[linux]"        # curl_cffi + camoufox + patchright
 ```
 
-浏览器引擎装完 Python 包之后还要准备浏览器本体：
+**没有 `[all]`**，这是刻意的：四个浏览器内核全装是 70+ 个包和上 G 的浏览器本体，
+而一台机器只会用其中一个。也**没有 `[redis]` / `[metrics]`**——集群不再需要中间件
+（见[集群](#集群)），统计改成内置的[链路记录](#链路记录与统计)。
+
+浏览器引擎是**两步**安装 —— `pip install` 只装 Python 包（几 MB），浏览器本体要单独准备：
 
 ```bash
-python -m camoufox fetch        # camoufox：下载它自己的 Firefox
+python -m camoufox fetch        # camoufox：下载它自己那份 Firefox（约 1 GB，装到 ~/.cache/camoufox）
 patchright install chromium     # patchright
 playwright install chromium     # playwright
 # DrissionPage 用本机已装的 Chrome/Chromium，不用额外下载
 ```
+
+只做第一步的话，`ipclick config-info` 与 Web 端会明确显示 **「包已装，浏览器本体未就绪」**，
+请求会直接报 `FAILED_PRECONDITION` 并告诉你该跑哪条命令。
+
+> **刻意不让它在请求里自动下载。** camoufox 的 API 默认行为是"缺本体就当场下"
+> （`camoufox_path(download_if_missing=True)`），而那一刻已经在 gRPC 的请求处理线程上：
+> 第一个请求会卡着下 1 GB 然后超时，超时返回后下载还在后台跑，并发的多个首请求
+> 还可能各自触发一次。所以本项目自己解析路径并显式传给它，缺了就报错。
+> **连"查一下装没装"也不能走它的接口** —— `launch_path()` 内部同样会触发下载，
+> 光渲染一次 Web 端总览页就够了。
 
 playwright / patchright 也可以复用系统已有的浏览器（省掉约 150MB 下载）：
 
@@ -101,7 +124,7 @@ pip install -e .
     - loguru >= 0.7.3
     - python-box >= 7.4.1
     - uuid-utils >= 0.17.0
-- httpx、niquests、浏览器引擎、Prometheus、Redis 全部走 extras，不装就不引入
+- niquests、四个浏览器引擎全部走 extras，不装就不引入
 
 ## 🚀 快速开始
 
@@ -153,7 +176,7 @@ IPCLICK_WEB_USER              Web 管理端用户名
 IPCLICK_WEB_PASSWORD          Web 管理端密码
 IPCLICK_PROXY_AUTH_KEY        代理账号
 IPCLICK_PROXY_AUTH_PASSWORD   代理密码
-IPCLICK_REDIS_URL             Redis 连接串（带密码时）
+IPCLICK_CLUSTER_SECRET        集群共享密钥（所有节点一致；每台机器的令牌由它派生）
 ```
 
 **机密写在 `ipclick.toml` 里仍然生效**——受信环境里图省事是合理的。只是启动时会
@@ -197,16 +220,41 @@ IPCLICK_WEB_USER=ops IPCLICK_WEB_PASSWORD=... ipclick run -w
 
 或写进 `.env`，或配 `[WEB].username` / `password`。
 
-界面上能看到：服务端信息与可用适配器、安全配置（TLS / 鉴权 / SSRF 拦截）、
-限流与浏览器引擎、集群节点健康状态。机密一律只显示"有/无"，不回显内容。
+#### 五个页面
 
-**能做什么、不能做什么**：
+| 页面 | 干什么 |
+|---|---|
+| **总览** `/` | 吞吐、成功率、在途与峰值、各适配器耗时与流量、状态码分布、引擎安装状态、集群拓扑、最近 12 条请求 |
+| **请求流** `/trace` | **实时**（3 秒刷新）看请求打进来。按状态 / 适配器 / URL 过滤，看目标站点排行与按天趋势 |
+| **试一试** `/test` | 填一个网址就地发一次请求，看链路信息与返回的**源码** |
+| **配置** `/config` | 白名单内的行为配置可改，**写回 `ipclick.toml`** |
+| **节点** `/nodes` | 集群节点的增删改，同样写回 `ipclick.toml` |
 
-- **能**：看状态、手动摘除 / 恢复节点（只影响当前进程的运行时状态，重启即复原）
-- **不能**：改配置文件、改令牌、改 URL 策略、加删节点 —— 一律走配置文件 + 重启
+「试一试」走的是本进程 `TaskService` 的**同一条**代码路径——SSRF 准入、限流、
+以及开了转发时的分发全都照常生效，请求也会像真实请求一样出现在请求流里。
+另写一条只在页面上成立的路径毫无意义：那验证的就不是线上行为了。
 
-这条线是刻意划的。这个服务能代任意 URL 发请求，一个能改它配置的网页就是极高价值
-的目标；而"手动摘个节点"是运行时的、可逆的，风险收益比完全不同。
+#### 能改什么、不能改什么
+
+- **能改**（写回 toml，保留注释与格式，改动前留 `.bak`）：超时、重试、按 host
+  限流、日志级别、浏览器引擎与页面上限、链路记录、集群策略与节点列表、压缩策略。
+- **不能改**：`[SECURITY]` 全部（令牌、TLS、SSRF 三个开关）、Web 自己的登录凭据、
+  集群共享密钥与各节点 token、`[BROWSER].allow_scripts`。这些只展示，要改请编辑
+  文件 / `.env` 后重启。
+- **不装东西**：引擎的安装状态只**展示**，附上安装命令让人自己去那台机器上跑。
+  让网页能执行安装命令等于给它一个任意命令执行的入口。
+
+这条线是刻意划的：这个服务能代任意 URL 发请求，一个能从网页关掉内网拦截、改掉
+令牌的管理端，等于给自己装了个跳板。而调超时、加节点这类操作改错了也只是性能
+或可用性问题，可逆、可见。
+
+写回是**定点文本替换**而不是"读成 dict 再整体 dump"：那份配置里几乎每一项都带着
+解释（为什么默认是这个值、配错了什么症状），整体 dump 会把它们全抹掉。所以只换
+被改动那一行等号右边的值，行尾注释都保留。写入用临时文件 + `os.replace`，
+断电不会留下半个配置文件。
+
+页面里**一行 JavaScript 都没有**，自动刷新用 `<meta refresh>`，CSP 收到
+`default-src 'none'`。
 
 安全措施：会话 cookie 带 `HttpOnly` + `SameSite=Strict`，所有写操作校验 CSRF
 token，登录失败按来源 IP 限速（5 次后锁定 5 分钟，锁定期间正确密码也不放行），
@@ -239,6 +287,7 @@ token，登录失败按来源 IP 限速（5 次后锁定 5 分钟，锁定期间
 | `IPCLICK_MAX_WORKERS` | `[SERVER].max_workers` |
 | `IPCLICK_MODE` | `[GENERAL].mode` |
 | `IPCLICK_LOG_LEVEL` | `[LOG].level` |
+| `IPCLICK_CLUSTER_SELF_ID` | `[CLUSTER].self_id` —— 多台机器共用一份配置时靠它区分身份 |
 
 `.env` 支持 `KEY=VALUE`、`export KEY=VALUE`、`#` 注释、单双引号（双引号内可转义）。
 不支持多行值和 `${VAR}` 插值——需要那些请直接用环境变量。
@@ -446,18 +495,17 @@ print(response.text)
 ```python
 from ipclick import IPClickAdapter, downloader
 
-response = downloader.get("https://httpbin.org/get", adapter=IPClickAdapter.HTTPX)
+response = downloader.get("https://httpbin.org/get", adapter=IPClickAdapter.NIQUESTS)
 ```
 
 | 适配器 | 反检测 | HTTP/2 · 3 | JS 渲染 | 安装 |
 |---|---|---|---|---|
 | `curl_cffi`（默认） | TLS 指纹伪装 | HTTP/2 | ❌ | 内置 |
-| `httpx` | ❌ | HTTP/2 | ❌ | `ipclick[httpx]` |
 | `niquests` | ❌ | **HTTP/3** | ❌ | `ipclick[niquests]` |
 | `browser` | 由服务端引擎决定 | — | ✅ | 见下 |
 | `camoufox` | Firefox + 完整指纹伪装 | — | ✅ | `ipclick[camoufox]` |
 | `patchright` | Chromium，Playwright 反检测分支 | — | ✅ | `ipclick[patchright]` |
-| `playwright` | ❌（原版，最稳） | — | ✅ | `ipclick[browser]` |
+| `playwright` | ❌（原版，最稳） | — | ✅ | `ipclick[playwright]` |
 | `DrissionPage` | Chromium，CDP 直连 | — | ✅ | `ipclick[drissionpage]` |
 
 > `requests` 适配器在 0.2.3 里有过，之后被 `niquests` 取代——后者 API 完全一致
@@ -636,22 +684,10 @@ per_host_burst = 0
 限流对 `Send` / `SendStream` / `SendBatch` 都生效。流式请求的额度**持有到整条流
 结束**——只在建流时占额度等于没限住。
 
-**跨节点共享额度**（可选）：上面的限额默认是**每个服务端进程各算各的**，集群里
-N 个节点就是 N 倍实际并发。要让整个集群共用一份额度，换成 Redis 后端：
-
-```toml
-[DOWNLOADER.rate_limit]
-backend = "redis"                        # pip install "ipclick[redis]"
-redis_url = "redis://127.0.0.1:6379/0"
-redis_slot_ttl = 600                     # 持有者多久算陈旧
-```
-
-并发名额和令牌桶都用 Lua 保证原子性——分成多条命令的话，两个节点会同时读到
-"还有名额"然后各拿一个。进程拿着名额崩了，靠 `redis_slot_ttl` 把名额收回来，
-所以它**必须大于最长的单次请求**，否则慢请求的名额会被别人抢走。
-
-Redis 挂掉时**放行**而不是拒绝所有请求——限流是保护性措施，让它的故障演变成
-全站不可用是本末倒置。但会打 ERROR 日志，别让限流悄悄失效。
+**集群里的限额**：额度在**收到任务的那个节点**上计算。用服务端转发模式时所有
+任务都从入口节点进来，那一台算出来的就是全局额度，因此**不需要 Redis 之类的
+中间件**（0.3 起已移除 `backend = "redis"`）。用客户端分发模式时每个节点各算
+各的，N 个节点就是 N 倍实际并发——需要全局限额就改用服务端转发。
 
 > ⚠️ **这会占用 worker 线程。** 服务端是一请求一线程，排队等额度会占着那个
 > 线程。`per_host_max_concurrent` 设得很小、同时又有大量请求打向同一个 host 时，
@@ -662,10 +698,14 @@ Redis 挂掉时**放行**而不是拒绝所有请求——限流是保护性措�
 超时会抛 `HostLimitTimeout`，而不是返回 `status_code == -1`：这是本机的限流策略
 生效了，不是网络故障，返回 -1 会让人去排查目标站点。
 
-### 集群与故障转移
+### 集群
 
-`ClusterDownloader` 把请求分发到多个 IPClick 服务端，接口与单节点的
-`Downloader` 一致：
+有**两种**形态，用 `[CLUSTER].forward` 选。两种都保留，因为它们适合的场景不同。
+
+#### 形态一：客户端分发（默认，`forward = "off"`）
+
+调用方自己持有全部节点地址，直连每一台。少一跳、不占入口带宽，前提是调用方能连
+到所有节点。
 
 ```python
 from ipclick.cluster import ClusterDownloader
@@ -675,26 +715,88 @@ with ClusterDownloader() as d:          # 节点取自 [CLUSTER].nodes
     print(d.snapshot())                 # 各节点健康状态
 ```
 
+#### 形态二：服务端转发（`forward = "on"`）
+
+调用方只需要知道**一个**地址。入口节点按策略挑节点：挑到自己就本地干，挑到别人
+就把请求原样转过去，拿到结果再回给调用方。适合调用方在集群外，或者不想让调用方
+感知拓扑。**不需要 Redis 之类的中间件**——任务从哪进来，分发和限流就在那一台算。
+
 ```toml
 [CLUSTER]
+forward = "on"
+self_id = "node-a"              # 留空则按 [SERVER] 的监听端口 + 本机地址自动识别
 load_balancer = "round_robin"   # round_robin / random / weight
+max_failover = 2                # 转发失败最多换几个节点
+forward_timeout = 0             # 0 = 按任务超时 ×(重试次数+1) + 15s 余量推算
+
+nodes = [
+    { id = "node-a", address = "10.0.0.1:9527" },   # 本机也要列进来才会分到活
+    { id = "node-b", address = "10.0.0.2:9527" },
+    { id = "node-c", address = "10.0.0.3:9527" },
+]
+```
+
+五台机器可以用**完全相同**的这份 `ipclick.toml` 和**完全相同**的 `.env`，只靠
+一个环境变量区分身份：
+
+```bash
+IPCLICK_CLUSTER_SELF_ID=node-b ipclick run
+```
+
+四条值得知道的性质：
+
+1. **只转一跳。** 转发时带 `ipclick-forwarded` metadata，收到带这个标记的请求
+   一律本地执行，所以环路在协议层面就不可能出现。
+2. **任意节点都能当入口。** 配置对等，谁被访问谁就是入口。平时只把流量打给 A，
+   A 挂了直接把客户端指向 B 即可，不用改任何配置。
+3. **入口自己也干活**（只要它在 `nodes` 里）。子节点全挂时入口会自己兜底执行，
+   而不是让请求失败。
+4. **流式下载不转发**，永远由收到请求的节点自己执行——把每个分片再经入口中转一次
+   会让入口带宽翻倍。要让子节点出流量就用客户端分发模式直连它。
+
+批量（`SendBatch`）是转发模式最划算的场景：一次调用会被摊到多台机器上。
+
+#### 节点间鉴权：一个共享密钥，派生出各不相同的令牌
+
+最直觉的做法是给每台机器手写一个令牌、再在每台机器的节点列表里把其他机器的令牌
+抄一遍——5 台机器就是 20 份抄写，加一台要改 6 个文件，改漏一处的症状是运行时
+`UNAUTHENTICATED`，很难定位。
+
+所以改成派生：
+
+```
+node_token = base64url( HMAC-SHA256(cluster_secret, "ipclick-node:" + node_id) )
+```
+
+所有机器的 `.env` 里放**同一个** `IPCLICK_CLUSTER_SECRET`：
+
+```
+IPCLICK_CLUSTER_SECRET=（用 openssl rand -base64 32 生成，复制到每台机器）
+```
+
+* 每个节点用自己的 `self_id` 算出自己该接受哪个令牌。
+* 转发方用目标的 `node_id` 算出该带哪个令牌。两边算的必然一致。
+* 令牌**各不相同**——拿到子节点 B 的令牌不等于能调 C，也不等于拿到共享密钥
+  （HMAC 单向）。这是"每节点独立令牌"和"全集群一个口令"的差别所在。
+* 加一台机器只需要在节点列表里加一行，不需要发放任何新凭据。
+
+需要对接令牌不由这里管理的节点时，在那一项上写 `token = "..."` 覆盖派生值。
+没配共享密钥也能跑（内网全互信是合法选择），但启动时会明确警告。
+
+#### 共通部分
+
+```toml
+[CLUSTER]
 probe_interval = 10             # 健康探测间隔（秒）
 failure_threshold = 3           # 连续失败多少次判定摘除
 recovery_threshold = 2          # 连续成功多少次判定恢复
-max_failover = 2                # 单个请求最多换几个节点
-
-[[CLUSTER.nodes]]
-id = "node-a"
-address = "10.0.0.1:9527"
-weight = 100
-region = "cn-east"
 ```
 
-摘除与恢复都用**连续计数阈值**而不是单次结果：一次网络抖动就摘节点会让流量
-反复横跳。探测走 `grpc.health.v1`，也就是 P2 那套标准健康检查。
+摘除与恢复都用**连续计数阈值**而不是单次结果：一次网络抖动就摘节点会让流量反复
+横跳。探测走 `grpc.health.v1`，也就是 P2 那套标准健康检查。
 
-故障转移只在 `TransportError`（这个节点有问题）时发生。参数错误、鉴权失败换个
-节点还是一样的结果，直接上抛，不浪费尝试次数。
+故障转移只在节点级故障（`UNAVAILABLE` / 超时 / 过载）时换节点。参数错误、鉴权
+失败换个节点还是一样的结果，直接把错误还给调用方，不浪费尝试次数。
 
 **节点发现**（可选）：节点列表默认写死在配置里，扩缩容要改配置重启每一个客户端。
 换成 DNS 发现就不用了：
@@ -738,29 +840,41 @@ IPClick/
 │       ├── server.py            # gRPC 服务端实现
 │       ├── auth.py              # 服务端令牌鉴权拦截器
 │       ├── health.py            # grpc.health.v1 健康检查
-│       ├── metrics.py           # Prometheus 指标（可选依赖）
+│       ├── trace.py             # 链路记录（内存环形缓冲 + 可选 SQLite）
+│       ├── compression.py       # 请求压缩策略（自动化脚本压缩收益最大）
 │       ├── limiter.py           # 按 host 的并发与 QPS 闸门
 │       ├── exceptions.py        # 异常层次
 │       ├── py.typed             # 类型标注标记
 │       ├── adapters/            # 下载器适配器
-│       │   ├── base.py          # 适配器基类与重试装饰器
+│       │   ├── base.py          # 适配器基类、重试装饰器、脚本与导航错误分类
 │       │   ├── settings.py      # [DOWNLOADER] 配置
 │       │   ├── browser_settings.py  # [BROWSER] 配置
-│       │   ├── browser_engines.py   # 引擎选择与启动（含平台默认）
-│       │   ├── curl_cffi_adapter.py
-│       │   ├── httpx_adapter.py
-│       │   ├── requests_adapter.py
+│       │   ├── browser_engines.py   # 引擎选择、两级安装检测、启动
+│       │   ├── curl_cffi_adapter.py # 默认适配器（唯一有指纹伪装的）
+│       │   ├── niquests_adapter.py  # HTTP/2 + HTTP/3
 │       │   ├── browser_adapter.py   # playwright / patchright / camoufox
 │       │   ├── drission_adapter.py  # DrissionPage（CDP 直连）
-│       │   └── registry.py      # 适配器注册表
-│       ├── cluster/             # 集群客户端
+│       │   └── registry.py      # 适配器注册表（含已移除适配器的指引）
+│       ├── cluster/             # 集群
 │       │   ├── node.py          # 节点模型与 [CLUSTER] 配置
 │       │   ├── balancer.py      # 轮询 / 随机 / 加权
 │       │   ├── pool.py          # 节点池与健康探测
-│       │   ├── client.py        # ClusterDownloader（故障转移）
+│       │   ├── client.py        # ClusterDownloader（客户端分发 + 故障转移）
+│       │   ├── forwarder.py     # ForwardingTaskService（服务端转发）
+│       │   ├── tokens.py        # 由共享密钥派生每节点独立令牌
+│       │   ├── discovery.py     # static / dns 节点发现
 │       │   └── status_page.py   # 只读状态页
+│       ├── web/                 # Web 管理端（仅标准库，页面里没有 JS）
+│       │   ├── server.py        # HTTP 服务、会话、CSRF、路由
+│       │   ├── pages.py         # 各页面的数据与操作
+│       │   ├── templates.py     # HTML 渲染（每处插值都要过 esc）
+│       │   ├── editable.py      # 可编辑配置项白名单
+│       │   └── auth.py          # 凭据、会话、登录限速
 │       ├── cli/                 # 命令行工具
-│       ├── config_loader/       # 配置加载器
+│       ├── config_loader/       # 配置加载
+│       │   ├── loader.py        # 优先级与环境变量覆盖
+│       │   ├── dotenv.py        # .env 解析
+│       │   └── writer.py        # 写回 toml（定点替换，保留注释）
 │       ├── configs/             # 默认配置文件
 │       ├── dto/                 # 数据传输对象
 │       │   ├── models.py        # 数据模型定义
@@ -864,44 +978,49 @@ from ipclick.health import check_health
 healthy, status = check_health("10.0.0.1:9527", timeout=3)
 ```
 
-### Prometheus 指标
+### 链路记录与统计
 
-需要可选依赖：
-
-```bash
-pip install "ipclick[metrics]"
-```
+每个请求处理完记一条：谁处理的、用了哪个适配器、状态码、耗时、重试几次、
+在限流闸门里排了多久。不依赖任何第三方服务。
 
 ```toml
-[MONITOR]
-metrics_enabled = true
-metrics_port = 9528
-metrics_host = "0.0.0.0"   # 只允许本机抓取则改成 127.0.0.1
+[TRACE]
+memory_size = 500          # 内存环形缓冲，始终开启，零磁盘
+sqlite_enabled = false     # 落盘（默认关）。开了 Web 端才能查历史与跨天统计
+sqlite_path = "ipclick-trace.db"
+retention_days = 30        # 超期的每小时清一次；0 = 永久
+only_errors = false        # 只记失败请求（成功量极大时省磁盘）
+record_url = true          # 关掉后只记 host
 ```
 
-指标走**独立 HTTP 端口**（Prometheus 生态惯例），不复用 gRPC 端口。
-默认关闭 —— 指标端点通常比业务端口设防更少，应由部署方显式决定是否开、开在哪。
+两层结构是刻意的：
 
-| 指标 | 类型 | 标签 |
-|---|---|---|
-| `ipclick_requests_total` | Counter | `adapter` `method` `outcome` |
-| `ipclick_request_duration_seconds` | Histogram | `adapter` |
-| `ipclick_response_bytes` | Histogram | `adapter` |
-| `ipclick_requests_in_flight` | Gauge | — |
-| `ipclick_retries_total` | Counter | `adapter` `reason` |
-| `ipclick_rejected_total` | Counter | `reason` |
-| `ipclick_build_info` | Info | `version` |
+* **内存环形缓冲**始终开着，回答"刚才发生了什么"。上限固定、零磁盘、进程重启即丢。
+* **SQLite** 默认关，回答"上周三那批任务成功率多少"。WAL 模式下读不阻塞写。
 
-`outcome` 取值为 `2xx` / `3xx` / `4xx` / `5xx` / `failure`（`failure` 表示连接层
-失败，压根没拿到 HTTP 响应）。`reason` 取值为 `unauthenticated` /
-`url_not_allowed` / `invalid_argument` / `internal_error` / `exception` /
-`status_code`。
+写盘走**单写线程 + 有界队列**：SQLite 同一时刻只允许一个写者，让 N 个 gRPC
+worker 各自去写等于在热路径上抢锁。请求线程只做一次 `put_nowait`，队列满了就丢
+并计数——可观测性数据绝不能反压业务请求。**丢弃条数在 Web 端显眼地显示**，
+静默丢弃会让"没有记录"和"没发生过"混为一谈。
 
-> **指标标签里不含目标 URL 或主机名，这是刻意的。** 爬虫场景下目标是无界的，
-> 用它做标签会让 Prometheus 的时间序列数量爆炸；而且指标端点往往设防更少，
-> 把抓取目标暴露在那里等于公开业务意图。需要按站点分析请走日志，不要走指标。
+响应里也带一份链路信息（`TaskResp.trace`）：
 
-未安装 `prometheus_client` 时所有埋点降级为无操作，功能不受任何影响。
+```python
+resp = downloader.get("https://example.com")
+print(resp.raw.trace.node_id)    # 真正执行的节点（集群转发时是关键信息）
+print(resp.raw.trace.adapter)    # 实际用的适配器（browser 会解析成具体引擎名）
+print(resp.raw.trace.attempts)   # 内部重试了几次
+print(resp.raw.trace.forwarded)  # 是否经由其他节点转发
+print(resp.raw.trace.queued_ms)  # 在限流闸门里排了多久
+```
+
+它刻意**不含**请求头、cookie、请求体、代理串——那些里面有机密，而这些记录是要
+在 Web 端展示的。（0.3 之前这里回传的是整个原始请求 `original_request`，代理账号
+密码会随之泄漏，且响应体积翻倍。该字段已移除，编号保留不复用。）
+
+> 为什么不用 Prometheus：它按设计不保留单条记录（把 URL 放进标签会造成基数
+> 爆炸），所以回答不了"我刚才那个请求为什么 403"。而这个库的使用场景恰恰是后者。
+> 聚合数字这边也有——进程内计数器实时累加，代价只是重启归零。
 
 ### 安全配置
 
@@ -1050,12 +1169,13 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 
 | 配置节 | 状态 |
 |---|---|
-| `[SERVER]` `[PROXY]` `[LOG]` `[SECURITY]` `[DOWNLOADER]` `[MONITOR]` `[BROWSER]` | ✅ 生效 |
-| `[GENERAL]` | ⚠️ `debug` 生效；`mode` 无消费方 |
-| `[CLUSTER]` | ⚠️ `load_balancer` / `nodes` / 阈值生效；`db_uri` 无消费方 |
+| `[SERVER]` `[CLIENT]` `[PROXY]` `[LOG]` `[SECURITY]` `[DOWNLOADER]` `[MONITOR]` `[BROWSER]` `[TRACE]` `[WEB]` | ✅ 全部生效 |
+| `[GENERAL]` | ✅ `debug` 与 `mode` 都生效 |
+| `[CLUSTER]` | ⚠️ 除 `db_uri`（预留给 etcd/Consul）之外全部生效 |
 
 > `[DOWNLOADER]` 的分块下载（`chunk`）、临时存储（`storage`）尚未实现，已从默认
-> 配置移除。限速（`rate_limit`）已在 P6 实现，见「按 host 限流」。
+> 配置移除；`rate_limit` 的 `redis` 后端已在 0.3.0 移除（集群限流由入口节点计算）。
+> `[LOG].format` 在 0.3.0 起真正生效（此前从未被读取）。
 
 ### 功能
 
@@ -1069,7 +1189,10 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 - **集群流式的中途重连**：`ClusterDownloader.stream()` 只有**建流**这一步会故障
   转移。流建立之后中途断掉不会自动重连——那需要断点续传（Range 请求）才能不重复
   数据。批量则是整批发给同一个节点，不跨节点拆分。
-- **文件上传**：`files` 参数会抛 `NotImplementedError`。
+- **文件上传**：协议里没有 multipart 字段（0.3.0 起 `files` 参数已从 API 移除，
+  因为它一直是抛 `NotImplementedError` 的）。要上传文件请自己拼好 multipart 体，
+  用 `data=<bytes>` 加上 `Content-Type: multipart/form-data; boundary=...` 发出去——
+  `data` 现在是 bytes 字段，任意二进制都能原样送达。
 - **Cookie 持久化**：请求之间不共享 cookie jar，每次请求相互独立。
 
 
@@ -1078,14 +1201,15 @@ downloader.get(url, adapter="htttpx")   # ValidationError: 未知的适配器名
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **P1** 打通存量 | `[DOWNLOADER]` 生效、参数错误不再伪装成网络失败、`NO_PROXY` 处理、`[GENERAL].debug` | ✅ 已完成 |
-| **P2** 安全与可运维 | 服务端 token 鉴权 ✅、gRPC 标准健康检查 ✅、Prometheus metrics ✅ | ✅ 已完成 |
+| **P2** 安全与可运维 | 服务端 token 鉴权 ✅、gRPC 标准健康检查 ✅、链路记录与统计 ✅ | ✅ 已完成 |
 | **P3** 能力扩展 | 异步客户端 ✅、批量 RPC ✅、真流式下载 ✅（限速 / 分块仍待做） | ✅ 已完成 |
 | **P4** 集群 | 节点池 ✅、负载均衡 ✅、健康探测 ✅、故障转移 ✅、只读状态页 ✅ | ✅ 已完成 |
-| **P5** 适配器 | `requests` ✅、`playwright` ✅（连带 `[BROWSER]` 与浏览器渲染） | ✅ 已完成 |
+| **P5** 适配器 | `niquests` ✅、`playwright` ✅（连带 `[BROWSER]` 与浏览器渲染） | ✅ 已完成 |
 | **P6** 限流与引擎 | 按 host 并发 / QPS 限制 ✅、浏览器引擎可插拔（camoufox / patchright / DrissionPage）✅ | ✅ 已完成 |
-| **P7** 生产化 | TLS/mTLS ✅、断点续传 ✅、分布式限流 ✅、DNS 服务发现 ✅、客户端重试 ✅、`[GENERAL].mode` ✅ | ✅ 已完成 |
+| **P7** 生产化 | TLS/mTLS ✅、断点续传 ✅、DNS 服务发现 ✅、客户端重试 ✅、`[GENERAL].mode` ✅ | ✅ 已完成 |
 | **P8** 打磨 | 轻量安装 ✅、niquests ✅、`--example` ✅、`.env` ✅、Web 管理端 ✅ | ✅ 已完成 |
-| **P9** 待定 | 异步服务端、文件上传、Cookie 持久化、etcd/Consul 原生发现 | 计划中 |
+| **P9** 分布式与可观测 | 服务端转发集群 ✅、派生式节点鉴权 ✅、链路记录 ✅、请求压缩 ✅、Web 端配置写回 / 请求流 / 试一试 ✅ | ✅ 已完成 |
+| **P10** 待定 | 异步服务端、multipart 文件上传、Cookie 持久化、etcd/Consul 原生发现 | 计划中 |
 
 ## 🛠️ 开发
 

@@ -8,6 +8,7 @@ import grpc
 from typing_extensions import override
 
 from ipclick.auth import AUTH_TOKEN_ENV, build_client_metadata, load_tokens
+from ipclick.compression import CompressionPolicy
 from ipclick.config_loader import load_config
 from ipclick.dto.models import DownloadResponse, DownloadTask, HttpMethod, IPClickAdapter, ProxyConfig
 from ipclick.dto.proto import task_pb2_grpc
@@ -68,7 +69,6 @@ _TASK_FIELDS = frozenset(
         "params",
         "data",
         "json",
-        "files",
         "timeout",
         "max_retries",
         "retry_backoff",
@@ -76,7 +76,6 @@ _TASK_FIELDS = frozenset(
         "allow_redirects",
         "stream",
         "impersonate",
-        "extensions",
         "automation_config",
         "automation_script",
     }
@@ -217,6 +216,8 @@ class ClientBase:
         client_config = dict(self.config.get("CLIENT", {}))
         self.rpc_max_retries: int = _as_int(client_config.get("rpc_max_retries"), 2)
         self.rpc_retry_backoff: float = _as_float(client_config.get("rpc_retry_backoff"), 0.5)
+        # 请求压缩。自动化脚本是主要动机：整个脚本文件走线，压完通常只剩几十分之一。
+        self.compression: CompressionPolicy = CompressionPolicy(client_config)
         # 子类的 close() 会改写它，声明在这里以便类型检查器识别
         self._closed: bool = False
 
@@ -225,7 +226,8 @@ class ClientBase:
             f"{type(self).__name__} 已加载配置，目标服务端 {self.host}:{self.port}，"
             f"配置节: {sorted(self.config.keys())}，"
             f"鉴权令牌: {'已配置' if self._metadata else '未配置'}，"
-            f"传输层: {describe(self.tls)}"
+            f"传输层: {describe(self.tls)}，"
+            f"请求压缩: {self.compression.describe()}"
         )
 
     @property
@@ -430,7 +432,6 @@ class Downloader(ClientBase):
         params: dict[str, Any] | None = None,
         data: Any = None,
         json: dict[str, Any] | None = None,
-        files: dict[str, Any] | None = None,
         proxy: ProxyConfig | str | bool | None = None,
         timeout: float = 60,
         max_retries: int = 3,
@@ -439,7 +440,6 @@ class Downloader(ClientBase):
         allow_redirects: bool = True,
         stream: bool = False,
         impersonate: str | None = None,
-        extensions: dict[str, Any] | None = None,
         automation_config: str | None = None,
         automation_script: str | None = None,
         allowed_status_codes: list[int] | None = None,
@@ -455,6 +455,13 @@ class Downloader(ClientBase):
             verify: 是否校验 SSL 证书，默认 True。
                 （0.2.0 之前这里默认 None，会被 protobuf 当成"未设置"，
                 服务端因而收到 False——即默认关闭证书校验。）
+
+        Note:
+            没有 ``files`` 参数。协议里从来没有这个字段（旧版的 ``files=``
+            一律抛 NotImplementedError），所以删掉它只是把 API 说实话。
+            要上传文件请自己拼好 multipart 体，用 ``data=<bytes>`` 加上
+            ``Content-Type: multipart/form-data; boundary=...`` 头发出去——
+            ``data`` 现在是 bytes 字段，任意二进制都能原样送达。
         """
         task = self._build_task(
             url=url,
@@ -467,7 +474,6 @@ class Downloader(ClientBase):
             params=params,
             data=data,
             json=json,
-            files=files,
             timeout=timeout,
             max_retries=max_retries,
             retry_backoff=retry_backoff,
@@ -475,7 +481,6 @@ class Downloader(ClientBase):
             allow_redirects=allow_redirects,
             stream=stream,
             impersonate=impersonate,
-            extensions=extensions,
             automation_config=automation_config,
             automation_script=automation_script,
             **kwargs,
@@ -512,7 +517,14 @@ class Downloader(ClientBase):
 
         for attempt in range(self.rpc_max_retries + 1):
             try:
-                pb_response = stub.Send(pb_request, timeout=self._deadline(task), metadata=self._metadata or None)
+                pb_response = stub.Send(
+                    pb_request,
+                    timeout=self._deadline(task),
+                    metadata=self._metadata or None,
+                    # 带自动化脚本的请求压完通常只剩几十分之一；小请求会被
+                    # 策略跳过，不白费 CPU。见 ipclick.compression。
+                    compression=self.compression.for_request(pb_request),
+                )
                 return DownloadResponse.from_protobuf(pb_response)
             except grpc.RpcError as e:
                 if not self._should_retry_rpc(e, attempt):
@@ -548,8 +560,14 @@ class Downloader(ClientBase):
         task = self._build_task(url=url, **kwargs)
         stub = self._get_stub()
 
+        pb_request = task.to_protobuf()
         try:
-            call = stub.SendStream(task.to_protobuf(), timeout=self._deadline(task), metadata=self._metadata or None)
+            call = stub.SendStream(
+                pb_request,
+                timeout=self._deadline(task),
+                metadata=self._metadata or None,
+                compression=self.compression.for_request(pb_request),
+            )
             return StreamedResponse(call)
         except grpc.RpcError as e:
             raise self._rpc_error(e) from e
@@ -578,7 +596,14 @@ class Downloader(ClientBase):
                 yield task.to_protobuf()
 
         try:
-            for pb_response in stub.SendBatch(_requests(), timeout=timeout, metadata=self._metadata or None):
+            # 批量走流式，压缩只能在整条流上设一次（不能逐条判定），
+            # 所以这里按模式来：auto 也压——批量本来就是"量大"的场景。
+            for pb_response in stub.SendBatch(
+                _requests(),
+                timeout=timeout,
+                metadata=self._metadata or None,
+                compression=self.compression.for_stream(),
+            ):
                 yield DownloadResponse.from_protobuf(pb_response)
         except grpc.RpcError as e:
             raise self._rpc_error(e) from e

@@ -13,9 +13,9 @@ from ipclick.utils import json_serializer
 class IPClickAdapter(Enum):
     # 定义格式: (Protobuf枚举值, 内部识别名称)
     CURL_CFFI = (task_pb2.CURL_CFFI, "curl_cffi")
-    HTTPX = (task_pb2.HTTPX, "httpx")
     #: 已移除的适配器。枚举值保留是为了兼容旧客户端——它们发来这个值时
     #: 服务端会明确报错，而不是静默换成别的适配器。
+    HTTPX = (task_pb2.HTTPX, "httpx")
     REQUESTS = (task_pb2.REQUESTS, "requests")
     NIQUESTS = (task_pb2.NIQUESTS, "niquests")
     DRISSIONPAGE = (task_pb2.DRISSIONPAGE, "DrissionPage")
@@ -119,7 +119,7 @@ class DownloadTask:
     """下载任务"""
 
     uuid: str = ""
-    # 允许传适配器名字符串（如 "httpx"），to_protobuf() 会解析成枚举成员
+    # 允许传适配器名字符串（如 "niquests"），to_protobuf() 会解析成枚举成员
     adapter: IPClickAdapter | str = IPClickAdapter.CURL_CFFI
 
     # 协议
@@ -130,7 +130,6 @@ class DownloadTask:
     params: dict[str, Any] | None = None
     data: Any = None
     json: dict[str, Any] | None = None
-    files: dict[str, Any] | None = None
     proxy: ProxyConfig | str | bool | None = None
     timeout: float = 60
     max_retries: int = 3
@@ -140,7 +139,6 @@ class DownloadTask:
     stream: bool = False
 
     impersonate: str | None = None  # curl_cffi 浏览器指纹伪装
-    extensions: dict[str, Any] | None = field(default_factory=dict)  # 拓展字段
 
     # 渲染
     automation_config: str | None = None
@@ -157,13 +155,10 @@ class DownloadTask:
             raise ValidationError("URL is required")
         if not self.url.startswith(("http://", "https://")):
             raise ValidationError("URL must start with http:// or https://")
-        if self.files:
-            raise NotImplementedError("files is not supported.")
 
         # 不能同时指定多种请求体
-        body_fields = [self.data, self.json, self.files]
-        if sum(x is not None for x in body_fields) > 1:
-            raise ValidationError("Cannot specify multiple body types (data, json, files)")
+        if self.data is not None and self.json is not None:
+            raise ValidationError("Cannot specify both data and json")
 
         if self.max_retries < 0:
             raise ValidationError("max_retries must be >= 0")
@@ -183,6 +178,22 @@ class DownloadTask:
         if not mapping:
             return None
         return {str(k): v if isinstance(v, str) else json.dumps(v, default=json_serializer) for k, v in mapping.items()}
+
+    @staticmethod
+    def _encode_body(body: Any) -> bytes | None:
+        """把请求体编码成 bytes（proto 里 data 是 bytes）。
+
+        ``bytes`` 原样透传——这正是改成 bytes 字段的目的：图片、gzip、非 UTF-8
+        表单体以前会在 json.dumps 那一步就抛 "not serializable"。
+        ``str`` 按 UTF-8 编码；dict / list 走 JSON（表单体的常见写法）。
+        """
+        if body is None:
+            return None
+        if isinstance(body, (bytes, bytearray, memoryview)):
+            return bytes(body)
+        if isinstance(body, str):
+            return body.encode("utf-8")
+        return json.dumps(body, default=json_serializer).encode("utf-8")
 
     @staticmethod
     def _cookies_to_map(cookies: dict[str, Any] | str | None) -> dict[str, str] | None:
@@ -230,7 +241,7 @@ class DownloadTask:
                 headers=self._stringify_map(self.headers),
                 cookies=self._cookies_to_map(self.cookies),
                 params=json.dumps(self.params, default=json_serializer) if self.params else None,
-                data=json.dumps(self.data, default=json_serializer) if self.data is not None else None,
+                data=self._encode_body(self.data),
                 json=json.dumps(self.json, default=json_serializer) if self.json is not None else None,
                 proxy=self._proxy_to_str(),
                 # 这些字段在 proto 里是 optional，显式传值即代表"已设置"，
@@ -242,7 +253,6 @@ class DownloadTask:
                 allow_redirects=self.allow_redirects,
                 stream=self.stream,
                 impersonate=self.impersonate,
-                extensions=self._stringify_map(self.extensions),
                 automation_config=self.automation_config,
                 automation_script=self.automation_script,
                 allowed_status_codes=self.allowed_status_codes,
@@ -252,6 +262,32 @@ class DownloadTask:
             raise
         except Exception as e:
             raise ValidationError(f"转换 protobuf 失败：{e}") from e
+
+
+@dataclass
+class ResponseTrace:
+    """一次请求的链路信息。
+
+    回答的是"这个请求到底怎么跑的"——集群里是谁执行的、实际用了哪个适配器
+    （``adapter="browser"`` 会被解析成具体引擎）、内部重试了几次、在限流闸门里
+    排了多久。刻意不含任何机密。
+    """
+
+    node_id: str = ""
+    adapter: str = ""
+    attempts: int = 1
+    forwarded: bool = False
+    queued_ms: int = 0
+
+    @classmethod
+    def from_protobuf(cls, pb_trace: "task_pb2.Trace") -> "ResponseTrace":
+        return cls(
+            node_id=pb_trace.node_id,
+            adapter=pb_trace.adapter,
+            attempts=pb_trace.attempts or 1,
+            forwarded=pb_trace.forwarded,
+            queued_ms=pb_trace.queued_ms,
+        )
 
 
 @dataclass
@@ -269,6 +305,9 @@ class DownloadResponse:
 
     elapsed_ms: int = 0
     error: str | None = None
+    #: 链路信息。服务端没带时是一个全默认值的 ResponseTrace（而不是 None），
+    #: 这样调用方写 ``resp.trace.node_id`` 永远不会 AttributeError。
+    trace: ResponseTrace = field(default_factory=lambda: ResponseTrace())
 
     @staticmethod
     def _adapter_name(pb_value: int) -> str:
@@ -289,7 +328,6 @@ class DownloadResponse:
         return cls(
             request_uuid=pb_response.request_uuid,
             adapter_type=cls._adapter_name(pb_response.adapter),
-            request=pb_response.original_request,
             url=pb_response.effective_url,
             status_code=pb_response.status_code,
             headers=dict(pb_response.response_headers),
@@ -297,6 +335,7 @@ class DownloadResponse:
             text=text,
             error=pb_response.error_message if pb_response.error_message else None,
             elapsed_ms=pb_response.response_time_ms,
+            trace=ResponseTrace.from_protobuf(pb_response.trace) if pb_response.HasField("trace") else ResponseTrace(),
         )
 
     @classmethod

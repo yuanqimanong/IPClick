@@ -35,7 +35,11 @@ ENV_OVERRIDES: dict[str, tuple[str, str, type]] = {
     "IPCLICK_MAX_WORKERS": ("SERVER", "max_workers", int),
     "IPCLICK_MODE": ("GENERAL", "mode", str),
     "IPCLICK_LOG_LEVEL": ("LOG", "level", str),
-    # 鉴权令牌由 ipclick.auth 单独处理（要支持多令牌），这里不重复
+    # 多台机器共用同一份 ipclick.toml 时，唯一必须逐机不同的就是节点身份，
+    # 所以它必须能从环境变量给。
+    "IPCLICK_CLUSTER_SELF_ID": ("CLUSTER", "self_id", str),
+    # 鉴权令牌与集群共享密钥由 ipclick.auth / ipclick.cluster.tokens 单独处理
+    # （前者要支持多令牌，后者要参与派生），这里不重复
 }
 
 
