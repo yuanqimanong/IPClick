@@ -349,18 +349,56 @@ class TestTestPage:
 
 
 class TestAdapterChoices:
-    def test_only_installed_adapters_offered(self, pages: WebPages):
-        """下拉框里不该出现缺依赖的适配器——选了必然报错。"""
-        assert "curl_cffi" in pages._adapters()  # pyright: ignore[reportPrivateUsage]
+    """P2-1：下拉框要**分类展示全部**，而不是只列本机装了的。
 
-    def test_browser_offered_when_rendering_enabled(self, pages: WebPages):
-        """browser 是"由服务端选引擎"的通用写法，不在注册表里但必须能选。"""
+    0.3 只返回注册表里已装的那几个，于是没装的适配器直接从列表里消失——
+    对着 wiki 看的人会觉得"文档和实现对不上"，也不知道到底支持哪些。
+    """
+
+    @staticmethod
+    def _flat(pages: WebPages) -> dict[str, dict[str, object]]:
+        choices = pages._adapter_choices()  # pyright: ignore[reportPrivateUsage]
+        return {item["value"]: item for group in choices for item in group["items"]}
+
+    def test_groups_are_http_and_browser(self, pages: WebPages):
+        titles = [g["title"] for g in pages._adapter_choices()]  # pyright: ignore[reportPrivateUsage]
+        assert titles == ["HTTP 适配器", "浏览器渲染"]
+
+    def test_core_adapter_always_available(self, pages: WebPages):
+        items = self._flat(pages)
+        assert items["curl_cffi"]["available"] is True
+
+    def test_every_extra_is_listed_even_if_missing(self, pages: WebPages):
+        """关键回归：没装的也要在列表里（置灰 + 安装命令），不能消失。"""
+        from ipclick.components import COMPONENTS
+
+        items = self._flat(pages)
+        for component in COMPONENTS:
+            assert component.name in items, f"{component.name} 从下拉框里消失了"
+
+    def test_missing_ones_are_disabled_with_install_hint(self, pages: WebPages, monkeypatch: pytest.MonkeyPatch):
+        from ipclick.utils import module_probe
+
+        monkeypatch.setattr(module_probe, "installed", lambda _name: False)
+        items = self._flat(pages)
+        assert items["niquests"]["available"] is False
+        assert 'pip install "ipclick[niquests]"' in str(items["niquests"]["hint"])
+
+    def test_browser_is_a_placeholder_not_a_sixth_component(self, pages: WebPages):
+        """browser 是"引擎由服务端自动选"的占位值，必须和真实组件名区分开——
+        混排会让人以为它是文档漏掉的第六个 extra。
+        """
         pages.config = Settings({"BROWSER": {"enabled": True}})
-        assert "browser" in pages._adapters()  # pyright: ignore[reportPrivateUsage]
+        items = self._flat(pages)
+        assert "browser" in items
+        assert "自动选择" in str(items["browser"]["label"])
 
-    def test_browser_hidden_when_rendering_disabled(self, pages: WebPages):
+    def test_browser_disabled_when_rendering_off(self, pages: WebPages):
         pages.config = Settings({"BROWSER": {"enabled": False}})
-        assert "browser" not in pages._adapters()  # pyright: ignore[reportPrivateUsage]
+        items = self._flat(pages)
+        # 仍然列出来，但选不了——直接消失的话没人知道是"关掉了"还是"不支持"
+        assert items["browser"]["available"] is False
+        assert "enabled = false" in str(items["browser"]["hint"])
 
 
 class TestConfigPage:
@@ -437,11 +475,31 @@ class TestTracePage:
         assert "http://example.com/one" in html
 
     def test_live_refresh_on_by_default(self, pages: WebPages):
-        assert 'http-equiv="refresh"' in pages.trace_page({}, "admin", "csrf")
+        """0.4 改成局部刷新：``<meta refresh>`` 每 3 秒重载整页，滚动位置丢失、
+        正在填的过滤条件被冲掉、页面白闪。现在只换那一块的 innerHTML。
+        """
+        html = pages.trace_page({}, "admin", "csrf")
+        assert "data-live-src=" in html
+        assert 'http-equiv="refresh"' not in html, "不该再整页重载"
 
     def test_live_can_be_turned_off(self, pages: WebPages):
         html = pages.trace_page({"_": "", "live": ""}, "admin", "csrf")
-        assert 'http-equiv="refresh"' not in html
+        assert "data-live-src=" not in html
+
+    def test_live_fragment_keeps_the_filters(self, pages: WebPages):
+        """刷新片段必须带上过滤条件，否则刷一次就把筛选冲掉了。"""
+        html = pages.trace_page({"status": "5xx", "adapter": "curl_cffi"}, "admin", "csrf")
+        assert "status=5xx" in html
+        assert "adapter=curl_cffi" in html
+
+    def test_fragment_and_full_page_render_the_same_table(self, pages: WebPages):
+        """片段和整页走同一个渲染函数——两套逻辑迟早对不上，而那种失步
+        只有在数据变化时才暴露，最难查。
+        """
+        _ = pages.run_test({"url": "http://example.com/frag"})
+        fragment = pages.trace_fragment({})
+        assert "http://example.com/frag" in fragment
+        assert fragment in pages.trace_page({}, "admin", "csrf")
 
     def test_status_filter(self, pages: WebPages):
         _ = pages.run_test({"url": "http://example.com/ok"})
@@ -462,15 +520,39 @@ class TestTracePage:
 
 
 class TestDashboardExtras:
-    def test_engine_status_is_display_only(self, pages: WebPages):
-        pages.config = Settings({"BROWSER": {"enabled": True}})
-        extras = pages.dashboard_extras()
-        assert extras["engines"], "应该列出所有引擎"
-        assert all("install" in e and "available" in e for e in extras["engines"])
+    """P2-2：总览要覆盖**全部五个** extras，不只是"渲染引擎"。
 
-    def test_engines_hidden_when_browser_disabled(self, pages: WebPages):
+    0.3 那张表只有四个浏览器引擎，niquests 是纯 HTTP 适配器、不属于渲染引擎，
+    于是它完全没有展示位——装没装只能靠猜。
+    """
+
+    def test_all_five_extras_are_reported(self, pages: WebPages):
+        names = {c["name"] for c in pages.dashboard_extras()["components"]}
+        assert names == {"niquests", "camoufox", "patchright", "playwright", "DrissionPage"}
+
+    def test_niquests_has_a_slot(self, pages: WebPages):
+        """回归：0.3 里 niquests 完全没有安装状态展示位。"""
+        components = {c["name"]: c for c in pages.dashboard_extras()["components"]}
+        assert "package" in components["niquests"]
+
+    def test_package_and_browser_body_stay_separate(self, pages: WebPages):
+        """两级状态不能合并：只报一个的话，pip 装完但没 fetch 的机器会显示
+        "已安装"，而第一次请求会卡几分钟去下 1 GB。
+        """
+        components = {c["name"]: c for c in pages.dashboard_extras()["components"]}
+        camoufox = components["camoufox"]
+        assert "package" in camoufox and "browser" in camoufox
+        assert camoufox["browser_command"] == "python -m camoufox fetch"
+
+    def test_components_carry_install_commands(self, pages: WebPages):
+        assert all(c["install"].startswith("pip install") for c in pages.dashboard_extras()["components"])
+
+    def test_reported_even_when_rendering_disabled(self, pages: WebPages):
+        """关掉浏览器渲染不该让组件清单消失——"装没装"和"开不开"是两件事，
+        而 niquests 根本不受 [BROWSER].enabled 影响。
+        """
         pages.config = Settings({"BROWSER": {"enabled": False}})
-        assert pages.dashboard_extras()["engines"] == []
+        assert len(pages.dashboard_extras()["components"]) == 5
 
 
 class TestBrowserHangFixes:

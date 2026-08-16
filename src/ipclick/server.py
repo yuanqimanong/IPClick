@@ -17,7 +17,7 @@ from ipclick.cluster.node import ClusterConfig
 from ipclick.cluster.pool import NodePool
 from ipclick.cluster.tokens import cluster_secret, self_tokens
 from ipclick.compression import CompressionPolicy
-from ipclick.config_loader import load_config
+from ipclick.config_loader import load_config, placeholders
 from ipclick.dto.proto import task_pb2_grpc
 from ipclick.exceptions import ConfigError
 from ipclick.factory import resolve_mode
@@ -43,20 +43,38 @@ class IPClickServer:
     IPClick gRPC服务器
     """
 
-    def __init__(self, config_path: str | None = None, *, web: bool | None = None):
+    def __init__(
+        self,
+        config_path: str | None = None,
+        *,
+        web: bool | None = None,
+        host: str | None = None,
+        port: int | None = None,
+        web_port: int | None = None,
+    ):
         self._config_path: str | None = config_path
         self.config: Settings = load_config(config_path)
+
+        # 监听地址在这里就定下来，而不是等到 start()。
+        #
+        # 因为 [TRACE].sqlite_path 与 [LOG].output 支持 {port} 占位符，而占位符
+        # 必须替换成**运行时实际生效**的端口（--port 覆盖之后的那个）。日志与
+        # 链路记录器都在这个构造函数里初始化，所以端口得比它们更早确定。
+        server_section = dict(self.config.get("SERVER", {}))
+        self._host: str = host or str(server_section.get("host", "[::]"))
+        self._port: int = int(port if port else server_section.get("port", 9527))
+
         # 按配置里的 [LOG] 节初始化日志（此前这一节完全没被读取过）；
         # [GENERAL].debug 为真时强制 DEBUG 级别
         LogUtil.init_from_config(
-            dict(self.config.get("LOG", {})),
+            placeholders.resolve_for("LOG", dict(self.config.get("LOG", {})), self._port),
             debug=bool(dict(self.config.get("GENERAL", {})).get("debug", False)),
         )
         # 链路记录器必须在 TaskService 之前初始化：后者在构造时就取了单例，
         # 晚一步的话所有埋点都会落到默认（纯内存）实例上，[TRACE] 配置形同虚设。
         self.recorder: TraceRecorder = init_recorder(
             TraceSettings.from_config(
-                dict(self.config.get("TRACE", {})),
+                placeholders.resolve_for("TRACE", dict(self.config.get("TRACE", {})), self._port),
                 node_id=str(dict(self.config.get("CLUSTER", {})).get("self_id", "") or ""),
             )
         )
@@ -68,10 +86,14 @@ class IPClickServer:
         self.health: HealthReporter = HealthReporter(enabled=bool(monitor_config.get("health_check", True)))
         self._monitor_config: dict[str, object] = monitor_config
 
-        # Web 管理端：命令行 --web 优先于 [WEB].enabled
+        # Web 管理端：命令行 --web / --web-port 优先于 [WEB] 里的对应项。
+        # 加 --web-port 是因为 gRPC 端口有 --port 而 Web 端没有，同目录起多实例时
+        # 第二个的 Web 端会因为端口占用起不来，却只能靠改配置文件绕开。
         self.web_config: WebConfig = WebConfig(dict(self.config.get("WEB", {})))
         if web is not None:
             self.web_config.enabled = web
+        if web_port:
+            self.web_config.port = web_port
         self._web_server: WebServer | None = None
         self._web_pages: WebPages | None = None
         self._listen_addr: str = ""
@@ -94,12 +116,16 @@ class IPClickServer:
             self.recorder,
             task_service=self.task_service,
             config_path=self._config_path,
+            # 保存节点之后立即重建路由，不用重启。页面层没有权限碰这些对象，
+            # 所以由服务端注入一个回调。
+            on_cluster_changed=self._reload_cluster,
         )
         self._web_server = WebServer(
             self._web_snapshot,
             credentials,
             action_handler=self._web_action,
             pages=self._web_pages,
+            live_provider=self._live_snapshot,
         )
         self._start_node_pool()
         url = self._web_server.start(self.web_config.host, self.web_config.port)
@@ -170,7 +196,9 @@ class IPClickServer:
             },
             "trace": extras.get("trace") or self.recorder.stats(),
             "recent": extras.get("recent") or self.recorder.recent(limit=12),
-            "engines": extras.get("engines") or [],
+            # 五个可选 extras 的安装状态。0.3 这里叫 engines 且只有四个"渲染引擎"，
+            # niquests 是纯 HTTP 适配器，完全没有展示位。
+            "components": extras.get("components") or [],
             "security": {
                 "tls": describe(TLSSettings.from_config(security)),
                 "auth": bool(load_tokens(security)),
@@ -189,6 +217,15 @@ class IPClickServer:
             },
             "cluster": self._cluster_summary(),
         }
+
+    def _live_snapshot(self) -> dict[str, object]:
+        """总览页那一块自动刷新用的**轻量**数据。
+
+        它每 5 秒被拉一次，而完整快照里有一堆按秒计算毫无意义、代价却不小的东西：
+        解析 TLS 配置、算集群拓扑、探四个引擎的浏览器本体（那是文件系统扫描）。
+        自动刷新的那块只用到链路统计，所以只算这一份。
+        """
+        return {"trace": self.recorder.stats()}
 
     def _cluster_summary(self) -> dict[str, Any]:
         """集群展示数据。开了服务端转发时用转发器自己的快照——那才是真正在
@@ -227,6 +264,41 @@ class IPClickServer:
             node["drained"] = node.get("id") in self._drained
         return nodes
 
+    def _reload_cluster(self) -> tuple[bool, str]:
+        """节点列表改完之后原地重建路由。
+
+        0.3 里 ``ClusterConfig`` 与 ``NodePool`` 的生命周期等于进程生命周期：
+        ``/nodes`` 保存完只是改了文件，真正在干活的路由表纹丝不动，所以页面上
+        只能写"改完需要重启才生效"。现在两条路都重建：
+
+        * 开了服务端转发 → 转发器自己换掉 cluster 与节点池（保留各节点的健康
+          计数，否则熔断/恢复的"连续 N 次"判定会被清零）。
+        * 没开转发 → 只有那个供 Web 端观测的池子，把它重建一遍。
+
+        监听端口这类要重建 gRPC server 的项**不在**热更新范围内，它们仍然标
+        "需重启"——但改节点列表本来也不会动到端口。
+        """
+        # 页面层已经重新读过文件了，这里跟着换成同一份，免得两边看到的配置不一样
+        reloaded = self._web_pages.config if self._web_pages is not None else self.config
+        self.config = reloaded
+        try:
+            self.cluster_config = ClusterConfig.from_config(dict(reloaded.get("CLUSTER", {})))
+        except ConfigError as e:
+            return False, f"新的集群配置不合法，已保持原样：{e}"
+
+        service = self.task_service
+        if isinstance(service, ForwardingTaskService):
+            return service.reload_cluster(reloaded)
+
+        # 没开转发：重建观测池。它不参与任何路由，纯粹是让页面上的"这台机器
+        # 看到的拓扑"跟得上改动。
+        if self._node_pool is not None:
+            self._node_pool.stop()
+            self._node_pool = None
+        self._start_node_pool()
+        count = len(self._node_pool) if self._node_pool is not None else 0
+        return True, f"节点列表已更新（{count} 个节点在探活中）。本进程未开启服务端转发，不参与转发路由"
+
     def _web_action(self, name: str, form: dict[str, str]) -> tuple[bool, str]:
         """处理 Web 端的可变操作。
 
@@ -252,9 +324,20 @@ class IPClickServer:
         """
         server_config: ServerConfig = cast(ServerConfig, self.config.get("SERVER", {}))
 
-        # 参数优先级：函数参数 > 配置文件 > 默认值
-        server_host: str = host or server_config.get("host", "[::]")
-        server_port: int = int(port or server_config.get("port", 9527))
+        # 参数优先级：函数参数 > 构造时确定的值（已含构造参数与配置文件）> 默认值。
+        # 正常路径上 serve() 会把 host/port 传给构造函数，这里两次算出来的是同一个值。
+        server_host: str = host or self._host
+        server_port: int = int(port or self._port)
+        if server_port != self._port:
+            # 走到这里说明调用方绕过构造函数、只在 start() 里给了端口。日志与链路
+            # 记录已经按旧端口初始化过了，{port} 占位符会指向另一个文件——与其
+            # 让人事后纳闷"日志怎么跑到别的文件里去了"，不如当场说清楚。
+            log.warning(
+                f"start() 传入的端口 {server_port} 与构造时的 {self._port} 不一致："
+                f"[TRACE].sqlite_path / [LOG].output 里的 {{port}} 已按 {self._port} 展开。"
+                f"请改用 IPClickServer(port=...) 或 serve(port=...)"
+            )
+        self._host, self._port = server_host, server_port
         # 注意：这里必须读 max_workers。此前误写成 `port or ...`，
         # 于是 `ipclick run --port 9527` 会创建一个 9527 线程的线程池。
         max_workers: int = int(server_config.get("max_workers", 10))
@@ -434,6 +517,7 @@ def serve(
     port: int | None = None,
     *,
     web: bool | None = None,
+    web_port: int | None = None,
 ):
     """启动IPClick服务器的便捷函数。
 
@@ -448,8 +532,10 @@ def serve(
 
     """
     try:
-        server = IPClickServer(config_path, web=web)
-        server.start(host=host, port=port)
+        # host/port 交给构造函数：{port} 占位符要在日志与链路记录初始化之前
+        # 拿到最终端口（见 IPClickServer.__init__）
+        server = IPClickServer(config_path, web=web, host=host, port=port, web_port=web_port)
+        server.start()
     except KeyboardInterrupt:
         pass  # 正常退出
     except Exception as e:

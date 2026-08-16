@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 import threading
-from typing import Any, final
+from typing import Any, cast, final
 
 import grpc
 from grpc import ServicerContext
@@ -45,7 +45,7 @@ from ipclick.cluster.tokens import describe as describe_tokens
 from ipclick.compression import CompressionPolicy
 from ipclick.dto.models import METHOD_MAP, IPClickAdapter
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
-from ipclick.exceptions import TransportError
+from ipclick.exceptions import ConfigError, TransportError
 from ipclick.sdk import CHANNEL_OPTIONS
 from ipclick.services.task_service import FORWARD_HEADER, TaskService, is_forwarded
 from ipclick.tls import TLSSettings, channel_credentials, channel_options
@@ -78,6 +78,25 @@ _NODE_FAULT_CODES = frozenset(
         grpc.StatusCode.UNKNOWN,
     }
 )
+
+
+@final
+class _DirectContext:
+    """点名派发到本机时用的假 ServicerContext。
+
+    刻意**不**带转发标记：这一跳就是终点，本来也不会再转。只吞掉状态码设置——
+    诊断路径的错误信息在返回的 TaskResp 里，不需要往一条并不存在的 RPC 流上写。
+    """
+
+    def set_code(self, _code: object) -> None: ...
+
+    def set_details(self, _details: str) -> None: ...
+
+    def is_active(self) -> bool:
+        return True
+
+    def invocation_metadata(self) -> tuple[tuple[str, str], ...]:
+        return ()
 
 
 @final
@@ -115,6 +134,10 @@ class ForwardingTaskService(TaskService):
         self._compression: CompressionPolicy = CompressionPolicy(dict(config.get("CLIENT", {})))
         self._forwarded_count: int = 0
         self._local_count: int = 0
+        # 监听地址要留着：热更新节点列表之后要拿它重新识别"我是哪个节点"
+        self._server_host: str = server_host
+        self._server_port: int = server_port
+        self._reload_lock: threading.Lock = threading.Lock()
 
         explicit = sum(1 for n in self.cluster.nodes if n.token)
         warn_if_missing(self.self_id, len(self.cluster.nodes), self._secret, explicit)
@@ -186,6 +209,112 @@ class ForwardingTaskService(TaskService):
     def SendStream(self, request: task_pb2.ReqTask, context: ServicerContext) -> Iterator[task_pb2.TaskRespChunk]:
         """流式一律本地执行，理由见模块开头。"""
         yield from super().SendStream(request, context)
+
+    def send_to_node(self, request: task_pb2.ReqTask, node_id: str) -> task_pb2.TaskResp:
+        """**点名**把请求发给某个节点，跳过策略选择。
+
+        只给诊断用（Web 端「试一试」的"目标节点"）。刻意不走协议：给 ``ReqTask``
+        加一个 ``target_node`` 字段的话，那就成了正式能力，得考虑"点名的节点挂了
+        要不要转移"、"点名能不能穿透多跳"这些问题——而这里要的只是"验证我刚加的
+        那台机器配对没有"，一条内部路径就够。
+
+        没有故障转移是**有意的**：点名就是点名，转到别的机器上会让这次验证
+        失去意义。
+
+        Raises:
+            TransportError: 节点 id 不在列表里。
+            grpc.RpcError: 目标节点报错或不可达——原样上抛，诊断要看真实错误。
+        """
+        node = self.cluster.node_by_id(node_id)
+        if node is None:
+            raise TransportError(f"节点 {node_id!r} 不在集群节点列表里，已有：{[n.id for n in self.cluster.nodes]}")
+
+        if node_id == self.self_id:
+            # 点到自己：本地执行。仍然走完整的 Send，这样"点名本机"和"点名别人"
+            # 看到的是同一条处理路径。
+            self._local_count += 1
+            return super().Send(request, cast(ServicerContext, cast(object, _DirectContext())))
+
+        # 用 state_for 而不是在 available() 里找：一个被标成 unhealthy 的节点
+        # 恰恰是最需要点名试一次的那个。取不到就现造一个（池子刚换过、还没同步）。
+        state = self._pool.state_for(node_id) or NodeState(node)
+        try:
+            response = self._forward(state, request)
+        except grpc.RpcError:
+            state.record_request(success=False)
+            raise
+        state.record_request(success=True)
+        self._forwarded_count += 1
+        return response
+
+    # ------------------------------------------------------------------ #
+    # 热更新
+    # ------------------------------------------------------------------ #
+
+    def reload_cluster(self, config: Settings) -> tuple[bool, str]:
+        """按新配置原地替换节点列表与路由状态，**不重启进程**。
+
+        0.3 里 ``ClusterConfig`` 和 ``NodePool`` 在构造时就建好存死了，生命周期
+        等于进程生命周期：``/nodes`` 页保存完只是改了文件，真正在干活的路由表
+        纹丝不动，所以页面上只能写"改完需要重启才生效"。
+
+        能热更新的是**不涉及监听端口**的部分：节点列表、权重、策略、阈值、
+        各节点的 token。监听地址属于 gRPC server 的构造参数，那个换不了——
+        但它本来也不会因为改节点列表而变。
+
+        Returns:
+            ``(是否有变化, 给人看的说明)``。
+        """
+        section = dict(config.get("CLUSTER", {}))
+        with self._reload_lock:
+            try:
+                updated = ClusterConfig.from_config(section)
+            except ConfigError as e:
+                return False, f"新的集群配置不合法，已保持原样：{e}"
+
+            previous = {n.id: n for n in self.cluster.nodes}
+            self.config = config
+            self.cluster = updated
+            self._secret = cluster_secret(section)
+
+            added, removed = self._pool.replace(updated)
+
+            # 到被移除节点的连接要关掉，否则它们会一直挂在那儿占着 fd。
+            # 地址变了但 id 没变的也要关——继续用旧 channel 就是往老地址发。
+            stale = set(removed) | {
+                node_id
+                for node_id, old in previous.items()
+                if (new := updated.node_by_id(node_id)) is not None and new.address != old.address
+            }
+            self._close_channels(stale)
+
+            # 身份要重新识别：本机可能刚被加进列表（从"只转发"变成"也干活"），
+            # 也可能刚被移出去。
+            self.self_id = resolve_self_id(updated, self._server_host, self._server_port)
+            if self.self_id:
+                self.node_id = self.self_id
+
+        if not added and not removed and not stale:
+            return True, f"集群配置已热更新（{len(updated.nodes)} 个节点，策略 {self._pool.balancer.name}）"
+
+        parts: list[str] = []
+        if added:
+            parts.append(f"新增 {', '.join(added)}")
+        if removed:
+            parts.append(f"移除 {', '.join(removed)}")
+        summary = "；".join(parts) or "地址已更新"
+        log.info(f"集群配置热更新：{summary}，当前 {len(updated.nodes)} 个节点")
+        return True, f"已热更新并立即生效：{summary}"
+
+    def _close_channels(self, node_ids: set[str]) -> None:
+        if not node_ids:
+            return
+        with self._channels_lock:
+            for node_id in node_ids:
+                channel = self._channels.pop(node_id, None)
+                if channel is not None:
+                    channel.close()
+                    log.debug(f"已关闭到节点 {node_id} 的转发连接")
 
     # ------------------------------------------------------------------ #
     # 转发
@@ -302,6 +431,12 @@ class ForwardingTaskService(TaskService):
     # ------------------------------------------------------------------ #
     # 观测与生命周期
     # ------------------------------------------------------------------ #
+
+    @property
+    @override
+    def forward_enabled(self) -> bool:
+        """给 Ping 用：让探测方看到"这台开着服务端转发"。"""
+        return True
 
     def snapshot(self) -> dict[str, Any]:
         """转发状态，供 Web 端与状态页展示。"""

@@ -348,7 +348,13 @@ memory_size = 500
 # 默认关：多数人只需要"刚才发生了什么"，不该默认在工作目录里造一个数据库文件。
 sqlite_enabled = false
 # 数据库路径（相对当前工作目录）。会额外生成 -wal / -shm 两个同名文件。
-sqlite_path = "ipclick-trace.db"
+#
+# {port} 会被替换成**运行时实际生效**的监听端口（--port 覆盖之后的那个）。
+# 同一个目录用 --port 起多个实例时这一项必须岔开：多进程写同一个库不会报任何
+# 错，链路记录会静默混在一起，界面上完全看不出来。占位符出现在路径中间也行，
+# 例如 "trace/{port}/records.db"。
+# 不想按端口分离就把 {port} 删掉——已有配置不会被自动改写。
+sqlite_path = "ipclick-trace.{port}.db"
 # 保留天数，超期的每小时清理一次。0 = 永久保留（不推荐，库会一直长）。
 retention_days = 30
 # 只记失败的请求。成功量极大又只关心异常时打开，能把库缩小一两个数量级。
@@ -367,7 +373,15 @@ level = "info"
 # 不是标准库 logging 的 %(asctime)s。留空则用内置格式（带颜色、含文件行号）。
 # 例：format = "[{time:YYYY-MM-DD HH:mm:ss}] {level: <8} | {message}"
 format = ""
-# 日志输出位置 (stdout 或文件路径)
+# 日志输出位置。三种写法：
+#   "stdout" / "stderr"  只打到控制台（默认）
+#   "logs/app.log"       写这个文件（没有扩展名时自动补 .log）
+#   "logs/"              以斜杠结尾（或指向一个已存在的目录）= 写进这个**目录**，
+#                        文件名用 ipclick.log
+# 最后一种以前会被静默改写成同级的 logs.log —— 0.4 修了，见 CHANGELOG。
+#
+# 和 [TRACE].sqlite_path 一样支持 {port} 占位符，替换成运行时实际生效的端口。
+# 同目录起多实例时不岔开的话，多个进程会静默抢写同一个文件。
 output = "stdout"
 # 日志轮转配置 (当 output 为文件时生效)
 [LOG.rotation]

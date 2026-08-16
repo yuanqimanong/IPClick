@@ -128,6 +128,49 @@ class NodePool:
             log.info(f"集群移除节点：{', '.join(removed)}")
         return True
 
+    def replace(self, config: ClusterConfig) -> tuple[list[str], list[str]]:
+        """原地换掉节点列表、策略与阈值。返回 ``(新增的 id, 移除的 id)``。
+
+        这是"改完节点不用重启"的底座。相对 :meth:`refresh_nodes` 的区别是数据
+        来源：那个是节点**发现**（DNS 定期重解析），这个是**配置**被人改了。
+
+        两点必须做对：
+
+        * **按 id 复用已有的 NodeState。** 直接重建会把每个节点的健康计数与请求
+          统计清零，那样任何"连续 N 次"的判定都永远达不到，熔断和恢复双双失效。
+        * **DNS 发现模式下不动节点列表。** 那种部署里节点是解析出来的，
+          ``[CLUSTER].nodes`` 只是个占位，用它去覆盖等于把发现结果丢掉。
+          此时只更新策略与阈值。
+        """
+        with self._lock:
+            self.config = config
+            self.balancer = create_balancer(config.strategy)
+
+            if not isinstance(self._discovery, StaticDiscovery):
+                log.debug("节点来自 DNS 发现，本次只更新策略与阈值，不改节点列表")
+                return [], []
+
+            self._discovery = StaticDiscovery(config.nodes)
+            existing = {state.node.id: state for state in self._states}
+            added = [n.id for n in config.nodes if n.id not in existing]
+            removed = [i for i in existing if i not in {n.id for n in config.nodes}]
+            # 地址/权重改了但 id 没变的，要换掉 Node（配置）而保留运行时状态
+            refreshed: list[NodeState] = []
+            for node in config.nodes:
+                state = existing.get(node.id)
+                if state is None:
+                    refreshed.append(NodeState(node))
+                    continue
+                state.update_node(node)
+                refreshed.append(state)
+            self._states = refreshed
+
+        if added:
+            log.info(f"集群新增节点：{', '.join(added)}")
+        if removed:
+            log.info(f"集群移除节点：{', '.join(removed)}")
+        return added, removed
+
     def probe_once(self) -> None:
         """对所有节点探一次活。
 
@@ -155,6 +198,15 @@ class NodePool:
     def available(self) -> list[NodeState]:
         with self._lock:
             return [s for s in self._states if s.is_available]
+
+    def state_for(self, node_id: str) -> NodeState | None:
+        """按 id 取节点状态，**不管它健不健康**。
+
+        点名派发（Web 端的诊断路径）要用：一个被标成 unhealthy 的节点恰恰是最
+        需要点名试一次的那个，用 :meth:`available` 去找会把它过滤掉。
+        """
+        with self._lock:
+            return next((s for s in self._states if s.node.id == node_id), None)
 
     def acquire(self, exclude: set[str] | None = None) -> NodeState:
         """选一个可用节点。

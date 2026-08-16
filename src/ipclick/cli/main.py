@@ -115,7 +115,20 @@ def init(force: bool, target_dir: Path):
 @click.option("--host", default=None, help="绑定地址")
 @click.option("--verbose", "-v", is_flag=True, help="输出 DEBUG 级别日志")
 @click.option("--web", "-w", is_flag=True, default=None, help="同时启动 Web 管理端（登录信息打印到控制台）")
-def run(config: Path | None, port: int | None, host: str | None, verbose: bool, web: bool | None):
+@click.option(
+    "--web-port",
+    type=int,
+    default=None,
+    help="Web 管理端端口（覆盖 [WEB].port）。同目录起多个实例时必须岔开，否则第二个起不来",
+)
+def run(
+    config: Path | None,
+    port: int | None,
+    host: str | None,
+    verbose: bool,
+    web: bool | None,
+    web_port: int | None,
+):
     """启动IPClick服务"""
     try:
         LogUtil.init(level="DEBUG" if verbose else "INFO")
@@ -127,8 +140,10 @@ def run(config: Path | None, port: int | None, host: str | None, verbose: bool, 
             click.echo(f"Override port: {port}")
         if host:
             click.echo(f"Override host: {host}")
+        if web_port:
+            click.echo(f"Override web port: {web_port}")
 
-        serve(config_path=str(config) if config else None, port=port, host=host, web=web)
+        serve(config_path=str(config) if config else None, port=port, host=host, web=web, web_port=web_port)
 
     except KeyboardInterrupt:
         click.echo("\nShutting down...")

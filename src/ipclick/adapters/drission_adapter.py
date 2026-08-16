@@ -37,17 +37,29 @@ from ipclick.utils.log_util import log
 from ipclick.utils.url_util import merge_query_params
 
 
-_Chromium: Any
-_ChromiumOptions: Any
+# 可选依赖：**懒加载**。模块级 import 会把"装没装"的结论固化在进程启动那一刻，
+# 运行时装完不重启就永远看不到（详见 :mod:`ipclick.utils.module_probe`）。
+_UNPROBED: Any = object()
+_Chromium: Any = _UNPROBED
+_ChromiumOptions: Any = _UNPROBED
 
-try:
-    from DrissionPage import Chromium as _Chromium
-    from DrissionPage import ChromiumOptions as _ChromiumOptions
-except ImportError:  # pragma: no cover - 取决于安装环境
-    _Chromium = None
-    _ChromiumOptions = None
+#: 探测用的顶层模块名。注意发行版名是小写的 drissionpage，模块名是驼峰的
+#: DrissionPage —— 两者不一样，探测必须用后者。
+DRISSIONPAGE_MODULE = "DrissionPage"
 
-DRISSIONPAGE_AVAILABLE: bool = _Chromium is not None
+
+def _load_drission() -> tuple[Any, Any]:
+    """``(Chromium, ChromiumOptions)``，第一次用到时才 import。"""
+    global _Chromium, _ChromiumOptions
+    if _Chromium is _UNPROBED:
+        try:
+            from DrissionPage import Chromium, ChromiumOptions
+
+            _Chromium, _ChromiumOptions = Chromium, ChromiumOptions
+        except ImportError:  # pragma: no cover - 取决于安装环境
+            _Chromium, _ChromiumOptions = None, None
+    return _Chromium, _ChromiumOptions
+
 
 _SUPPORTED_METHODS = frozenset({"GET"})
 
@@ -69,7 +81,9 @@ class DrissionPageAdapter(DownloaderAdapter):
         settings: AdapterSettings | None = None,
         browser_settings: BrowserSettings | None = None,
     ):
-        if _Chromium is None:
+        # 真正的 import 就发生在这里——"能不能用"的展示层走 find_spec，
+        # 执行路径仍然老老实实 import 一次。
+        if _load_drission()[0] is None:
             raise AdapterError('DrissionPage is not installed. Install it with: pip install "ipclick[drissionpage]"')
 
         resolved = browser_settings or BrowserSettings()
@@ -94,7 +108,7 @@ class DrissionPageAdapter(DownloaderAdapter):
 
     def _options(self) -> Any:
         s = self.browser_settings
-        options = _ChromiumOptions()
+        options = _load_drission()[1]()
         if s.executable_path:
             options.set_browser_path(s.executable_path)
         options.headless(s.headless)
@@ -124,7 +138,7 @@ class DrissionPageAdapter(DownloaderAdapter):
         with self._browser_lock:
             if self._browser is None:
                 try:
-                    self._browser = _Chromium(self._options())
+                    self._browser = _load_drission()[0](self._options())
                 except Exception as e:
                     raise AdapterError(f"浏览器启动失败（DrissionPage）：{e}") from e
                 log.info(f"DrissionPage 浏览器已启动：headless={self.browser_settings.headless}")
@@ -345,7 +359,17 @@ def _scroll_to_bottom(tab: Any) -> None:
 
 
 def is_available() -> bool:
-    return DRISSIONPAGE_AVAILABLE
+    """DrissionPage 装了没（只看 Python 包，不管本机有没有 Chrome）。"""
+    from ipclick.utils import module_probe
+
+    return module_probe.installed(DRISSIONPAGE_MODULE)
 
 
-__all__ = ["DRISSIONPAGE_AVAILABLE", "DrissionPageAdapter", "is_available"]
+def __getattr__(name: str) -> Any:
+    """``DRISSIONPAGE_AVAILABLE`` 的兼容层，理由同 niquests_adapter。"""
+    if name == "DRISSIONPAGE_AVAILABLE":
+        return is_available()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = ["DRISSIONPAGE_MODULE", "DrissionPageAdapter", "is_available"]

@@ -31,46 +31,96 @@ import importlib
 import os
 from pathlib import Path
 import sys
+import threading
 from typing import Any, final
 
 from ipclick.adapters.browser_settings import BrowserSettings
 from ipclick.exceptions import AdapterError, ConfigError
+from ipclick.utils import module_probe
 from ipclick.utils.log_util import log
 
 
-_playwright_api: Any
-_patchright_api: Any
-_camoufox_new_browser: Any
+#: "还没试过 import"。区别于 None（"试过了，没装"）——后者不该再重试，
+#: 而测试也靠直接把这几个全局量设成 None 来模拟"没装"。
+_UNPROBED: Any = object()
 
-try:
-    from playwright.async_api import async_playwright as _playwright_api
-except ImportError:  # pragma: no cover - 取决于安装环境
-    _playwright_api = None
-
-try:
-    from patchright.async_api import async_playwright as _patchright_api
-except ImportError:  # pragma: no cover - 取决于安装环境
-    _patchright_api = None
-
-try:
-    from camoufox import AsyncNewBrowser as _camoufox_new_browser
-except ImportError:  # pragma: no cover - 取决于安装环境
-    _camoufox_new_browser = None
+#: 三个第三方入口的**懒加载缓存**。0.3 时这里是模块级 try/except import，
+#: 那让"装没装"的结论在进程启动那一刻就固化了（见 :mod:`ipclick.utils.module_probe`）。
+#: 现在状态展示走 find_spec，真正的 import 推迟到第一次要启动浏览器时。
+_playwright_api: Any = _UNPROBED
+_patchright_api: Any = _UNPROBED
+_camoufox_new_browser: Any = _UNPROBED
+_camoufox_not_installed: Any = _UNPROBED
 
 
 class _NeverRaised(Exception):
     """camoufox 未安装时的占位异常类型，让对应的 except 分支永远不命中。"""
 
 
-#: camoufox 报"浏览器本体没下"用的异常。没装 camoufox 时是个永不被抛的占位类型，
-#: 这样 except 分支不必写 if。
-_CamoufoxNotInstalled: type[Exception] = _NeverRaised
-try:
-    from camoufox.exceptions import CamoufoxNotInstalled as _real_not_installed
+def _playwright_async_api() -> Any:
+    """``playwright.async_api.async_playwright``，第一次用到时才 import。"""
+    global _playwright_api
+    if _playwright_api is _UNPROBED:
+        try:
+            from playwright.async_api import async_playwright
 
-    _CamoufoxNotInstalled = _real_not_installed
-except ImportError:  # pragma: no cover - 取决于安装环境
-    pass
+            _playwright_api = async_playwright
+        except ImportError:  # pragma: no cover - 取决于安装环境
+            _playwright_api = None
+    return _playwright_api
+
+
+def _patchright_async_api() -> Any:
+    """``patchright.async_api.async_playwright``，同上。"""
+    global _patchright_api
+    if _patchright_api is _UNPROBED:
+        try:
+            from patchright.async_api import async_playwright
+
+            _patchright_api = async_playwright
+        except ImportError:  # pragma: no cover - 取决于安装环境
+            _patchright_api = None
+    return _patchright_api
+
+
+def _camoufox_async_new_browser() -> Any:
+    """``camoufox.AsyncNewBrowser``，同上。"""
+    global _camoufox_new_browser
+    if _camoufox_new_browser is _UNPROBED:
+        try:
+            from camoufox import AsyncNewBrowser
+
+            _camoufox_new_browser = AsyncNewBrowser
+        except ImportError:  # pragma: no cover - 取决于安装环境
+            _camoufox_new_browser = None
+    return _camoufox_new_browser
+
+
+def _camoufox_not_installed_error() -> type[Exception]:
+    """camoufox 报"浏览器本体没下"用的异常类型。
+
+    没装 camoufox 时返回一个永不被抛的占位类型，这样 except 分支不必写 if。
+    """
+    global _camoufox_not_installed
+    if _camoufox_not_installed is _UNPROBED:
+        try:
+            from camoufox.exceptions import CamoufoxNotInstalled
+
+            _camoufox_not_installed = CamoufoxNotInstalled
+        except ImportError:  # pragma: no cover - 取决于安装环境
+            _camoufox_not_installed = _NeverRaised
+    return _camoufox_not_installed or _NeverRaised
+
+
+#: 引擎名 -> 探测用的**顶层**模块名。传子模块名会让 find_spec 去 import 父包，
+#: 那就又有副作用了（见 :mod:`ipclick.utils.module_probe`）。
+ENGINE_MODULES: dict[str, tuple[str, ...]] = {
+    "playwright": ("playwright",),
+    "patchright": ("patchright",),
+    # camoufox 是 Playwright 的包装，两者都得在
+    "camoufox": ("camoufox", "playwright"),
+    "drissionpage": ("DrissionPage",),
+}
 
 
 #: 引擎名 -> 缺失时的安装提示
@@ -117,19 +167,41 @@ def package_installed(engine: str) -> bool:
     只回答"能不能 import"这一半。浏览器本体是另一半，见 :func:`browser_ready`——
     两者分开是因为它们缺失时的处理方式不同：包缺了要 pip install，
     浏览器本体缺了要跑各自的 fetch/install 命令。
-    """
-    if engine == "playwright":
-        return _playwright_api is not None
-    if engine == "patchright":
-        return _patchright_api is not None
-    if engine == "camoufox":
-        # camoufox 是 Playwright 的包装，两者都得在
-        return _camoufox_new_browser is not None and _playwright_api is not None
-    if engine == "drissionpage":
-        from ipclick.adapters.drission_adapter import DRISSIONPAGE_AVAILABLE
 
-        return DRISSIONPAGE_AVAILABLE
-    return False
+    走 :func:`ipclick.utils.module_probe.installed`（find_spec）而不是真 import：
+    这样进程不重启也能反映出终端里的安装**和卸载**。真正的 import 在启动浏览器
+    那一刻才发生。
+    """
+    modules = ENGINE_MODULES.get(engine)
+    if not modules:
+        return False
+    return all(module_probe.installed(name) for name in modules)
+
+
+def refresh() -> None:
+    """丢掉安装状态缓存，下次探测重新看磁盘。
+
+    安装/卸载之后调用（Web 端的「刷新状态」按钮和安装任务结束时各调一次）。
+    刻意**不**动那三个懒加载缓存：一个已经 import 进来的 playwright 无法从内存里
+    卸掉，把全局量清回 _UNPROBED 只会让下次再 import 一遍同一个模块对象，徒增
+    风险而没有收益。展示层看的是 find_spec 的结论，那一层是准的。
+    """
+    module_probe.invalidate()
+    with _browser_ready_lock:
+        _browser_ready_cache.clear()
+
+
+#: 浏览器本体探测结果的缓存。键是 ``(引擎, executable_path, 内核,
+#: PLAYWRIGHT_BROWSERS_PATH)``——这四样决定了要去哪个目录找什么。
+#:
+#: 为什么要缓存：每次探测都是实打实的文件系统扫描（``ms-playwright`` 目录要扫
+#: 两层）。0.3 时这只在渲染总览页时发生一次；0.4 的总览每 5 秒局部刷新一次，
+#: 不缓存就是每 5 秒把那几个目录再翻一遍，而结论只有装/卸的时候才会变。
+#:
+#: 那个环境变量也进键，是因为它直接改变查找位置——不进键的话，同一进程里换了
+#: 它（容器启动脚本、测试）会拿到上一次的结论。:func:`refresh` 会整个清掉。
+_browser_ready_cache: dict[tuple[str, str, str, str], tuple[bool | None, str]] = {}
+_browser_ready_lock = threading.Lock()
 
 
 def browser_ready(engine: str, settings: BrowserSettings | None = None) -> tuple[bool | None, str]:
@@ -145,6 +217,24 @@ def browser_ready(engine: str, settings: BrowserSettings | None = None) -> tuple
     误报成没装（那会让人去重装一遍已经装好的东西）。
     """
     resolved = settings or BrowserSettings()
+    # executable_path 可能是 None（未配置），归一成空串再进键
+    key = (
+        engine,
+        resolved.executable_path or "",
+        resolved.kind,
+        os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""),
+    )
+    cached = _browser_ready_cache.get(key)
+    if cached is not None:
+        return cached
+
+    result = _probe_browser(engine, resolved)
+    with _browser_ready_lock:
+        _browser_ready_cache[key] = result
+    return result
+
+
+def _probe_browser(engine: str, resolved: BrowserSettings) -> tuple[bool | None, str]:
     # 显式指定了可执行文件就以它为准——这是容器里复用系统浏览器的标准做法，
     # 此时各引擎自己的下载目录有没有东西都不重要。
     if resolved.executable_path:
@@ -198,7 +288,7 @@ def _camoufox_browser_ready() -> tuple[bool | None, str]:
     return True, path
 
 
-def _playwright_registry_dir(engine: str) -> Path | None:
+def playwright_registry_dir(engine: str) -> Path | None:
     """playwright / patchright 放浏览器的目录。
 
     解析规则照抄它们 node 驱动里的实现（``PLAYWRIGHT_BROWSERS_PATH`` == "0" 时
@@ -230,7 +320,7 @@ def _playwright_browser_ready(engine: str, kind: str) -> tuple[bool | None, str]
     也见过多一层 ``ms-playwright/b/...``），所以按前缀在两层深度内找，
     而不是写死一层。
     """
-    directory = _playwright_registry_dir(engine)
+    directory = playwright_registry_dir(engine)
     if directory is None:
         return None, "无法确定浏览器下载目录"
     if not directory.exists():
@@ -380,9 +470,9 @@ async def launch(engine: str, settings: BrowserSettings) -> LaunchedBrowser:
     if engine == "camoufox":
         return await _launch_camoufox(settings)
     if engine == "patchright":
-        return await _launch_playwright_like(_patchright_api, "patchright", settings)
+        return await _launch_playwright_like(_patchright_async_api(), "patchright", settings)
     if engine == "playwright":
-        return await _launch_playwright_like(_playwright_api, "playwright", settings)
+        return await _launch_playwright_like(_playwright_async_api(), "playwright", settings)
     raise AdapterError(f"引擎 {engine!r} 不走 Playwright 通路，不该到这里")
 
 
@@ -445,10 +535,14 @@ async def _launch_camoufox(settings: BrowserSettings) -> LaunchedBrowser:
         if settings.geoip:
             options["geoip"] = True
 
-    driver = await _playwright_api().start()
+    # 先取好异常类型：懒加载的 getter 不该在 except 子句里求值，那会让
+    # "解析异常类型时自己抛异常"变成一个极难读懂的失败。
+    not_installed = _camoufox_not_installed_error()
+
+    driver = await _playwright_async_api()().start()
     try:
-        browser = await _camoufox_new_browser(driver, **options)
-    except _CamoufoxNotInstalled as e:
+        browser = await _camoufox_async_new_browser()(driver, **options)
+    except not_installed as e:
         # 兜底：launch() 已经查过一次，走到这里说明检查和实际用的路径不一致
         # （比如两次调用之间目录被删了）。绝不能让它退化成静默下载 1.3 GB。
         await driver.stop()
@@ -462,6 +556,7 @@ async def _launch_camoufox(settings: BrowserSettings) -> LaunchedBrowser:
 
 
 __all__ = [
+    "ENGINE_MODULES",
     "ENGINE_NAMES",
     "FINGERPRINT_MANAGED",
     "INSTALL_HINTS",
@@ -475,5 +570,7 @@ __all__ = [
     "is_available",
     "launch",
     "package_installed",
+    "playwright_registry_dir",
+    "refresh",
     "resolve_engine",
 ]

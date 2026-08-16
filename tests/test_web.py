@@ -325,7 +325,9 @@ class TestHttpFlow:
         status, body, url = client.post("/login", {"username": "admin", "password": "test-password"})
         assert status == 200
         assert url.endswith("/")
-        assert "IPClick 管理端" in body
+        # 0.4 改版后标题是"总览 · IPClick"，品牌在左侧栏
+        assert "IPClick" in body
+        assert "总览" in body
 
     def test_session_cookie_is_httponly_and_samesite(self, web):
         """HttpOnly 挡 XSS 偷 cookie，SameSite=Strict 挡跨站发起的请求。"""

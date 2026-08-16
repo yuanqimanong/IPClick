@@ -22,6 +22,18 @@ from ipclick.adapters.registry import (
 from ipclick.exceptions import AdapterError, ConfigError
 
 
+def _pretend_missing(monkeypatch: pytest.MonkeyPatch, *engines: str) -> None:
+    """让这几个引擎的 Python 包"看起来没装"。
+
+    0.4 起装没装是靠 ``module_probe.installed``（find_spec）判定的，所以模拟
+    "没装"要打这一层，而不是像 0.3 那样把某个 import 进来的全局量设成 None。
+    """
+    missing: set[str] = set()
+    for engine in engines:
+        missing.update(be.ENGINE_MODULES[engine])
+    monkeypatch.setattr(be.module_probe, "installed", lambda name: name not in missing)
+
+
 class TestPlatformDefault:
     def test_windows_uses_drissionpage(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(sys, "platform", "win32")
@@ -127,7 +139,7 @@ class TestEngineAdapters:
 
     def test_unavailable_engine_gives_install_hint(self, monkeypatch: pytest.MonkeyPatch):
         """ "没装"和"不支持"要分清楚，前者一条 pip 命令能解决。"""
-        monkeypatch.setattr(be, "_patchright_api", None)
+        _pretend_missing(monkeypatch, "patchright")
         with pytest.raises(AdapterError, match="patchright install chromium"):
             PatchrightAdapter(browser_settings=BrowserSettings())
 
@@ -246,7 +258,7 @@ class TestTwoLevelInstallCheck:
 
     def test_playwright_registry_dir_follows_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
-        assert be._playwright_registry_dir("playwright") == tmp_path  # pyright: ignore[reportPrivateUsage]
+        assert be.playwright_registry_dir("playwright") == tmp_path
 
     def test_playwright_finds_browser_in_flat_layout(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
@@ -291,21 +303,87 @@ class TestTwoLevelInstallCheck:
         assert EngineStatus("x", package=False, browser=True).ready is False
 
     def test_missing_package_short_circuits(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(be, "_playwright_api", None)
+        _pretend_missing(monkeypatch, "playwright")
         status = be.engine_status("playwright")
         assert status.package is False
         assert status.ready is False
         assert "pip install" in status.detail
 
-    def test_registry_registers_on_package_not_readiness(self):
-        """本体没下时适配器仍要注册，否则报错会变成"尚未支持"，指错方向。"""
-        import inspect
+    def test_registry_registers_on_package_not_readiness(self, monkeypatch: pytest.MonkeyPatch):
+        """本体没下时适配器仍要注册，否则报错会变成"尚未支持"，指错方向。
 
+        断言的是行为而不是源码文本：让 playwright 的**包**看起来装了、**本体**
+        看起来没下，此时注册表里必须仍有 playwright。
+        """
         from ipclick.adapters import registry
 
-        source = inspect.getsource(registry)
-        assert "package_installed" in source
-        assert "if be.is_available(_engine)" not in source
+        monkeypatch.setattr(be.module_probe, "installed", lambda _name: True)
+        monkeypatch.setattr(be, "browser_ready", lambda *_a, **_k: (False, "本体没下"))
+        registry.sync_optional_adapters()
+        try:
+            assert "playwright" in registry.ADAPTER_CLASSES
+        finally:
+            monkeypatch.undo()
+            registry.refresh()
+
+
+class TestRuntimeInstallVisibility:
+    """P0-1：不重启进程也要能看到依赖被装上 / 卸掉。
+
+    0.3 的模块级 ``try: import X`` 把结论固化在进程启动那一刻：终端里装完，
+    Web 端刷新多少次都还是"未装"；卸载更是完全探测不出来（import 过的模块
+    留在 sys.modules 里，删掉磁盘上的包也不会让它消失）。
+    """
+
+    def test_status_follows_the_probe_not_a_startup_snapshot(self, monkeypatch: pytest.MonkeyPatch):
+        _pretend_missing(monkeypatch, "camoufox")
+        assert be.package_installed("camoufox") is False
+
+        # 模拟"用户在终端里装上了" —— 探测结论必须立刻跟着变，不需要重启
+        monkeypatch.setattr(be.module_probe, "installed", lambda _name: True)
+        assert be.package_installed("camoufox") is True
+
+    def test_uninstall_is_visible_too(self, monkeypatch: pytest.MonkeyPatch):
+        """关键验证点：真 import 过的模块卸不掉，只探测 spec 才没这个问题。"""
+        monkeypatch.setattr(be.module_probe, "installed", lambda _name: True)
+        assert be.package_installed("playwright") is True
+
+        _pretend_missing(monkeypatch, "playwright")
+        assert be.package_installed("playwright") is False
+
+    def test_refresh_clears_the_probe_cache(self, monkeypatch: pytest.MonkeyPatch):
+        """状态缓存必须能被显式清掉，否则"刷新状态"按钮点了也白点。"""
+        from ipclick.utils import module_probe
+
+        calls: list[str] = []
+        real_find = module_probe._find  # pyright: ignore[reportPrivateUsage]
+
+        def counting(name: str) -> bool:
+            calls.append(name)
+            return real_find(name)
+
+        monkeypatch.setattr(module_probe, "_find", counting)
+        module_probe.invalidate()
+
+        assert module_probe.installed("playwright") == module_probe.installed("playwright")
+        assert len(calls) == 1, "同一个名字不该重复走文件系统"
+
+        be.refresh()
+        _ = module_probe.installed("playwright")
+        assert len(calls) == 2, "refresh() 之后必须重新探测"
+
+    def test_camoufox_needs_playwright_too(self, monkeypatch: pytest.MonkeyPatch):
+        """camoufox 是 Playwright 的包装，少一个都不算装上。"""
+        monkeypatch.setattr(be.module_probe, "installed", lambda name: name != "playwright")
+        assert be.package_installed("camoufox") is False
+
+    def test_probe_only_takes_top_level_names(self):
+        """传子模块名会让 find_spec 去 import 父包，那就又有副作用了。"""
+        for modules in be.ENGINE_MODULES.values():
+            assert all("." not in m for m in modules), be.ENGINE_MODULES
+
+    def test_every_engine_has_probe_modules(self):
+        assert set(be.ENGINE_MODULES) == be.ENGINE_NAMES
 
 
 class TestNoSilentDownload:

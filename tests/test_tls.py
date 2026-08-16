@@ -494,12 +494,13 @@ def test_no_plaintext_fallback_anywhere():
     """回归护栏：新增连接点时别忘了走 TLS。
 
     只允许已知位置出现 insecure：两个客户端、服务端绑定、健康探活、
-    集群转发。每一处都必须是 if tls.enabled 的 else 分支——
-    转发那处由 test_forwarding_uses_tls 正面验证。
+    集群转发、节点探测。每一处都必须是 if tls.enabled 的 else 分支——
+    转发那处由 test_forwarding_uses_tls 正面验证，探测那处由
+    test_probe_uses_tls 正面验证。
     """
     src = Path(__file__).resolve().parent.parent / "src" / "ipclick"
     offenders: list[str] = []
-    allowed = {"sdk.py", "aio.py", "server.py", "health.py", "tls.py", "forwarder.py"}
+    allowed = {"sdk.py", "aio.py", "server.py", "health.py", "tls.py", "forwarder.py", "probe.py"}
     for file in src.rglob("*.py"):
         if "_pb2" in file.name or file.name in allowed:
             continue

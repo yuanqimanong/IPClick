@@ -886,7 +886,7 @@ wheels = [
 
 [[package]]
 name = "ipclick"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -939,23 +939,23 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "camoufox", marker = "extra == 'camoufox'", specifier = ">=0.5.0,<1.0.0" },
-    { name = "camoufox", marker = "extra == 'linux'", specifier = ">=0.5.0,<1.0.0" },
+    { name = "camoufox", marker = "extra == 'camoufox'", specifier = ">=0.5.4,<1.0.0" },
+    { name = "camoufox", marker = "extra == 'linux'", specifier = ">=0.5.4,<1.0.0" },
     { name = "click", specifier = ">=8.4.2,<9.0.0" },
     { name = "curl-cffi", specifier = ">=0.16.0,<0.17.0" },
-    { name = "drissionpage", marker = "extra == 'drissionpage'", specifier = ">=4.1.0,<5.0.0" },
-    { name = "drissionpage", marker = "extra == 'win'", specifier = ">=4.1.0,<5.0.0" },
+    { name = "drissionpage", marker = "extra == 'drissionpage'", specifier = ">=4.1.1,<5.0.0" },
+    { name = "drissionpage", marker = "extra == 'win'", specifier = ">=4.1.1,<5.0.0" },
     { name = "fake-useragent", specifier = ">=2.2.0,<3.0.0" },
     { name = "grpcio", specifier = ">=1.83.0,<2.0.0" },
     { name = "grpcio-health-checking", specifier = ">=1.83.0,<2.0.0" },
     { name = "loguru", specifier = ">=0.7.3,<0.8.0" },
-    { name = "niquests", marker = "extra == 'niquests'", specifier = ">=3.14.0,<4.0.0" },
-    { name = "patchright", marker = "extra == 'linux'", specifier = ">=1.52.0,<2.0.0" },
-    { name = "patchright", marker = "extra == 'patchright'", specifier = ">=1.52.0,<2.0.0" },
-    { name = "playwright", marker = "extra == 'playwright'", specifier = ">=1.49.0,<2.0.0" },
+    { name = "niquests", marker = "extra == 'niquests'", specifier = ">=3.21.0,<4.0.0" },
+    { name = "patchright", marker = "extra == 'linux'", specifier = ">=1.61.2,<2.0.0" },
+    { name = "patchright", marker = "extra == 'patchright'", specifier = ">=1.61.2,<2.0.0" },
+    { name = "playwright", marker = "extra == 'playwright'", specifier = ">=1.60.0,<2.0.0" },
     { name = "protobuf", specifier = ">=6.33.2,<8.0.0" },
     { name = "python-box", extras = ["all"], specifier = ">=7.4.1,<8.0.0" },
-    { name = "typing-extensions", specifier = ">=4.15.0,<5.0.0" },
+    { name = "typing-extensions", specifier = ">=4.16.0,<5.0.0" },
     { name = "uuid-utils", specifier = ">=0.17.0,<0.18.0" },
 ]
 provides-extras = ["niquests", "camoufox", "patchright", "drissionpage", "playwright", "win", "linux"]

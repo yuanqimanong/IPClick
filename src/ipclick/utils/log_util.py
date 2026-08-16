@@ -280,10 +280,9 @@ class LogUtil:
         handler_ids.append(console_handler)
 
         if log_file:
-            resolved_path = PathUtil.resolve_path(log_file, base_dir)
-
-            if not resolved_path.suffix:
-                resolved_path = resolved_path.with_suffix(".log")
+            # 目录 / 文件两种写法都合法，区分在 resolve_log_file 里（见那里的说明）。
+            # 别在这里图省事只补扩展名——那会把 "logs/" 改写成同级的 "logs.log"。
+            resolved_path = PathUtil.resolve_log_file(log_file, base_dir)
 
             PathUtil.ensure_parent_dir(resolved_path)
             file_handler = logger.add(

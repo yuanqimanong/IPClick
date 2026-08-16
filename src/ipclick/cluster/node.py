@@ -181,6 +181,15 @@ class NodeState:
             self._last_error = reason
             self._consecutive_successes = 0
 
+    def update_node(self, node: Node) -> None:
+        """换掉配置部分（地址 / 权重变了），**保留**运行时状态。
+
+        热更新节点列表时用。重建一个 NodeState 会把健康计数清零，那样
+        "连续 N 次才切状态"的判定永远达不到，熔断与恢复双双失效。
+        """
+        with self._lock:
+            self.node = node
+
 
 @dataclass
 class ClusterConfig:

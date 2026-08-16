@@ -196,3 +196,25 @@ class TaskRespTrailer(_message.Message):
     total_bytes: int
     error_message: str
     def __init__(self, response_time_ms: _Optional[int] = ..., total_bytes: _Optional[int] = ..., error_message: _Optional[str] = ...) -> None: ...
+
+class PingReq(_message.Message):
+    __slots__ = ("from_node",)
+    FROM_NODE_FIELD_NUMBER: _ClassVar[int]
+    from_node: str
+    def __init__(self, from_node: _Optional[str] = ...) -> None: ...
+
+class PingResp(_message.Message):
+    __slots__ = ("node_id", "version", "auth_required", "forward", "uptime_seconds", "in_flight")
+    NODE_ID_FIELD_NUMBER: _ClassVar[int]
+    VERSION_FIELD_NUMBER: _ClassVar[int]
+    AUTH_REQUIRED_FIELD_NUMBER: _ClassVar[int]
+    FORWARD_FIELD_NUMBER: _ClassVar[int]
+    UPTIME_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    IN_FLIGHT_FIELD_NUMBER: _ClassVar[int]
+    node_id: str
+    version: str
+    auth_required: bool
+    forward: bool
+    uptime_seconds: int
+    in_flight: int
+    def __init__(self, node_id: _Optional[str] = ..., version: _Optional[str] = ..., auth_required: _Optional[bool] = ..., forward: _Optional[bool] = ..., uptime_seconds: _Optional[int] = ..., in_flight: _Optional[int] = ...) -> None: ...

@@ -109,6 +109,83 @@ class TestReconfigure:
         assert (tmp_path / "noext.log").exists()
 
 
+class TestOutputAsDirectory:
+    """``output`` 填目录时不能把目录名改写成同级文件名。
+
+    回归的是一个静默错误：``logsss/`` 本意是"写进这个目录"，旧实现看它没有
+    扩展名就当成文件名，``with_suffix(".log")`` 把最后一段整个换掉，于是日志
+    落在了 ``logsss.log``——和目录同级，目录里空空如也。不报任何错。
+    """
+
+    def test_trailing_slash_is_a_directory(self, tmp_path: Path):
+        target = tmp_path / "logsss"
+        LogUtil.init(level="INFO", log_file=f"{target}/")
+        LogUtil.info("into-dir")
+        LogUtil.remove_logger("default")
+
+        assert target.is_dir()
+        # 关键断言：不能在 logsss/ 的**同级**冒出一个 logsss.log
+        assert not (tmp_path / "logsss.log").exists()
+        written = list(target.glob("*.log"))
+        assert written, f"{target} 里没有日志文件"
+        assert "into-dir" in written[0].read_text(encoding="utf-8")
+
+    def test_existing_directory_without_trailing_slash(self, tmp_path: Path):
+        target = tmp_path / "already-there"
+        target.mkdir()
+        LogUtil.init(level="INFO", log_file=str(target))
+        LogUtil.info("into-existing-dir")
+        LogUtil.remove_logger("default")
+
+        assert not (tmp_path / "already-there.log").exists()
+        assert list(target.glob("*.log"))
+
+    def test_explicit_file_path_unchanged(self, tmp_path: Path):
+        """另一半必须不变：明确写了文件名就还是那个文件。"""
+        target = tmp_path / "xxx" / "app.log"
+        LogUtil.init(level="INFO", log_file=str(target))
+        LogUtil.info("named-file")
+        LogUtil.remove_logger("default")
+
+        assert target.exists()
+        assert "named-file" in target.read_text(encoding="utf-8")
+
+    def test_directory_from_config(self, tmp_path: Path):
+        """走 [LOG].output 这条路（用户实际配置的入口）也得对。"""
+        target = tmp_path / "conf-logs"
+        LogUtil.init_from_config({"level": "INFO", "output": f"{target}/"})
+        LogUtil.info("from-config-dir")
+        LogUtil.remove_logger("default")
+
+        assert not (tmp_path / "conf-logs.log").exists()
+        assert list(target.glob("*.log"))
+
+    @pytest.mark.parametrize(
+        ("raw", "is_dir"),
+        [
+            ("logs/", True),
+            ("logs/app.log", False),
+            ("logs/noext", False),
+            ("app.log", False),
+            ("", False),
+        ],
+    )
+    def test_looks_like_directory(self, raw: str, is_dir: bool):
+        from ipclick.utils.path_util import PathUtil
+
+        assert PathUtil.looks_like_directory(raw) is is_dir
+
+    def test_resolve_log_file_variants(self, tmp_path: Path):
+        from ipclick.utils.path_util import DEFAULT_LOG_FILENAME, PathUtil
+
+        # 目录写法 -> 目录内的默认文件名
+        assert PathUtil.resolve_log_file(f"{tmp_path}/logs/") == tmp_path / "logs" / DEFAULT_LOG_FILENAME
+        # 明确的文件名 -> 原样
+        assert PathUtil.resolve_log_file(f"{tmp_path}/logs/app.log") == tmp_path / "logs" / "app.log"
+        # 没有扩展名的文件名 -> 补 .log（旧行为，保持不变）
+        assert PathUtil.resolve_log_file(f"{tmp_path}/logs/noext") == tmp_path / "logs" / "noext.log"
+
+
 class TestInitFromConfig:
     def test_reads_level_from_config(self):
         """回归：配置文件的 [LOG] 节以前完全没被读取过。"""

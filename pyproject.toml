@@ -1,6 +1,6 @@
 [project]
 name = "ipclick"
-version = "0.3.0"
+version = "0.4.0"
 description = "IPClick Tool"
 authors = [
     { name = "元气码农少女酱", email = "1276162429@qq.com" }
@@ -18,7 +18,7 @@ dependencies = [
     "loguru>=0.7.3,<0.8.0",
     "python-box[all]>=7.4.1,<8.0.0",
     "uuid-utils>=0.17.0,<0.18.0",
-    "typing-extensions>=4.15.0,<5.0.0",
+    "typing-extensions>=4.16.0,<5.0.0",
 ]
 
 [project.optional-dependencies]
@@ -26,25 +26,29 @@ dependencies = [
 # 另一个可选的是 niquests —— requests 的 drop-in 替代，额外支持 HTTP/2 与 HTTP/3。
 # （httpx 曾经也在这里，0.3.0 移除：它和 niquests 能力重叠，
 #   而 niquests 还多支持 HTTP/3，维护两套等价的 HTTP 适配器不划算。）
-niquests = ["niquests>=3.14.0,<4.0.0"]
+niquests = ["niquests>=3.21.0,<4.0.0"]
 
 # 浏览器渲染引擎。装完还要各自准备浏览器本体：
 #   camoufox     python -m camoufox fetch
 #   patchright   patchright install chromium
 #   playwright   playwright install chromium
 #   drissionpage 用本机已装的 Chrome/Chromium，无需下载
-camoufox = ["camoufox>=0.5.0,<1.0.0"]
-patchright = ["patchright>=1.52.0,<2.0.0"]
-drissionpage = ["drissionpage>=4.1.0,<5.0.0"]
-playwright = ["playwright>=1.49.0,<2.0.0"]
+camoufox = ["camoufox>=0.5.4,<1.0.0"]
+patchright = ["patchright>=1.61.2,<2.0.0"]
+drissionpage = ["drissionpage>=4.1.1,<5.0.0"]
+# ⚠️ 上限**必须**留在 camoufox 能接受的范围内：camoufox 0.5.4 自己钉着
+# playwright<1.61，把这里的下限提到 1.62 会让 [camoufox] 和 [playwright]
+# 直接互斥（uv 会报 unsatisfiable）。而 camoufox 是 Linux 上的默认引擎，
+# 为了追一个更新的 playwright 把它挤掉不划算。
+playwright = ["playwright>=1.60.0,<2.0.0"]
 
 # 按平台打包好的组合。刻意不提供 [all]——把四个浏览器内核全装上去
 # 有 70+ 个包和上 G 的浏览器本体，而一台机器只会用其中一个。
 # curl_cffi 是核心依赖，不在这里重复声明（重复写还会引入版本区间打架的风险）。
 #   win   : DrissionPage 直接驱动本机已装的 Chrome，Windows 上最省事
 #   linux : Camoufox / Patchright 自带无头浏览器，适合服务器
-win = ["drissionpage>=4.1.0,<5.0.0"]
-linux = ["camoufox>=0.5.0,<1.0.0", "patchright>=1.52.0,<2.0.0"]
+win = ["drissionpage>=4.1.1,<5.0.0"]
+linux = ["camoufox>=0.5.4,<1.0.0", "patchright>=1.61.2,<2.0.0"]
 
 [project.urls]
 "Homepage" = "https://github.com/yuanqimanong/IPClick"

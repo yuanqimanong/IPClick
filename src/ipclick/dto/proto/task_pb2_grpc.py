@@ -53,6 +53,11 @@ class TaskServiceStub:
                 request_serializer=task__pb2.ReqTask.SerializeToString,
                 response_deserializer=task__pb2.TaskResp.FromString,
                 _registered_method=True)
+        self.Ping = channel.unary_unary(
+                '/task.TaskService/Ping',
+                request_serializer=task__pb2.PingReq.SerializeToString,
+                response_deserializer=task__pb2.PingResp.FromString,
+                _registered_method=True)
 
 
 class TaskServiceServicer:
@@ -85,6 +90,15 @@ class TaskServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Ping(self, request, context):
+        """节点探测：验连通性与集群内部鉴权，不做任何业务动作。
+        0.4 新增——对着 0.3 的节点调会收到 UNIMPLEMENTED，调用方据此判断"连上了、
+        鉴权也过了，只是那台还没升级"。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_TaskServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -102,6 +116,11 @@ def add_TaskServiceServicer_to_server(servicer, server):
                     servicer.SendBatch,
                     request_deserializer=task__pb2.ReqTask.FromString,
                     response_serializer=task__pb2.TaskResp.SerializeToString,
+            ),
+            'Ping': grpc.unary_unary_rpc_method_handler(
+                    servicer.Ping,
+                    request_deserializer=task__pb2.PingReq.FromString,
+                    response_serializer=task__pb2.PingResp.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -189,6 +208,33 @@ class TaskService:
             '/task.TaskService/SendBatch',
             task__pb2.ReqTask.SerializeToString,
             task__pb2.TaskResp.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Ping(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/task.TaskService/Ping',
+            task__pb2.PingReq.SerializeToString,
+            task__pb2.PingResp.FromString,
             options,
             channel_credentials,
             insecure,

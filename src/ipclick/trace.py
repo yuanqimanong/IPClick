@@ -30,8 +30,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 import os
+from pathlib import Path
 import queue
 import sqlite3
+import sys
 import threading
 import time
 from typing import Any, final
@@ -361,6 +363,77 @@ CREATE INDEX IF NOT EXISTS idx_traces_host ON traces(host, ts DESC);
 """
 
 
+#: 记录"谁在写这个库"的标记文件后缀。
+_CLAIM_SUFFIX = ".owner"
+
+
+def _claim_database(path: str) -> str:
+    """声明本进程正在写这个链路库；发现别人也在写就**明确告警**。
+
+    WAL 模式下多个进程往同一个库里写是完全合法的——所以 SQLite 自己不会报任何
+    错，链路记录就这么静静地混在一起，界面上看不出来。这正是 P1-3 里最危险的
+    那一项：用户以为在看单个实例的数据，实际是多进程合并的结果。
+
+    这里只做"告警"，不做"阻止"：把同一个库共享给多个实例是有正当用途的
+    （比如刻意想看合并视图）。真正的解法是给路径加 ``{port}`` 占位符，所以
+    告警里直接把那句话说出来。
+
+    Returns:
+        标记文件路径；建不出来就返回空串（这只是个提醒机制，不该影响服务）。
+    """
+    marker = path + _CLAIM_SUFFIX
+    try:
+        previous = int(Path(marker).read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        previous = 0
+
+    if previous and previous != os.getpid() and _process_alive(previous):
+        log.warning(
+            f"链路记录库 {path} 正被另一个进程（pid {previous}）写入。"
+            f"多个实例写同一个库不会报错，但记录会**静默混在一起**，界面上分不出来。"
+            f"给 [TRACE].sqlite_path 加上 {{port}} 占位符即可按端口分开，"
+            f'例如 sqlite_path = "ipclick-trace.{{port}}.db"'
+        )
+
+    try:
+        _ = Path(marker).write_text(str(os.getpid()), encoding="utf-8")
+    except OSError as e:  # pragma: no cover - 目录不可写
+        log.debug(f"无法写入链路库占用标记 {marker}：{e}")
+        return ""
+    return marker
+
+
+def _release_database(marker: str) -> None:
+    if not marker:
+        return
+    with contextlib.suppress(OSError):
+        # 只删自己写的那一份：进程被 kill -9 时标记会留下，
+        # 下次启动靠 _process_alive 把它认成陈旧记录。
+        if Path(marker).read_text(encoding="utf-8").strip() == str(os.getpid()):
+            Path(marker).unlink()
+
+
+def _process_alive(pid: int) -> bool:
+    """pid 还在跑吗。查不出来时按"在跑"处理——宁可多一条告警，
+    也不要漏掉真正的多实例混写。
+    """
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":  # pragma: no cover - 平台相关
+        # Windows 上 os.kill(pid, 0) 会直接终止进程而不是探测，绝不能用。
+        # 没有零依赖的可靠探测手段，那就按"可能还在"处理。
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover - 进程存在但不属于当前用户
+        return True
+    except OSError:  # pragma: no cover
+        return False
+    return True
+
+
 @final
 class SQLiteSink:
     """把链路记录异步写进 SQLite。
@@ -383,6 +456,7 @@ class SQLiteSink:
         self._closed: bool = False
 
         self._init_db()
+        self._claim_marker: str = _claim_database(self.path)
         self._thread: threading.Thread = threading.Thread(target=self._run, name="ipclick-trace", daemon=True)
         self._thread.start()
 
@@ -569,6 +643,7 @@ class SQLiteSink:
         with contextlib.suppress(queue.Full):
             self._queue.put_nowait(None)
         self._thread.join(timeout=timeout)
+        _release_database(self._claim_marker)
 
     # -------------------------------------------------------------- #
     # 读（给 Web 端）

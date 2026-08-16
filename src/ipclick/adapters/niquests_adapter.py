@@ -24,21 +24,42 @@ from ipclick.exceptions import AdapterError, ValidationError
 from ipclick.utils.log_util import log
 
 
-# 可选依赖：缺失时降级为 None，由 __init__ 抛 AdapterError
-_niquests: Any
-_user_agent_cls: Any
+# 可选依赖：**懒加载**，缺失时降级为 None，由 __init__ 抛 AdapterError。
+#
+# 为什么不在模块级 import：那会把"装没装"的结论固化在进程启动那一刻，
+# 运行时 pip install niquests 之后不重启进程就永远看不到它
+# （详见 :mod:`ipclick.utils.module_probe`）。
+_UNPROBED: Any = object()
+_niquests: Any = _UNPROBED
+_user_agent_cls: Any = _UNPROBED
 
-try:
-    import niquests as _niquests
-except ImportError:  # pragma: no cover - 取决于安装环境
-    _niquests = None
+#: 探测用的顶层模块名
+NIQUESTS_MODULE = "niquests"
 
-try:
-    from fake_useragent import UserAgent as _user_agent_cls
-except ImportError:  # pragma: no cover - 取决于安装环境
-    _user_agent_cls = None
 
-NIQUESTS_AVAILABLE: bool = _niquests is not None
+def _load_niquests() -> Any:
+    global _niquests
+    if _niquests is _UNPROBED:
+        try:
+            import niquests
+
+            _niquests = niquests
+        except ImportError:  # pragma: no cover - 取决于安装环境
+            _niquests = None
+    return _niquests
+
+
+def _load_user_agent() -> Any:
+    global _user_agent_cls
+    if _user_agent_cls is _UNPROBED:
+        try:
+            from fake_useragent import UserAgent
+
+            _user_agent_cls = UserAgent
+        except ImportError:  # pragma: no cover - 取决于安装环境
+            _user_agent_cls = None
+    return _user_agent_cls
+
 
 _SUPPORTED_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
 
@@ -58,14 +79,17 @@ class NiquestsAdapter(DownloaderAdapter):
     adapter_name: str = "niquests"
 
     def __init__(self, settings: AdapterSettings | None = None):
-        if _niquests is None:
+        # 真正的 import 就发生在这里——"能不能用"的展示层走 find_spec，
+        # 执行路径仍然老老实实 import 一次。
+        if _load_niquests() is None:
             raise AdapterError('niquests is not installed. Install it with: pip install "ipclick[niquests]"')
 
         super().__init__(settings)
         # 按 (proxy, verify) 缓存 Session，以复用连接池
         self._sessions: dict[tuple[str | None, bool], Any] = {}
         self._sessions_lock: threading.Lock = threading.Lock()
-        self.ua_generator: Any = _user_agent_cls(platforms="desktop") if _user_agent_cls is not None else None
+        user_agent = _load_user_agent()
+        self.ua_generator: Any = user_agent(platforms="desktop") if user_agent is not None else None
 
     def _get_session(self, proxy: str | None, verify: bool) -> Any:
         key = (proxy, verify)
@@ -75,14 +99,14 @@ class NiquestsAdapter(DownloaderAdapter):
 
         with self._sessions_lock:
             if key not in self._sessions:
-                session = _niquests.Session()
+                session = _load_niquests().Session()
                 session.verify = verify
                 # 与另外两个适配器保持一致：默认不继承环境里的 HTTP_PROXY，
                 # 代理必须由调用方显式指定。
                 session.trust_env = bool(self.trust_env)
                 if proxy:
                     session.proxies = {"http": proxy, "https": proxy}
-                adapter = _niquests.adapters.HTTPAdapter(
+                adapter = _load_niquests().adapters.HTTPAdapter(
                     pool_connections=self.settings.max_keepalive_connections,
                     pool_maxsize=self.settings.max_connections,
                     max_retries=0,  # 重试由本项目的 retry 装饰器统一负责
@@ -227,8 +251,27 @@ class NiquestsAdapter(DownloaderAdapter):
 
 
 def is_available() -> bool:
-    """检查 niquests 是否可用"""
-    return NIQUESTS_AVAILABLE
+    """niquests 装了没。
+
+    走 find_spec 而不是 ``_niquests is not None``：后者只有在有人真的构造过一次
+    适配器之后才有意义，而这个函数恰恰是在那之前被问的。
+    """
+    from ipclick.utils import module_probe
+
+    return module_probe.installed(NIQUESTS_MODULE)
 
 
-__all__ = ["NIQUESTS_AVAILABLE", "NiquestsAdapter", "is_available"]
+def __getattr__(name: str) -> Any:
+    """``NIQUESTS_AVAILABLE`` 的兼容层。
+
+    0.3 里它是模块级常量，值在 import 那一刻就定死了。0.4 起改成每次问都重新
+    探测——运行时装完 niquests 不重启也能用。保留这个名字是为了不破坏
+    ``from ... import NIQUESTS_AVAILABLE`` 的写法，但那种写法拿到的仍是一个快照，
+    新代码请直接调 :func:`is_available`。
+    """
+    if name == "NIQUESTS_AVAILABLE":
+        return is_available()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = ["NIQUESTS_MODULE", "NiquestsAdapter", "is_available"]

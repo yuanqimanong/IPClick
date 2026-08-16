@@ -36,14 +36,36 @@ class SecretSpec:
     key: str
     #: 给人看的名字
     label: str
+    #: 能不能"随便生成一个"。账号名之类不行——它得和对端约定好。
+    generatable: bool = False
+    #: **全集群必须一致**。这一位决定了生成之后该说什么话：
+    #: 本机独有的令牌生成即用；共享密钥每台各自生成一个就全对不上了，
+    #: 必须提示"复制到所有其他节点的 .env"。
+    shared: bool = False
+    #: 生成时的补充说明
+    note: str = ""
 
 
-#: 全部机密。``.env`` 模板、启动警告、config-info 三处都从这里生成，
-#: 不会出现"文档里有但代码里没有"。
+#: 全部机密。``.env`` 模板、启动警告、config-info、Web 端的"生成"按钮
+#: 四处都从这里生成，不会出现"文档里有但代码里没有"。
 SECRETS: tuple[SecretSpec, ...] = (
-    SecretSpec("IPCLICK_AUTH_TOKEN", "SECURITY", "auth_token", "gRPC 鉴权令牌"),
+    SecretSpec(
+        "IPCLICK_AUTH_TOKEN",
+        "SECURITY",
+        "auth_token",
+        "gRPC 鉴权令牌",
+        generatable=True,
+        note="调用方要带同一个令牌（authorization: Bearer <令牌>）。轮换期间可以在 [SECURITY].auth_token 里写成数组让新旧并存。",
+    ),
     SecretSpec("IPCLICK_WEB_USER", "WEB", "username", "Web 管理端用户名"),
-    SecretSpec("IPCLICK_WEB_PASSWORD", "WEB", "password", "Web 管理端密码"),
+    SecretSpec(
+        "IPCLICK_WEB_PASSWORD",
+        "WEB",
+        "password",
+        "Web 管理端密码",
+        generatable=True,
+        note="只影响本机的这个管理端，改完重启即可生效。",
+    ),
     SecretSpec("IPCLICK_PROXY_AUTH_KEY", "PROXY", "auth_key", "代理账号"),
     SecretSpec("IPCLICK_PROXY_AUTH_PASSWORD", "PROXY", "auth_password", "代理密码"),
     SecretSpec(
@@ -51,6 +73,12 @@ SECRETS: tuple[SecretSpec, ...] = (
         "CLUSTER",
         "secret",
         "集群共享密钥",
+        generatable=True,
+        shared=True,
+        note=(
+            "每个节点的令牌由它派生，所以**所有节点必须是同一个值**。"
+            "在一台机器上生成，再原样复制到其余每台的 .env——各自生成一个就全对不上了。"
+        ),
     ),
 )
 

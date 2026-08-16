@@ -1,6 +1,7 @@
 from collections.abc import Callable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
+import queue
 import threading
 import time
 from typing import Any, cast
@@ -152,6 +153,11 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         # 批量的并发度沿用 SERVER.max_workers：这里再开一个不受约束的池的话，
         # 总并发会变成 max_workers x 批量数，把下游打爆。
         self._batch_concurrency: int = max(1, int(dict(self.config.get("SERVER", {})).get("max_workers", 10) or 10))
+        #: 批量任务共用的线程池。懒建，见 _batch_pool()。
+        self._batch_executor: ThreadPoolExecutor | None = None
+        #: 供 Ping 报告运行时长。用 monotonic：系统时钟被 NTP 调过之后
+        #: wall clock 的差值会变成负数或者跳几个小时。
+        self._started_at: float = time.monotonic()
 
         # 目标 URL 准入策略（SSRF 防护）
         self.url_policy: URLPolicy = URLPolicy.from_config(dict(self.config.get("SECURITY", {})))
@@ -639,31 +645,65 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         总并发会变成 max_workers × 批量数，把下游打爆。用 as_completed 让快的
         先返回，而不是按提交顺序阻塞在慢请求上。
         """
-        pending: dict[Future[task_pb2.TaskResp], str] = {}
+        pool = self._batch_pool()
+        # 完成通知走队列而不是每提交一个就扫一遍 pending。
+        #
+        # 旧写法是 `done = [f for f in pending if f.done()]`，放在提交循环里——
+        # 每提交一个任务就把**全部**在途 future 扫一遍，总代价 O(N²)。批量一千个
+        # 任务就是五十万次 done() 调用，全压在推任务的那个线程上，反而拖慢了提交
+        # 本身。add_done_callback 让完成方自己来报到，两边都是 O(1)。
+        finished: queue.Queue[Future[task_pb2.TaskResp]] = queue.Queue()
+        in_flight = 0
         submitted = 0
 
-        with ThreadPoolExecutor(max_workers=self._batch_concurrency, thread_name_prefix="ipclick-batch") as pool:
-            for request in request_iterator:
-                if not context.is_active():
-                    log.info("Batch cancelled by client")
-                    break
-                future = pool.submit(self._handle_one, request, _batch_metadata(context))
-                pending[future] = request.uuid
-                submitted += 1
+        for request in request_iterator:
+            if not context.is_active():
+                log.info("Batch cancelled by client")
+                break
+            future = pool.submit(self._handle_one, request, _batch_metadata(context))
+            future.add_done_callback(finished.put)
+            in_flight += 1
+            submitted += 1
 
-                # 边收边发：不等客户端把所有任务推完再开始返回结果，
-                # 否则一个超长的批次会让首个结果迟迟不到。
-                done = [f for f in pending if f.done()]
-                for f in done:
-                    del pending[f]
-                    yield f.result()
-
-            for future in as_completed(list(pending)):
-                if not context.is_active():
+            # 边收边发：不等客户端把所有任务推完再开始返回结果，
+            # 否则一个超长的批次会让首个结果迟迟不到。
+            while True:
+                try:
+                    done = finished.get_nowait()
+                except queue.Empty:
                     break
-                yield future.result()
+                in_flight -= 1
+                yield done.result()
+
+        while in_flight > 0:
+            if not context.is_active():
+                break
+            done = finished.get()
+            in_flight -= 1
+            yield done.result()
 
         log.info(f"Batch finished, {submitted} tasks")
+
+    def _batch_pool(self) -> ThreadPoolExecutor:
+        """批量任务共用的线程池，懒建一次。
+
+        旧实现每次 ``SendBatch`` 都 ``with ThreadPoolExecutor(...)``，于是每一次
+        批量调用都要重新创建、再销毁最多 ``[SERVER].max_workers`` 个线程（默认
+        100）。批量本来就是"高频、每次很多任务"的用法，这份线程创建开销是白付的。
+        共用一个池之后，线程只在第一次真正需要时创建，之后一直复用。
+
+        并发度仍然受 ``[SERVER].max_workers`` 约束——这里再开一个不受约束的池的话，
+        总并发会变成 max_workers × 并发批量数，把下游打爆。
+        """
+        pool = self._batch_executor
+        if pool is not None:
+            return pool
+        with self._cache_lock:
+            if self._batch_executor is None:
+                self._batch_executor = ThreadPoolExecutor(
+                    max_workers=self._batch_concurrency, thread_name_prefix="ipclick-batch"
+                )
+            return self._batch_executor
 
     def _handle_one(
         self, request: "task_pb2.ReqTask", metadata: tuple[tuple[str, str], ...] = ()
@@ -680,6 +720,50 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         return self.Send(request, cast(ServicerContext, cast(object, _IsolatedContext(metadata))))
 
     # ------------------------------------------------------------------ #
+    # 探测
+    # ------------------------------------------------------------------ #
+
+    @override
+    def Ping(self, request: "task_pb2.PingReq", context: ServicerContext) -> "task_pb2.PingResp":
+        """节点探测：验连通性与鉴权，不做任何业务动作。
+
+        能走到这个方法就说明鉴权拦截器已经放行了——这正是它相对
+        ``grpc.health.v1`` 的全部价值：健康检查刻意免鉴权，于是"连不上"和
+        "连上了但令牌不对"在它眼里长得一样，而这两件事的排查方向完全相反。
+
+        刻意不落链路记录：这是诊断动作，不是业务请求，混进请求流只会污染统计。
+        """
+        _ = context
+        if request.from_node:
+            log.debug(f"收到来自节点 {request.from_node} 的探测")
+        return task_pb2.PingResp(
+            node_id=self.node_id,
+            version=_version(),
+            auth_required=self.auth_required,
+            forward=self.forward_enabled,
+            uptime_seconds=int(time.monotonic() - self._started_at),
+            in_flight=self._recorder.counters.in_flight,
+        )
+
+    @property
+    def auth_required(self) -> bool:
+        """本节点有没有启用令牌鉴权。
+
+        对端要能看到这一位：一个**没设防**的节点意味着任何能连到它端口的人都能
+        借它发请求，而探测成功本身并不能区分"我的令牌对"和"它根本不验"。
+        """
+        from ipclick.auth import load_tokens
+        from ipclick.cluster.tokens import cluster_secret
+
+        section = dict(self.config.get("SECURITY", {}))
+        return bool(load_tokens(section)) or bool(cluster_secret(dict(self.config.get("CLUSTER", {}))))
+
+    @property
+    def forward_enabled(self) -> bool:
+        """本节点是否开着服务端转发。基类恒为 False，转发子类覆盖。"""
+        return False
+
+    # ------------------------------------------------------------------ #
     # 生命周期
     # ------------------------------------------------------------------ #
 
@@ -690,6 +774,11 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         关闭所有适配器连接，释放资源
         """
         log.info("Cleaning up TaskService resources...")
+
+        # 批量线程池是共用的，进程收尾时要显式关掉——否则那些线程会一直挂着
+        pool, self._batch_executor = self._batch_executor, None
+        if pool is not None:
+            pool.shutdown(wait=False)
 
         with self._cache_lock:
             for name, adapter in self._adapter_cache.items():
@@ -703,6 +792,18 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         # 注意：不要清空 registry.ADAPTER_CLASSES。那是模块级的类型注册表，
         # 清掉之后同一进程内再也造不出任何适配器（例如测试里起第二个服务）。
         log.info("TaskService cleanup completed")
+
+
+def _version() -> str:
+    """本进程的 IPClick 版本。取不到时报空串而不是抛错——Ping 的价值在于
+    "连得上、鉴权过"，版本号只是顺带的信息，不该因为它让探测整个失败。
+    """
+    try:
+        from ipclick import __version__
+
+        return __version__
+    except Exception:  # pragma: no cover
+        return ""
 
 
 def _batch_metadata(context: object) -> tuple[tuple[str, str], ...]:

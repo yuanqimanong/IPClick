@@ -1,19 +1,20 @@
 """Web 管理端。
 
 ``ipclick run --web`` 起一个带登录的网页界面。只用标准库——为几个页面拉进
-FastAPI 那一串依赖不划算，而且这个包刚把核心依赖精简到 17 个。页面里**一行
-JavaScript 都没有**，自动刷新用 ``<meta refresh>``，CSP 收到
-``default-src 'none'``：管理端后面就是一个能代发任意请求的服务，攻击面比页面
-炫酷重要。
+FastAPI 那一串依赖不划算。前端也没有构建链路：布局是纯 CSS Grid，交互是几十行
+原生 JS（见 :mod:`ipclick.web.assets`）。
 
 页面
 ----
-* ``/`` 总览：吞吐、成功率、在途、各适配器、引擎安装状态、集群、最近请求。
-* ``/trace`` 请求流：实时（3 秒刷新）看请求打进来，可按状态 / 适配器 / URL 过滤。
-* ``/test`` 试一试：填个网址就地发一次请求，看链路与源码。走的是本进程
-  TaskService 的**同一条**代码路径——包括 SSRF 准入、限流、以及开了转发时的分发。
+* ``/`` 总览：吞吐、成功率、在途、各适配器、集群、最近请求 + 右侧常驻状态栏。
+* ``/trace`` 请求流：实时看请求打进来（**局部刷新**，不重载整页），
+  可按状态 / 适配器 / URL 过滤。
+* ``/test`` 试一试：填个网址（或直接粘一条 curl）就地发一次请求，看链路与源码。
+  走的是本进程 TaskService 的**同一条**代码路径——包括 SSRF 准入、限流、以及
+  开了转发时的分发；也可以点名打到某一个节点。
+* ``/components`` 组件：五个可选 extras 的安装状态与装 / 卸。
 * ``/config`` 配置：白名单内的行为配置可改，**写回 ipclick.toml**（保留注释）。
-* ``/nodes`` 节点：集群节点的增删改，同样写回 toml。
+* ``/nodes`` 节点：集群节点的增删改（保存即生效）+ 就地测试连接。
 
 能改什么、不能改什么
 --------------------
@@ -23,8 +24,15 @@ JavaScript 都没有**，自动刷新用 ``<meta refresh>``，CSP 收到
 集群共享密钥与各节点 token、``[BROWSER].allow_scripts``。名单在
 :mod:`ipclick.web.editable`，那里也写了每一项为什么在哪一侧。
 
-**不装东西**：引擎的安装状态只展示，附上安装命令让人自己去机器上跑。
-让网页能执行安装命令等于给它一个任意命令执行的入口。
+0.4 的两处放开
+--------------
+* **可以装依赖了。** 0.3 刻意不给这个能力（"装依赖要在机器上执行命令，那是网页
+  最不该有的能力"）。现在允许，但只限 IPClick 自己声明的那五个 extras：包名走
+  白名单常量、命令用列表交给 subprocess（``shell=False``），绑定当前解释器。
+  见 :mod:`ipclick.web.installer`。
+* **有 JavaScript 了。** 主题切换、安装任务轮询、局部刷新这三件事没有 JS 做不好。
+  CSP 里用**脚本哈希**放行那两段内联脚本，而不是 ``'unsafe-inline'``——注入进来
+  的 ``<script>`` 仍然执行不了。
 """
 
 from collections.abc import Callable
@@ -40,9 +48,10 @@ from urllib.parse import parse_qs
 from typing_extensions import override
 
 from ipclick.utils.log_util import log
+from ipclick.web.assets import csp
 from ipclick.web.auth import SessionStore, WebCredentials
 from ipclick.web.pages import WebPages
-from ipclick.web.templates import render_dashboard, render_login
+from ipclick.web.templates import dashboard_live, render_dashboard, render_login
 
 
 #: 会话 cookie 名
@@ -51,6 +60,9 @@ COOKIE_NAME = "ipclick_session"
 #: 单次请求体上限。最大的表单是"试一试"页面（可以贴请求体和请求头）与配置页，
 #: 256KB 足够宽松；不设上限的话一个大 POST 就能把内存吃掉。
 MAX_BODY_BYTES = 256 * 1024
+
+#: CSP 头。脚本哈希在进程启动时算一次——脚本是源码里的常量，不会变。
+_CSP = csp()
 
 
 @final
@@ -113,6 +125,7 @@ class WebServer:
         action_handler: Callable[[str, dict[str, str]], tuple[bool, str]] | None = None,
         sessions: SessionStore | None = None,
         pages: WebPages | None = None,
+        live_provider: Callable[[], dict[str, Any]] | None = None,
     ):
         self._provider: Callable[[], dict[str, Any]] = snapshot_provider
         self._credentials: WebCredentials = credentials
@@ -121,6 +134,10 @@ class WebServer:
         #: 请求流 / 试一试 / 配置这几页需要的数据源与写入口。为 None 时那些页面
         #: 直接返回 404——库模式下起一个只看状态的 Web 端是合法用法。
         self.pages: WebPages | None = pages
+        #: 总览页自动刷新用的轻量数据源。每 5 秒被拉一次，所以不该走完整快照
+        #: （那里面有 TLS 解析、集群拓扑、四个引擎的文件系统探测）。
+        #: 没注入时回落到完整快照——功能一样，只是贵一点。
+        self._live: Callable[[], dict[str, Any]] = live_provider or snapshot_provider
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -202,11 +219,10 @@ class WebServer:
                 self.send_header("X-Frame-Options", "DENY")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
-                # 页面里没有任何外部资源，把 CSP 收到最紧
-                self.send_header(
-                    "Content-Security-Policy",
-                    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
-                )
+                # 页面里没有任何外部资源，把 CSP 收到最紧。
+                # script-src 用的是两段内联脚本的 sha256，不是 'unsafe-inline'——
+                # 万一某处转义漏了、注入进一行 <script>，它也执行不了。
+                self.send_header("Content-Security-Policy", _CSP)
                 for key, value in extra_headers or []:
                     self.send_header(key, value)
                 self.end_headers()
@@ -257,6 +273,11 @@ class WebServer:
                     payload = json.dumps(server._safe_snapshot(), ensure_ascii=False, indent=2, default=str)
                     return self._send(HTTPStatus.OK, payload.encode(), "application/json; charset=utf-8")
 
+                if path == "/fragment/dashboard":
+                    # 总览页里自己刷新的那一块。和整页走同一个渲染函数，
+                    # 所以不存在"局部刷出来的和整页渲染的不一样"。
+                    return self._send(HTTPStatus.OK, dashboard_live(server._safe_live()).encode())
+
                 pages = server.pages
                 if pages is None:
                     return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain; charset=utf-8")
@@ -264,6 +285,9 @@ class WebServer:
                 if path == "/trace":
                     body = pages.trace_page(self._query(), session.username, session.csrf_token)
                     return self._send(HTTPStatus.OK, body.encode())
+
+                if path == "/fragment/trace":
+                    return self._send(HTTPStatus.OK, pages.trace_fragment(self._query()).encode())
 
                 if path == "/api/trace":
                     payload = json.dumps(pages.trace_json(self._query()), ensure_ascii=False, indent=2, default=str)
@@ -275,8 +299,21 @@ class WebServer:
                     body = pages.test_page(form, result, session.username, session.csrf_token)
                     return self._send(HTTPStatus.OK, body.encode())
 
+                if path == "/components":
+                    body = pages.components_page(session.username, session.csrf_token)
+                    return self._send(HTTPStatus.OK, body.encode())
+
+                if path == "/api/components/status":
+                    return self._json({"job": pages.installer.current()})
+
                 if path == "/config":
-                    body = pages.config_page(session.username, session.csrf_token)
+                    # 带 g= 的是刚生成完机密重定向回来的。取完即弃——
+                    # "只显示一次"就是靠这个保证的。
+                    body = pages.config_page(
+                        session.username,
+                        session.csrf_token,
+                        generated_token=self._query().get("g", ""),
+                    )
                     return self._send(HTTPStatus.OK, body.encode())
 
                 if path == "/nodes":
@@ -284,6 +321,10 @@ class WebServer:
                     return self._send(HTTPStatus.OK, body.encode())
 
                 return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain; charset=utf-8")
+
+            def _json(self, payload: dict[str, Any], status: int = HTTPStatus.OK) -> None:
+                body = json.dumps(payload, ensure_ascii=False, default=str).encode()
+                return self._send(status, body, "application/json; charset=utf-8")
 
             def do_POST(self) -> None:
                 path = self.path.split("?", 1)[0].rstrip("/") or "/"
@@ -316,13 +357,44 @@ class WebServer:
                     return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain; charset=utf-8")
 
                 if path == "/test":
+                    if form.get("action") == "import_curl":
+                        # 解析出来的表单直接渲染回去，不发请求——导入和发送是
+                        # 两步，中间要让人有机会看一眼、改一改。
+                        imported, notes, error = pages.import_curl(form)
+                        body = pages.test_page(
+                            imported,
+                            None,
+                            session.username,
+                            session.csrf_token,
+                            curl_notes=notes,
+                            curl_error=error,
+                        )
+                        return self._send(HTTPStatus.OK, body.encode())
                     # Post/Redirect/Get：结果存起来再 303 回去。直接渲染的话用户按
                     # F5 会把整次请求重新提交一遍——而这一页的一次提交可能是几十秒
                     # 的真实浏览器渲染，用户还以为自己"只是刷新了一下"。
                     result = pages.run_test(form)
                     return self._redirect(f"/test?r={pages.stash_test_result(form, result)}")
 
+                if path == "/components":
+                    ok, message = pages.refresh_components()
+                    log.info(f"Web 端刷新组件状态：{message}")
+                    _ = ok
+                    return self._redirect("/components")
+
+                if path == "/api/components/action":
+                    ok, message = pages.component_action(form.get("op", ""), form.get("extra", ""))
+                    return self._json({"ok": ok, "message": message, "job": pages.installer.current()})
+
+                if path == "/api/nodes/probe":
+                    return self._json(pages.probe_node(form.get("node_id", ""), form.get("address", "")))
+
                 if path == "/config":
+                    if form.get("action") == "generate_secret":
+                        # Post/Redirect/Get + 一次性 token：值只在那一次 GET 里出现，
+                        # 服务端不留副本，刷新就没了。
+                        token = pages.generate_secret(form.get("secret", ""))
+                        return self._redirect(f"/config?g={token}" if token else "/config")
                     body = pages.save_config(form, session.username, session.csrf_token)
                     return self._send(HTTPStatus.OK, body.encode())
 
@@ -375,6 +447,14 @@ class WebServer:
         except Exception as e:
             log.exception(f"取 Web 端展示数据失败：{e}")
             return {"error": f"{type(e).__name__}: {e}"}
+
+    def _safe_live(self) -> dict[str, Any]:
+        try:
+            return self._live()
+        except Exception as e:
+            # 自动刷新失败不该刷屏：它每 5 秒来一次，出问题就是每 5 秒一条堆栈
+            log.warning(f"取总览实时数据失败：{e}")
+            return {}
 
 
 __all__ = ["COOKIE_NAME", "WebConfig", "WebServer"]
