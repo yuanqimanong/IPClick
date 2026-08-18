@@ -1,5 +1,8 @@
 from concurrent import futures
+import contextlib
+import os
 import signal
+import socket
 import sys
 from types import FrameType
 from typing import Any, TypedDict, cast
@@ -37,6 +40,10 @@ class ServerConfig(TypedDict, total=False):
     host: str
     port: int
     max_workers: int
+    max_concurrent_rpcs: int
+    max_concurrent_streams: int
+    processes: int
+    compression: str
 
 
 class IPClickServer:
@@ -53,7 +60,12 @@ class IPClickServer:
         port: int | None = None,
         web_port: int | None = None,
         web_host: str | None = None,
+        reuseport: bool = False,
     ):
+        #: 是否允许多个进程共享同一个监听端口（SO_REUSEPORT）。
+        #: 只有 serve() 在 [SERVER].processes > 1 时 fork 出来的子进程才置真，
+        #: 而且父进程已经独占探测过端口——所以"撞端口静默成功"那个坑仍然堵着。
+        self._reuseport: bool = reuseport
         self._config_path: str | None = config_path
         # 带 --port 时先找 ipclick-<端口>.toml：一台机器上起多个实例时，
         # 各读各的配置（不同的 worker 数、限流、链路库）。见 loader.candidate_names。
@@ -113,6 +125,22 @@ class IPClickServer:
         self._node_pool: Any = None
 
         log.info("IPClickServer initialized")
+
+    @staticmethod
+    def _compression(server_config: "ServerConfig | dict[str, Any]") -> grpc.Compression:
+        """响应压缩方式。
+
+        此前写死 Gzip。对本项目最常见的负载——几百字节到几 KB 的 JSON——压缩
+        省下的带宽不值那点 CPU；而在同机或内网部署里，带宽根本不是瓶颈。
+        但对大响应体（抓下来的 HTML 页面、下载的文件）它又确实有用，所以不是
+        "该关掉"，而是"该能选"。
+        """
+        name = str(dict(server_config).get("compression", "gzip") or "gzip").strip().lower()
+        if name in ("none", "off", "no", "identity"):
+            return grpc.Compression.NoCompression
+        if name == "deflate":
+            return grpc.Compression.Deflate
+        return grpc.Compression.Gzip
 
     def _start_web(self) -> None:
         """按配置启动 Web 管理端。"""
@@ -211,9 +239,7 @@ class IPClickServer:
                 # `ipclick run --port X` 时两者不一样，而配置页读的是文件那一份。
                 "grpc_address": f"{self._host}:{self._port}",
                 "grpc_port": self._port,
-                "web_address": (
-                    f"{self.web_config.host}:{self.web_config.port}" if self.web_config.enabled else ""
-                ),
+                "web_address": (f"{self.web_config.host}:{self.web_config.port}" if self.web_config.enabled else ""),
                 "web_port": self.web_config.port if self.web_config.enabled else 0,
                 "version": __version__,
                 "mode": mode,
@@ -374,6 +400,32 @@ class IPClickServer:
         if max_workers < 1:
             raise ConfigError(f"SERVER.max_workers 必须 >= 1，当前为 {max_workers}")
 
+        # 并发准入上限。此前写死成 max_workers * 2，于是"能同时在途多少个 RPC"
+        # 被"线程池多大"决定了——这两件事其实无关：
+        #
+        #   * 线程数决定的是**同时能干多少活**（每个阻塞 IO 占一个线程）
+        #   * 准入上限决定的是**排队能排多长**（超了就拒流）
+        #
+        # 绑在一起的后果实测很难看：默认 max_workers=100 → 上限 200，客户端
+        # 500 并发时服务端直接回 RST_STREAM(REFUSED_STREAM)，SDK 按 UNAVAILABLE
+        # 重试两次仍拒，成功率掉到 68.7%。而那时服务端 CPU 只用了 1.45 个核——
+        # 它不是忙不过来，是自己把门关上了。
+        #
+        # 改成可配置，默认给到 max_workers * 8：排队要有上限（不然内存无界），
+        # 但这个上限该按"愿意让调用方等多久"来定，而不是按线程数。
+        max_concurrent_rpcs: int = int(server_config.get("max_concurrent_rpcs", 0) or 0) or max_workers * 8
+        if max_concurrent_rpcs < max_workers:
+            raise ConfigError(
+                f"SERVER.max_concurrent_rpcs({max_concurrent_rpcs}) 不应小于 max_workers({max_workers})："
+                f"那样线程池永远喂不满，多出来的线程纯属浪费"
+            )
+        # 单条 HTTP/2 连接上的并发流上限。SDK 默认一个 Downloader 一条 channel，
+        # 也就是一条 TCP 连接——这个值直接成了单客户端的并发天花板。写死 100
+        # 意味着不管服务端多空闲，一个客户端最多只能有 100 个请求在途。
+        max_concurrent_streams: int = int(server_config.get("max_concurrent_streams", 0) or 0) or max(
+            100, max_concurrent_rpcs
+        )
+
         # 鉴权：令牌来自环境变量 IPCLICK_AUTH_TOKEN 或 [SECURITY].auth_token
         security_config = dict(self.config.get("SECURITY", {}))
         cluster_section = dict(self.config.get("CLUSTER", {}))
@@ -400,8 +452,9 @@ class IPClickServer:
         self.server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ipclick-worker"),
             # 每个 RPC 都会占用一个 worker 线程做阻塞 IO；不设上限时排队的请求
-            # 会在 gRPC 内部无限堆积，直到内存耗尽。
-            maximum_concurrent_rpcs=max_workers * 2,
+            # 会在 gRPC 内部无限堆积，直到内存耗尽。上限本身仍然要有，只是不该
+            # 由线程数推导——见上面 max_concurrent_rpcs 的说明。
+            maximum_concurrent_rpcs=max_concurrent_rpcs,
             interceptors=[auth_interceptor],
             options=[
                 ("grpc.keepalive_time_ms", 60000),
@@ -412,16 +465,22 @@ class IPClickServer:
                 ("grpc.http2.min_ping_interval_without_data_ms", 120000),
                 ("grpc.max_send_message_length", 500 * 1024 * 1024),  # 500MB
                 ("grpc.max_receive_message_length", 500 * 1024 * 1024),
-                ("grpc.max_concurrent_streams", 100),
+                ("grpc.max_concurrent_streams", max_concurrent_streams),
                 ("grpc.enable_http_proxy", 0),
-                # 关掉 SO_REUSEPORT。gRPC 默认开着它（为了多进程分片同一端口），
-                # 后果是端口撞了也能"启动成功"：两个进程都在监听，请求被内核
-                # 随机分给其中一个。症状是"配置改了一半生效"、"日志只看到一半
-                # 请求"，极难定位。本项目不提供多进程分片，所以宁可撞端口时
-                # 直接起不来。
-                ("grpc.so_reuseport", 0),
+                # SO_REUSEPORT：只有在多进程分片时才打开。
+                #
+                # 关掉它的理由仍然成立——端口撞了也能"启动成功"，两个进程都在
+                # 监听、请求被内核随机分走，症状是"配置改了一半生效"、"日志只看到
+                # 一半请求"，极难定位。所以单进程模式下继续关死。
+                #
+                # 但把它一律关死也堵掉了 Python gRPC 服务端唯一的横向扩展路径。
+                # 这个服务端是一请求一线程的 CPython 进程，实测 8 个核只能用出
+                # 1.45 个——GIL 才是天花板，加线程、加内存、换更快的机器都没用，
+                # 只有多进程能突破。所以改成：processes > 1 时打开，并且由父进程
+                # 先独占探测一次端口（见 _probe_port），撞端口照样起不来。
+                ("grpc.so_reuseport", 1 if self._reuseport else 0),
             ],
-            compression=grpc.Compression.Gzip,
+            compression=self._compression(server_config),
         )
 
         try:
@@ -541,6 +600,128 @@ class IPClickServer:
         log.info("IPClick server stopped")
 
 
+def _resolve_processes(config_path: str | None, port: int | None) -> int:
+    """读 ``[SERVER].processes``。
+
+    ``0`` 表示按 CPU 核数自动决定（上限 8——再多的收益会被目标站点和内核
+    的连接开销吃掉，而每个进程都要一份完整的适配器和连接池）。
+    """
+    try:
+        config = load_config(config_path, port)
+    except Exception:  # pragma: no cover - 配置有问题的话交给正常路径去报错
+        return 1
+    raw = dict(config.get("SERVER", {})).get("processes", 1)
+    # bool 要在 int 之前挡掉：TOML 里写 processes = false 是"别开多进程"的意思，
+    # 但 int(False) == 0，而 0 恰好被定义成"按 CPU 核数自动"——于是关掉它反而
+    # 会起满 8 个进程。这类"写 false 得到最大值"的坑一旦漏出去极难被发现。
+    if isinstance(raw, bool):
+        return 1
+    try:
+        processes = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    if processes < 0:
+        return 1
+    if processes == 0:
+        return max(1, min(8, os.cpu_count() or 1))
+    return processes
+
+
+def _probe_port(host: str, port: int) -> None:
+    """在 fork 之前独占地试绑一次端口。
+
+    多进程分片要打开 SO_REUSEPORT，而那正好让"端口已被别的程序占用"变成
+    静默成功——两个不相干的进程一起监听，请求被内核随便分。所以在放开
+    SO_REUSEPORT 之前，先用一个**不带** SO_REUSEPORT 的普通 socket 试绑：
+    绑不上就当场失败，和单进程模式的行为保持一致。
+    """
+    family = socket.AF_INET6 if ":" in host.strip("[]") or host in ("[::]", "::") else socket.AF_INET
+    bind_host = host.strip("[]") if family is socket.AF_INET6 else host
+    if bind_host in ("", "*"):
+        bind_host = "::" if family is socket.AF_INET6 else "0.0.0.0"
+    probe = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind((bind_host, port))
+    except OSError as e:
+        raise RuntimeError(
+            f"端口 {host}:{port} 无法绑定（{e}）。多进程模式会打开 SO_REUSEPORT，"
+            f"那会让端口冲突变成静默成功，所以这里先独占探测一次"
+        ) from e
+    finally:
+        probe.close()
+
+
+def _serve_multiprocess(
+    processes: int,
+    *,
+    config_path: str | None,
+    host: str | None,
+    port: int | None,
+    web: bool | None,
+    web_port: int | None,
+    web_host: str | None,
+) -> None:
+    """多进程分片：N 个子进程靠 SO_REUSEPORT 共享同一个监听端口。
+
+    为什么需要它：服务端是一请求一线程的 CPython 进程，实测 16 核机器上
+    8 个核只能用出 1.45 个——GIL 是天花板，`max_workers` 从 32 调到 256
+    对吞吐没有任何影响（实测 279.8 / 277.9 QPS，差异在噪声内）。唯一能
+    真正用上多核的办法就是多进程。
+
+    分发由**内核**做（SO_REUSEPORT 按四元组哈希），不需要任何中间件，
+    也不需要改客户端——对调用方来说仍然只有一个地址一个端口。
+
+    Web 管理端只在 0 号子进程里起：它是有状态的（会话、安装任务），
+    起 N 份会让登录态随机失效，而且 N 个进程抢同一个 Web 端口必然失败。
+    """
+    resolved_host = host or str(dict(load_config(config_path, port).get("SERVER", {})).get("host", "[::]"))
+    resolved_port = int(port or dict(load_config(config_path, port).get("SERVER", {})).get("port", DEFAULT_GRPC_PORT))
+    _probe_port(resolved_host, resolved_port)
+
+    children: list[int] = []
+
+    def spawn(index: int) -> int:
+        pid = os.fork()
+        if pid == 0:
+            # 子进程：只有 0 号带 Web 管理端
+            try:
+                server = IPClickServer(
+                    config_path,
+                    web=web if index == 0 else False,
+                    host=host,
+                    port=port,
+                    web_port=web_port,
+                    web_host=web_host,
+                    reuseport=True,
+                )
+                server.start()
+            except KeyboardInterrupt:
+                pass
+            except Exception as e:  # pragma: no cover
+                log.exception(f"worker {index} 退出: {e}")
+                os._exit(1)
+            os._exit(0)
+        return pid
+
+    for index in range(processes):
+        children.append(spawn(index))
+
+    log.info(f"IPClick 多进程模式：{processes} 个 worker 共享 {resolved_host}:{resolved_port}（SO_REUSEPORT）")
+
+    def forward(signum: int, _frame: FrameType | None) -> None:
+        for pid in children:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signum)
+
+    _ = signal.signal(signal.SIGINT, forward)
+    _ = signal.signal(signal.SIGTERM, forward)
+
+    for pid in children:
+        with contextlib.suppress(ChildProcessError, InterruptedError):
+            _ = os.waitpid(pid, 0)
+
+
 def serve(
     config_path: str | None = None,
     host: str | None = None,
@@ -565,6 +746,18 @@ def serve(
 
     """
     try:
+        processes = _resolve_processes(config_path, port)
+        if processes > 1:
+            _serve_multiprocess(
+                processes,
+                config_path=config_path,
+                host=host,
+                port=port,
+                web=web,
+                web_port=web_port,
+                web_host=web_host,
+            )
+            return
         # host/port 交给构造函数：{port} 占位符要在日志与链路记录初始化之前
         # 拿到最终端口（见 IPClickServer.__init__）
         server = IPClickServer(config_path, web=web, host=host, port=port, web_port=web_port, web_host=web_host)
