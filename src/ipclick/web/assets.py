@@ -10,8 +10,9 @@ HTML 拼接中间找那段 CSS。
 交互是几十行原生 JS。0.3 时页面里**一行 JS 都没有**（自动刷新靠
 ``<meta refresh>``），0.4 加了——因为有三件事没有 JS 就做不好：
 
-* **手动切主题。** ``prefers-color-scheme`` 只能跟随系统，而办公室的显示器和
-  夜里的笔记本需要的往往不是同一个。
+* **切主题。** 0.5 起是明确的两态（亮 / 暗），不再有"跟随系统"——那一档靠
+  ``prefers-color-scheme``，而它取决于浏览器读不读得到桌面偏好，Linux 上常常读
+  不到并静默回落成亮色。一个失败时毫无迹象的开关比没有这个开关更糟。
 * **装依赖要轮询。** ``camoufox fetch`` 要下 1 GB，只能后台跑 + 查状态。
 * **请求流实时刷新。** ``<meta refresh>`` 每 3 秒重载整页：滚动位置丢失、
   正在填的过滤条件被冲掉、页面白闪。换成局部替换之后这三条全没了。
@@ -35,14 +36,16 @@ import hashlib
 
 STYLE = """
 /* ---------- 设计变量 ----------
-   亮色是基准，暗色只覆盖变量。三态主题：
-     data-theme 未设置 -> 跟随系统（prefers-color-scheme）
-     data-theme="light" -> 强制亮
-     data-theme="dark"  -> 强制暗
-   注意暗色的媒体查询要写成 :root:not([data-theme="light"])，
-   否则用户在暗色系统里手动选"亮"会选不动。                                */
+   亮色是基准，暗色只覆盖变量。**两态**主题：
+     data-theme="light"（或未设置）-> 亮
+     data-theme="dark"             -> 暗
+
+   0.5 去掉了"跟随系统"。它靠 prefers-color-scheme，而那一位取决于浏览器读不读
+   得到桌面偏好——Linux 上 Chrome/Firefox 要 GTK 或 xdg-desktop-portal 配好才认，
+   读不到就静默按亮色处理。一个在半数机器上不生效、失败时又毫无迹象的选项，
+   比没有这个选项更糟：用户会以为是页面坏了。现在只有明确的两个值。            */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --bg: #ffffff;
   --bg-soft: #f6f8fa;
   --bg-elev: #ffffff;
@@ -55,7 +58,7 @@ STYLE = """
   --accent: #0969da;
   --accent-fg: #ffffff;
   --accent-soft: #ddf4ff;
-  --ok: #1a7f37;      --ok-bg: #dafbe1;
+  --ok: #1a7f37;      --ok-bg: #dafbe1;   --ok-rgb: 26,127,55;
   --bad: #cf222e;     --bad-bg: #ffebe9;
   --warn: #9a6700;    --warn-bg: #fff8c5;
   --info: #0550ae;    --info-bg: #ddf4ff;
@@ -65,29 +68,6 @@ STYLE = """
   --radius-sm: 6px;
   --rail: 20rem;
   --side: 13.5rem;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #0d1117;
-    --bg-soft: #161b22;
-    --bg-elev: #151b23;
-    --bg-sunk: #0b0f14;
-    --fg: #e6edf3;
-    --fg-dim: #9198a1;
-    --fg-faint: #6e7681;
-    --line: #3d444d;
-    --line-soft: #262c34;
-    --accent: #4493f8;
-    --accent-fg: #ffffff;
-    --accent-soft: #0c2d6b;
-    --ok: #3fb950;    --ok-bg: #0f2f18;
-    --bad: #ff7b72;   --bad-bg: #3c1618;
-    --warn: #d29922;  --warn-bg: #3a2d10;
-    --info: #79c0ff;  --info-bg: #0c2d6b;
-    --shadow: 0 1px 2px rgba(1,4,9,.5), 0 3px 8px rgba(1,4,9,.4);
-    --shadow-lg: 0 8px 28px rgba(1,4,9,.7);
-  }
 }
 
 :root[data-theme="dark"] {
@@ -103,7 +83,7 @@ STYLE = """
   --accent: #4493f8;
   --accent-fg: #ffffff;
   --accent-soft: #0c2d6b;
-  --ok: #3fb950;    --ok-bg: #0f2f18;
+  --ok: #3fb950;    --ok-bg: #0f2f18;   --ok-rgb: 63,185,80;
   --bad: #ff7b72;   --bad-bg: #3c1618;
   --warn: #d29922;  --warn-bg: #3a2d10;
   --info: #79c0ff;  --info-bg: #0c2d6b;
@@ -112,7 +92,6 @@ STYLE = """
   color-scheme: dark;
 }
 
-:root[data-theme="light"] { color-scheme: light; }
 
 /* ---------- 基础 ---------- */
 *, *::before, *::after { box-sizing: border-box; }
@@ -300,6 +279,15 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .field-row > label { margin: .375rem 0 0; color: inherit; font-size: .875rem; }
 .field-row .hint { display: block; color: var(--fg-dim); font-size: .75rem; margin-top: .125rem;
                    font-weight: 400; }
+/* 「需重启」是个**动作**，不是解释——和旁边那句灰字不是一类信息。
+   混在同一行里，人扫过去只会看见解释、漏掉动作，然后对着一个"改了没生效"
+   的界面排查。所以给它警示色、单独一行。 */
+/* 用红而不是琥珀：这一条是"改完必须去做的动作"，要能在一屏十几行里被一眼扫到。
+   .bad 在别处表示失败，但徽标自带文字（"需重启"），不会和失败状态混淆。 */
+.field-row .pill.restart { margin-top: .3125rem; font-weight: 700; }
+.pill.running { margin-top: .3125rem; font-weight: 700; }
+.pill.running::before { content: "▶"; margin-right: .125rem; font-size: .625rem; }
+.pill.restart::before { content: "⟳"; margin-right: .125rem; }
 .actions { display: flex; gap: .625rem; align-items: center; flex-wrap: wrap; margin-top: 1rem; }
 .inline-form { display: inline; }
 fieldset { border: 1px solid var(--line-soft); border-radius: var(--radius);
@@ -309,7 +297,60 @@ legend { font-size: .8125rem; font-weight: 600; padding: 0 .375rem; color: var(-
 .filters > div { flex: 0 0 auto; }
 .filters input, .filters select { width: auto; min-width: 8rem; }
 .filters .check { display: flex; align-items: center; gap: .375rem; padding-bottom: .4375rem; }
+
+/* 分段选择器：连成一排的 radio。视觉上是一个整体，语义上还是 radiogroup，
+   所以键盘方向键、无 JS 提交这两件事都是白送的。 */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius-sm);
+       overflow: hidden; background: var(--bg-sunk); }
+.seg input { position: absolute; opacity: 0; pointer-events: none; width: 0; height: 0; }
+.seg label { margin: 0; padding: .3125rem .625rem; font-size: .75rem; font-weight: 600;
+             color: var(--fg-dim); cursor: pointer; user-select: none; white-space: nowrap;
+             border-left: 1px solid var(--line-soft); transition: background .12s, color .12s; }
+.seg label:first-of-type { border-left: 0; }
+.seg label:hover { background: var(--bg-soft); color: var(--fg); }
+.seg input:checked + label { background: var(--accent); color: var(--accent-fg); }
+/* 键盘走到这里时要看得见——radio 本体是隐藏的，焦点环得画在 label 上。 */
+.seg input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* 活体指示。没有它的话，页面安静时人分不清是"没有新请求"还是"刷新根本没在跑"。 */
+.livebar { display: flex; align-items: center; gap: .4375rem; margin-top: .75rem;
+           padding-top: .6875rem; border-top: 1px solid var(--line-soft);
+           font-size: .75rem; color: var(--fg-dim); }
+.livedot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--ok); flex: 0 0 auto;
+           box-shadow: 0 0 0 0 var(--ok); animation: livepulse 2s ease-out infinite; }
+.livebar.paused .livedot { background: var(--fg-faint); animation: none; box-shadow: none; }
+.livebar.stale .livedot { background: var(--bad); animation: none; box-shadow: none; }
+@keyframes livepulse {
+  0%   { box-shadow: 0 0 0 0 rgba(var(--ok-rgb),.45); }
+  70%  { box-shadow: 0 0 0 .375rem rgba(var(--ok-rgb),0); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--ok-rgb),0); }
+}
+/* 系统设置了"减少动态效果"就别脉动——这个点只是状态提示，不值得违背它。 */
+@media (prefers-reduced-motion: reduce) { .livedot { animation: none; } }
 .filters .check label { margin: 0; }
+
+/* 行内的复选 / 单选：标签和控件同一行，不占满宽度 */
+.check-inline { display: inline-flex; align-items: center; gap: .375rem; margin: 0 1rem .25rem 0;
+                color: inherit; font-size: .8125rem; }
+.check-inline input { width: auto; }
+.check-inline .hint { color: var(--fg-dim); font-size: .75rem; }
+.check-row { display: flex; flex-wrap: wrap; gap: .25rem 0; padding-top: .375rem; }
+.inline-choice { margin-top: .375rem; }
+.two-up { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .5rem; }
+
+/* 「更多参数」折叠区。默认收起，填过东西就自动展开（服务端渲染时加 open）——
+   提交后回到页面却看不到自己设过的代理，会让人以为那一项没生效。 */
+details.more { border: 1px solid var(--line-soft); border-radius: var(--radius);
+               padding: 0 1rem; margin: .75rem 0; background: var(--bg-soft); }
+details.more > summary { cursor: pointer; padding: .625rem .25rem; font-size: .875rem; font-weight: 600;
+                         list-style: none; display: flex; align-items: center; gap: .5rem; }
+details.more > summary::-webkit-details-marker { display: none; }
+details.more > summary::before { content: "▸"; color: var(--fg-dim); font-size: .75rem; }
+details.more[open] > summary::before { content: "▾"; }
+details.more > summary .hint { color: var(--fg-dim); font-weight: 400; font-size: .75rem; }
+details.more[open] > summary { border-bottom: 1px solid var(--line-soft); margin-bottom: .5rem; }
+details.more .field-row:last-of-type { border-bottom: none; }
+details.more > p.note { padding-bottom: .875rem; }
 
 /* ---------- 提示条 ---------- */
 .note { color: var(--fg-dim); font-size: .8125rem; }
@@ -356,6 +397,45 @@ pre.term { background: #0b0f14; color: #d7dee7; border-color: #21262d; max-heigh
 .comp .levels .k { color: var(--fg-dim); min-width: 5.5rem; }
 .comp .acts { display: flex; gap: .375rem; flex-wrap: wrap; margin-top: auto; padding-top: .25rem; }
 
+/* ---------- 分页标签 ---------- */
+.tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--line-soft); margin-bottom: 1.25rem; }
+.tabs a { padding: .5rem .875rem; font-size: .875rem; color: var(--fg-dim); text-decoration: none;
+          border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabs a:hover { color: var(--fg); text-decoration: none; }
+.tabs a.on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+
+/* ---------- 节点卡片 ----------
+   **一行最多 4 张**，窄了自动降列。0.4 是一张表格，加减机器要在一行里横向找输入框；
+   一台一张卡之后，"这台是什么状态、能对它做什么"聚在一起。
+
+   列宽取 max(15rem, 四分之一)：后者把上限钉在 4 列（宽屏上不会摊成 5、6 列，
+   那样每张卡都很窄、信息反而更难扫），前者保证窄屏时优先降列而不是压扁卡片。 */
+.nodes-grid { display: grid; gap: .75rem;
+              grid-template-columns: repeat(auto-fill, minmax(max(15rem, calc(25% - .5625rem)), 1fr)); }
+.node-card { border: 1px solid var(--line-soft); border-radius: var(--radius); padding: .875rem 1rem;
+             background: var(--bg-elev); display: flex; flex-direction: column; gap: .375rem; }
+.node-card .top { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .25rem; }
+.node-card .top .nm { font-weight: 600; font-size: .875rem; word-break: break-all; }
+.node-card label { font-size: .75rem; margin-bottom: .125rem; }
+.node-card input { font-size: .8125rem; padding: .3125rem .5rem; }
+.node-card .acts { display: flex; gap: .375rem; flex-wrap: wrap; margin-top: .375rem; }
+.node-card .note { font-size: .6875rem; color: var(--fg-faint); margin: 0; }
+
+/* ---------- 弹窗 ----------
+   只用 hidden 属性开关，没有 <dialog>：那个元素在几个还在用的浏览器版本里
+   行为不一致，而这里要的只是"盖一层、居中一个表单"。                     */
+.dialog { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center;
+          background: rgba(0,0,0,.45); padding: 1.5rem; }
+.dialog[hidden] { display: none; }
+.dialog-box { background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius);
+              box-shadow: var(--shadow-lg); padding: 1.25rem 1.375rem; width: 100%; max-width: 30rem;
+              max-height: 90vh; overflow-y: auto; }
+
+/* ---------- 可复制的命令行 ---------- */
+.copy-row { display: flex; gap: .5rem; align-items: flex-start; margin-bottom: .875rem; }
+.copy-row pre { flex: 1 1 auto; margin: 0; }
+.copy-row button { flex: 0 0 auto; }
+
 /* ---------- 主题切换 ---------- */
 .theme { display: flex; gap: .125rem; background: var(--bg-sunk); border-radius: 2rem; padding: .1875rem; }
 .theme button {
@@ -382,6 +462,26 @@ pre.term { background: #0b0f14; color: #d7dee7; border-color: #21262d; max-heigh
         vertical-align: -2px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spin { animation-duration: 3s; } }
+
+/* ---------- 安装进度 ----------
+   camoufox 的浏览器本体约 1 GB，慢网络下十几分钟。那段时间里"在下载"和"卡死了"
+   在页面上长得一模一样，这一组就是为了把它们区分开。
+   两种形态：知道百分比时画确定态的条；不知道时画一条来回滑的动画 + 已下载字节数
+   与速度——后者不依赖子进程报进度，永远有。                                 */
+.prog { margin: .5rem 0 .25rem; }
+.prog .track { height: .5rem; border-radius: 2rem; background: var(--bg-sunk); overflow: hidden; }
+.prog .fill { height: 100%; background: var(--accent); border-radius: 2rem;
+              transition: width .3s ease; }
+.prog .fill.indeterminate { width: 35%; animation: slide 1.4s ease-in-out infinite; }
+@keyframes slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+.prog .meta { display: flex; gap: .875rem; flex-wrap: wrap; margin-top: .375rem;
+              font-size: .75rem; color: var(--fg-dim); }
+.prog .meta b { color: var(--fg); font-weight: 600; }
+/* 减少动效偏好：把来回滑改成整条低透明度铺满——仍然看得出"在进行中"，
+   但不再有持续运动。 */
+@media (prefers-reduced-motion: reduce) {
+  .prog .fill.indeterminate { animation: none; width: 100%; opacity: .35; margin-left: 0; }
+}
 
 /* ---------- 响应式 ----------
    宽度不够时右栏先降级成主区末尾的一块，再把侧栏压成顶部横条。
@@ -416,16 +516,25 @@ pre.term { background: #0b0f14; color: #d7dee7; border-color: #21262d; max-heigh
 # 脚本
 # --------------------------------------------------------------------------- #
 
-#: 主题引导。必须在 <head> 里、渲染之前执行，否则暗色偏好的用户会先看到一闪
+#: 主题引导。必须在 <head> 里、渲染之前执行，否则选了暗色的用户会先看到一闪
 #: 而过的白屏（FOUC）。只做一件事，所以单独一段、单独一个哈希。
+#:
+#: 优先级：浏览器里点过的那一下 > 服务端 ``[WEB].theme``（默认 light）。
+#: 服务端默认值排在用户选择之后是关键——反过来的话，用户每刷新一次页面，
+#: 自己刚选的主题就会被配置文件推翻一次。
 SCRIPT_BOOT = """
 (function () {
+  var root = document.documentElement;
+  var mode = null;
   try {
     var saved = localStorage.getItem('ipclick-theme');
-    if (saved === 'dark' || saved === 'light') {
-      document.documentElement.setAttribute('data-theme', saved);
-    }
-  } catch (e) { /* 隐私模式下 localStorage 会抛，跟随系统即可 */ }
+    if (saved === 'dark' || saved === 'light') mode = saved;
+  } catch (e) { /* 隐私模式下 localStorage 会抛，回落到服务端默认值 */ }
+  if (mode === null) {
+    var fallback = root.getAttribute('data-default-theme');
+    mode = fallback === 'dark' ? 'dark' : 'light';
+  }
+  root.setAttribute('data-theme', mode);
 })();
 """
 
@@ -436,30 +545,67 @@ SCRIPT_MAIN = """
 (function () {
   'use strict';
 
-  // ---------- 主题：跟随系统 / 亮 / 暗 ----------
+  // ---------- 主题：亮 / 暗 ----------
+  // 两态，没有"跟随系统"。那一档靠 prefers-color-scheme，而它取决于浏览器读不读
+  // 得到桌面偏好——Linux 上常常读不到，于是静默变成亮色，看起来就像功能坏了。
   var KEY = 'ipclick-theme';
+  var MODES = { light: 1, dark: 1 };
+
+  function current() {
+    try {
+      var saved = localStorage.getItem(KEY);
+      if (saved && MODES[saved]) return saved;
+    } catch (e) { /* 隐私模式 */ }
+    return document.documentElement.getAttribute('data-default-theme') === 'dark' ? 'dark' : 'light';
+  }
+
   function apply(mode) {
-    if (mode === 'auto') {
-      document.documentElement.removeAttribute('data-theme');
-    } else {
-      document.documentElement.setAttribute('data-theme', mode);
-    }
+    document.documentElement.setAttribute('data-theme', mode);
     var buttons = document.querySelectorAll('[data-theme-set]');
     for (var i = 0; i < buttons.length; i++) {
       buttons[i].setAttribute('aria-pressed', String(buttons[i].dataset.themeSet === mode));
     }
   }
-  function current() {
-    try { return localStorage.getItem(KEY) || 'auto'; } catch (e) { return 'auto'; }
-  }
+
   document.addEventListener('click', function (event) {
     var target = event.target.closest ? event.target.closest('[data-theme-set]') : null;
     if (!target) return;
     var mode = target.dataset.themeSet;
-    try { mode === 'auto' ? localStorage.removeItem(KEY) : localStorage.setItem(KEY, mode); } catch (e) {}
+    if (!MODES[mode]) return;
+    try { localStorage.setItem(KEY, mode); } catch (e) {}
     apply(mode);
   });
+
   apply(current());
+
+  // ---------- 弹窗 ----------
+  // 开 / 关都只切 hidden。Esc 与点遮罩关闭是最低限度的礼貌——一个只能靠那个
+  // 小「关闭」按钮退出的弹窗，第一次用的人会以为自己被卡住了。
+  document.addEventListener('click', function (event) {
+    var opener = event.target.closest ? event.target.closest('[data-dialog]') : null;
+    if (opener) {
+      var box = document.getElementById(opener.dataset.dialog);
+      if (box) {
+        box.hidden = false;
+        var first = box.querySelector('input:not([type=hidden])');
+        if (first) first.focus();
+      }
+      return;
+    }
+    var closer = event.target.closest ? event.target.closest('[data-dialog-close]') : null;
+    if (closer) {
+      var owner = closer.closest('.dialog');
+      if (owner) owner.hidden = true;
+      return;
+    }
+    // 点遮罩本身（不是里面的盒子）时关闭
+    if (event.target.classList && event.target.classList.contains('dialog')) event.target.hidden = true;
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Escape') return;
+    var open = document.querySelectorAll('.dialog:not([hidden])');
+    for (var i = 0; i < open.length; i++) open[i].hidden = true;
+  });
 
   // ---------- 复制 ----------
   document.addEventListener('click', function (event) {
@@ -534,7 +680,9 @@ SCRIPT_MAIN = """
     if (confirmText && !window.confirm(confirmText)) return;
     var buttons = document.querySelectorAll('[data-install]');
     for (var i = 0; i < buttons.length; i++) buttons[i].disabled = true;
-    post('/api/components/action', { op: button.dataset.install, extra: button.dataset.extra })
+    // 目标机器跟着页面走：选了子节点时，装 / 卸都发到那台上去。
+    post('/api/components/action',
+         { op: button.dataset.install, extra: button.dataset.extra, node: activeNode() })
       .then(function (data) {
         showJob(data.job, data.message, data.ok);
         if (data.ok) pollJob();
@@ -545,6 +693,54 @@ SCRIPT_MAIN = """
         for (var i = 0; i < buttons.length; i++) buttons[i].disabled = false;
       });
   });
+
+  function bytes(n) {
+    if (!n) return '0 B';
+    var units = ['B', 'KB', 'MB', 'GB'], i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? n.toFixed(0) : n.toFixed(1)) + ' ' + units[i];
+  }
+
+  function clock(seconds) {
+    var m = Math.floor(seconds / 60), s = seconds % 60;
+    return m ? m + 'm' + (s < 10 ? '0' : '') + s + 's' : s + 's';
+  }
+
+  // 进度条。知道百分比就画确定态；不知道就画不确定态 + 已下载字节与速度——
+  // 后者由服务端的采样线程量目录大小得出，不依赖子进程肯不肯报进度。
+  function renderProgress(job) {
+    var box = document.getElementById('job-progress');
+    if (!box) return;
+    var p = job && job.progress;
+    if (!job || job.status !== 'running' || !p) { box.hidden = true; return; }
+    box.hidden = false;
+    var fill = box.querySelector('.fill');
+    var meta = box.querySelector('.meta');
+    if (p.percent === null || p.percent === undefined) {
+      fill.className = 'fill indeterminate';
+      fill.style.width = '';
+    } else {
+      fill.className = 'fill';
+      fill.style.width = Math.max(0, Math.min(100, p.percent)) + '%';
+    }
+    var parts = [];
+    if (p.percent !== null && p.percent !== undefined) parts.push('<b>' + p.percent.toFixed(1) + '%</b>');
+    if (p.phase) parts.push(esc(p.phase));
+    // 本次任务写进磁盘的量（不是目录总量），以及速度。这两项由服务端采样得出，
+    // 不依赖子进程肯不肯报进度——子进程一声不吭时，它们就是"没卡死"的唯一证据。
+    if (p.done_bytes) parts.push('本次已写入 <b>' + bytes(p.done_bytes) + '</b>');
+    if (p.speed) parts.push(bytes(p.speed) + '/s');
+    parts.push('已用 ' + clock(job.elapsed || 0));
+    // 每项各包一个 span：.meta 是 flex + gap，靠元素间距分隔，
+    // 直接拼文本会连成一串（"20.0%已下载 638 MB"）。
+    meta.innerHTML = parts.map(function (part) { return '<span>' + part + '</span>'; }).join('');
+  }
+
+  // 组件页当前对着哪台机器。空串 = 本机。
+  function activeNode() {
+    var box = document.getElementById('job-box');
+    return (box && box.dataset.activeNode) || '';
+  }
 
   function showJob(job, message, ok) {
     var box = document.getElementById('job-box');
@@ -557,11 +753,13 @@ SCRIPT_MAIN = """
         ? '<span class="spin"></span> 执行中'
         : (job.status === 'succeeded' ? '<span class="pill ok">成功</span>' : '<span class="pill bad">失败</span>');
       title.innerHTML = badge + ' <b>' + esc(job.title) + '</b> <span class="note">' +
-                        esc(job.elapsed + 's · ' + job.command) + '</span>';
+                        esc(clock(job.elapsed || 0) + ' · ' + job.command) + '</span>';
+      renderProgress(job);
       output.textContent = (job.output || []).join('\\n');
       output.scrollTop = output.scrollHeight;
     } else {
       title.innerHTML = '<span class="pill ' + (ok ? 'info' : 'bad') + '">' + esc(message || '') + '</span>';
+      renderProgress(null);
     }
   }
 
@@ -569,7 +767,8 @@ SCRIPT_MAIN = """
   function pollJob() {
     if (pollTimer) return;
     pollTimer = setInterval(function () {
-      fetch('/api/components/status', { credentials: 'same-origin' })
+      fetch('/api/components/status' + (activeNode() ? '?node=' + encodeURIComponent(activeNode()) : ''),
+            { credentials: 'same-origin' })
         .then(function (r) { return r.json(); })
         .then(function (data) {
           if (!data.job) return;
@@ -579,6 +778,8 @@ SCRIPT_MAIN = """
             pollTimer = null;
             // 装完/卸完重新加载：安装状态、适配器下拉、注册表全都变了，
             // 局部改几个徽标不如让服务端重新渲染一次准。
+            // reload 而不是跳 /components：带着 ?node= 的地址原样保留，
+            // 否则装完子节点的组件会莫名其妙跳回本机那一页。
             setTimeout(function () { window.location.reload(); }, 900);
           }
         })
@@ -591,20 +792,97 @@ SCRIPT_MAIN = """
     pollJob();
   }
 
+  // ---------- 时间按看的人的时区显示 ----------
+  // 服务端渲染出来的是**服务端**本地时间。一旦它跑在 UTC 的容器里（Docker 默认），
+  // 东八区的人看到的每一条都慢八小时——而且症状很温和："时间看着像那么回事，
+  // 就是和自己的表对不上"，很少有人会当成 bug 报出来。
+  //
+  // <time datetime="..."> 里是带偏移量的 ISO-8601，浏览器据此换算。没有 JS 时
+  // 标签里的文字仍是服务端时间，也就是维持旧行为，不会变成空白。
+  function localizeTimes(root) {
+    var nodes = (root || document).querySelectorAll('time[datetime]');
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var d = new Date(el.getAttribute('datetime'));
+      if (isNaN(d.getTime())) continue;   // 解析不了就别动，留着服务端那份
+      el.textContent = d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) +
+                       ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds());
+      if (!el.title) el.title = el.getAttribute('datetime');   // 悬停能看到原始带偏移的值
+    }
+  }
+  function p2(n) { return (n < 10 ? '0' : '') + n; }
+  localizeTimes(document);
+
   // ---------- 实时刷新 ----------
   // 0.3 用的是 <meta refresh> 整页重载：滚动位置丢失、正在填的过滤条件被冲掉、
   // 每 3 秒白闪一次。改成只换那一块的 HTML，服务端仍然负责渲染（不在 JS 里
   // 复制一份渲染逻辑）。
+  //
+  // 0.5 加了频率切换。切档**不重载整页**：这一页的用途就是盯着看，重载会把
+  // 滚动位置和刚展开的错误行一起丢掉。选择用 replaceState 写回地址栏，所以
+  // 手动刷新、收藏、复制链接给别人，档位都还在。
   var live = document.querySelector('[data-live-src]');
   if (live) {
-    var interval = Math.max(1000, parseInt(live.dataset.liveInterval || '3000', 10));
-    setInterval(function () {
+    var liveTimer = null;
+    var liveMs = 0;
+    var liveBar = document.getElementById('live-bar');
+    var liveStatus = document.getElementById('live-status');
+
+    function liveWord(ms) {
+      return ms === 1000 ? '每秒更新' : '每 ' + (ms / 1000) + ' 秒更新';
+    }
+    function clock() {
+      var d = new Date();
+      return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) +
+             ':' + ('0' + d.getSeconds()).slice(-2);
+    }
+    function say(text, state) {
+      if (liveStatus) liveStatus.textContent = text;
+      if (!liveBar) return;
+      liveBar.classList.toggle('paused', state === 'paused');
+      liveBar.classList.toggle('stale', state === 'stale');
+    }
+
+    function pull() {
       if (document.hidden) return;  // 后台标签页不刷，别白占服务端 worker
       fetch(live.dataset.liveSrc, { credentials: 'same-origin' })
         .then(function (r) { return r.ok ? r.text() : Promise.reject(r.status); })
-        .then(function (html) { live.innerHTML = html; })
-        .catch(function () { /* 一次失败无所谓，下一轮再来 */ });
-    }, interval);
+        .then(function (html) {
+          live.innerHTML = html;
+          localizeTimes(live);   // 新换进来的行还是服务端时间，要再转一次
+          say(liveWord(liveMs) + ' · 上次 ' + clock(), '');
+        })
+        .catch(function () {
+          // 一次失败无所谓，下一轮再来。但要说出来——否则页面停在旧数据上
+          // 一动不动，看起来和"没有新请求"一模一样。
+          say('上次更新失败（' + clock() + '），下一轮重试', 'stale');
+        });
+    }
+
+    function applyInterval(ms) {
+      liveMs = ms;
+      if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+      if (!ms) { say('实时刷新已关闭', 'paused'); return; }
+      say(liveWord(ms), '');
+      liveTimer = setInterval(pull, ms);
+    }
+
+    applyInterval(Math.max(0, parseInt(live.dataset.liveInterval || '5000', 10) || 0));
+
+    var seg = document.getElementById('live-seg');
+    if (seg) {
+      seg.addEventListener('change', function (e) {
+        var ms = parseInt(e.target.value, 10);
+        if (isNaN(ms)) return;
+        applyInterval(ms);
+        try {
+          var url = new URL(window.location.href);
+          url.searchParams.set('live', String(ms));
+          url.searchParams.set('_', '1');  // 没这个标记的话，服务端认为"没提交过表单"
+          window.history.replaceState(null, '', url);
+        } catch (err) { /* 地址栏没跟上而已，刷新这件事本身照常 */ }
+      });
+    }
   }
 
   function esc(text) {

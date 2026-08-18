@@ -218,3 +218,55 @@ class PingResp(_message.Message):
     uptime_seconds: int
     in_flight: int
     def __init__(self, node_id: _Optional[str] = ..., version: _Optional[str] = ..., auth_required: _Optional[bool] = ..., forward: _Optional[bool] = ..., uptime_seconds: _Optional[int] = ..., in_flight: _Optional[int] = ...) -> None: ...
+
+class ComponentReq(_message.Message):
+    __slots__ = ("op", "extra", "browser_kind", "from_node")
+    OP_FIELD_NUMBER: _ClassVar[int]
+    EXTRA_FIELD_NUMBER: _ClassVar[int]
+    BROWSER_KIND_FIELD_NUMBER: _ClassVar[int]
+    FROM_NODE_FIELD_NUMBER: _ClassVar[int]
+    op: str
+    extra: str
+    browser_kind: str
+    from_node: str
+    def __init__(self, op: _Optional[str] = ..., extra: _Optional[str] = ..., browser_kind: _Optional[str] = ..., from_node: _Optional[str] = ...) -> None: ...
+
+class ComponentJob(_message.Message):
+    __slots__ = ("id", "title", "command", "status", "returncode", "elapsed_seconds", "percent", "done_bytes", "speed_bytes", "phase", "output")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    TITLE_FIELD_NUMBER: _ClassVar[int]
+    COMMAND_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    RETURNCODE_FIELD_NUMBER: _ClassVar[int]
+    ELAPSED_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    PERCENT_FIELD_NUMBER: _ClassVar[int]
+    DONE_BYTES_FIELD_NUMBER: _ClassVar[int]
+    SPEED_BYTES_FIELD_NUMBER: _ClassVar[int]
+    PHASE_FIELD_NUMBER: _ClassVar[int]
+    OUTPUT_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    title: str
+    command: str
+    status: str
+    returncode: int
+    elapsed_seconds: int
+    percent: float
+    done_bytes: int
+    speed_bytes: float
+    phase: str
+    output: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, id: _Optional[str] = ..., title: _Optional[str] = ..., command: _Optional[str] = ..., status: _Optional[str] = ..., returncode: _Optional[int] = ..., elapsed_seconds: _Optional[int] = ..., percent: _Optional[float] = ..., done_bytes: _Optional[int] = ..., speed_bytes: _Optional[float] = ..., phase: _Optional[str] = ..., output: _Optional[_Iterable[str]] = ...) -> None: ...
+
+class ComponentResp(_message.Message):
+    __slots__ = ("ok", "message", "node_id", "job", "components_json")
+    OK_FIELD_NUMBER: _ClassVar[int]
+    MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    NODE_ID_FIELD_NUMBER: _ClassVar[int]
+    JOB_FIELD_NUMBER: _ClassVar[int]
+    COMPONENTS_JSON_FIELD_NUMBER: _ClassVar[int]
+    ok: bool
+    message: str
+    node_id: str
+    job: ComponentJob
+    components_json: str
+    def __init__(self, ok: _Optional[bool] = ..., message: _Optional[str] = ..., node_id: _Optional[str] = ..., job: _Optional[_Union[ComponentJob, _Mapping]] = ..., components_json: _Optional[str] = ...) -> None: ...

@@ -28,9 +28,11 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -56,6 +58,45 @@ _TIMEOUT = 45 * 60
 #: 完成的任务保留多久（秒）。页面轮询要能取到结果，但没必要留一整天。
 _RETAIN = 30 * 60
 
+#: 目录大小的采样间隔（秒）。1 秒够让数字看起来在动，又不至于把一个几万文件的
+#: 目录反复 walk 到成为负担（实测 ms 级）。
+_SAMPLE_INTERVAL = 1.0
+
+
+@final
+@dataclass
+class Progress:
+    """一次任务的进度。
+
+    两个来源，都可能缺席，所以分开存：
+
+    * **子进程自己报的百分比**（``percent``）。``camoufox fetch`` 用 rich、
+      ``playwright install`` 自带进度条，两者都要看得见终端才肯输出——见
+      :func:`execute` 里的 ``FORCE_COLOR``。解析失败就是 None，不猜。
+    * **目标目录的实际大小**（``done_bytes``）。由采样线程量出来，不依赖子进程
+      配合，任何情况下都能证明"在干活"。
+
+    ``camoufox fetch`` 那 1 GB 要下十几分钟，期间没有任何输出——用户看到的和
+    进程卡死一模一样。这个类存在的全部理由就是把那两种情况区分开。
+    """
+
+    #: 0–100；量不出来时为 None（此时前端画不确定态的条）
+    percent: float | None = None
+    #: 目标目录当前有多大（字节）
+    done_bytes: int = 0
+    #: 最近一次采样算出的速度（字节/秒）
+    speed: float = 0.0
+    #: 给人看的一句话，如 "下载中" / "解压中"
+    phase: str = ""
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "percent": round(self.percent, 1) if self.percent is not None else None,
+            "done_bytes": self.done_bytes,
+            "speed": round(self.speed),
+            "phase": self.phase,
+        }
+
 
 @final
 @dataclass
@@ -69,11 +110,34 @@ class Job:
     returncode: int | None = None
     started_at: float = field(default_factory=time.time)
     finished_at: float = 0.0
+    #: 进度。装包类任务量不出字节数，只会有从输出里解析到的百分比（常常也没有）。
+    progress: Progress = field(default_factory=Progress)
+    #: 这次任务是怎么规划出来的。采样线程靠它知道该盯哪个目录。
+    #: 不进 :meth:`snapshot`——那是给页面的，里面不该有内部对象。
+    plan: Plan | None = None
     _output: deque[str] = field(default_factory=lambda: deque(maxlen=_OUTPUT_LINES))
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def append(self, line: str) -> None:
+        """追加一行输出。
+
+        进度行（末尾带 ``\\r`` 的那种）会**替换**上一行而不是堆积：
+        ``camoufox fetch`` 一次下载能刷出上万次更新，全留着的话真正有用的报错
+        会被挤出保留窗口，而那正是出问题时唯一要看的东西。
+        """
+        percent = _parse_percent(line)
+        # 阶段名从**任意**一行取，不只是进度行。playwright 把
+        # "Downloading Chromium …" 和那条 |■■■| 进度条分成两行输出，只看进度行
+        # 的话永远读不到阶段。
+        phase = _parse_phase(line)
         with self._lock:
+            if phase:
+                self.progress.phase = phase
+            if percent is not None:
+                self.progress.percent = percent
+                if self._output and _parse_percent(self._output[-1]) is not None:
+                    self._output[-1] = line
+                    return
             self._output.append(line)
 
     def output(self) -> list[str]:
@@ -90,8 +154,76 @@ class Job:
             "status": self.status,
             "returncode": self.returncode,
             "elapsed": int((self.finished_at or time.time()) - self.started_at),
+            "progress": self.progress.snapshot(),
             "output": self.output(),
         }
+
+
+#: 从一行输出里抠百分比。
+#:
+#: 覆盖 rich（``━━━ 45.2%``）、pip（``45%``）、playwright（``|████ | 45% of 150 MiB``）
+#: 这几种写法——它们都把数字紧挨着一个 ``%``。要求前面是空白或方框类字符，是为了
+#: 不把 URL 里的 ``%E8`` 之类转义序列误当成进度。
+_PERCENT_RE = re.compile(r"(?:^|[\s|\[（(━█▉▊▋▌▍▎▏]) ?(\d{1,3}(?:\.\d+)?)\s?%")
+
+#: ``512.0/1.1 GB`` 这种"已完成/总量"。
+#:
+#: camoufox 的进度条**不显示百分比**——它用 rich 的 ``DownloadColumn``，渲染出来是
+#: ``0.4/1.0 kB``。只认 ``%`` 的话，那 1 GB 下载全程都解析不到任何进度，而它恰恰是
+#: 最需要进度的那一个。
+_RATIO_RE = re.compile(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*([KMGT]?i?B)\b", re.IGNORECASE)
+
+#: 剥掉 ANSI 转义序列（含 CSI 与 OSC）。给子进程 FORCE_COLOR 之后输出里全是这些。
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+
+
+def _parse_percent(line: str) -> float | None:
+    """从一行输出里估出进度百分比。
+
+    两种写法都认：显式的 ``45%``（playwright、pip），以及 ``512.0/1.1 GB`` 这种
+    分子分母（camoufox 用的 rich ``DownloadColumn`` 只给这个）。
+    """
+    matches = _PERCENT_RE.findall(line)
+    if matches:
+        try:
+            value = float(matches[-1])
+        except ValueError:  # pragma: no cover - 正则已经保证是数字
+            return None
+        return value if 0 <= value <= 100 else None
+
+    ratio = _RATIO_RE.search(line)
+    if ratio is None:
+        return None
+    try:
+        done, total = float(ratio.group(1)), float(ratio.group(2))
+    except ValueError:  # pragma: no cover
+        return None
+    # 单位只出现在末尾（rich 两边共用一个单位），所以直接比数值即可
+    if total <= 0 or done < 0 or done > total:
+        return None
+    return done / total * 100
+
+
+#: 进度行里那个阶段名 -> 给人看的说法。
+#:
+#: camoufox 下 1 GB 之后还要**解压** 1 GB，后者同样要几分钟。两段都只显示"进行中"
+#: 的话，用户会以为进度条走到 100% 又回到 0% 是出了什么问题。
+_PHASES: tuple[tuple[str, str], ...] = (
+    ("downloading", "下载中"),
+    ("extracting", "解压中"),
+    ("installing", "安装中"),
+    ("unpacking", "解包中"),
+)
+
+
+def _parse_phase(line: str) -> str:
+    lowered = line.lower()
+    return next((label for key, label in _PHASES if key in lowered), "")
+
+
+def strip_ansi(text: str) -> str:
+    """去掉 ANSI 控制序列。"""
+    return _ANSI_RE.sub("", text)
 
 
 @final
@@ -197,6 +329,162 @@ def _install_targets(component: Component) -> tuple[tuple[str, ...], str]:
     )
 
 
+# --------------------------------------------------------------------------- #
+# 命令规划
+# --------------------------------------------------------------------------- #
+
+#: 支持的动作。
+InstallOp = Literal["install", "uninstall", "browser"]
+
+
+@final
+@dataclass(frozen=True)
+class Plan:
+    """一次装 / 卸要执行的东西。
+
+    "决定跑哪条命令"和"怎么跑它"分开，是因为这两件事有**两个**调用方而它们只在
+    后半段不同：Web 端要后台跑 + 轮询状态，``ipclick component install`` 要当场
+    跑完并把退出码交给调用者（AI 或 shell）。规划逻辑（白名单查表、工具链探测、
+    依赖展开、先后顺序检查）两边必须完全一致——那正是安全边界所在。
+    """
+
+    op: InstallOp
+    component: Component
+    title: str
+    command: tuple[str, ...]
+    note: str = ""
+
+    @property
+    def shell_form(self) -> str:
+        """给人看的一行命令。仅用于展示——真正执行时走的是 :attr:`command` 列表。"""
+        return " ".join(self.command)
+
+
+def plan(op: str, extra: str, *, browser_kind: str = "chromium") -> tuple[Plan | None, str]:
+    """把 ``(动作, 组件)`` 解析成一条待执行的命令。
+
+    Returns:
+        ``(计划, 说明)``。计划为 None 时说明就是拒绝的理由——它总是可读的、
+        并尽量带上下一步该干什么。
+    """
+    component = BY_EXTRA.get((extra or "").strip())
+    if component is None:
+        known = ", ".join(sorted(BY_EXTRA))
+        return None, f"未知的组件 {extra!r}。可选：{known}"
+
+    if op == "browser":
+        if not component.browser_command:
+            return None, f"{component.name} 用的是本机已装的 Chrome，不需要下载浏览器本体"
+        installed, _ = _package_state(component)
+        if not installed:
+            # 先装包再下本体，顺序反了必然失败，不如直接说清楚
+            return None, f"请先安装 {component.name} 的 Python 包，再下载浏览器本体"
+        command = _browser_command(component, browser_kind)
+        if command is None:
+            return None, f"不认识 {component.name} 的浏览器本体安装方式"
+        return Plan("browser", component, f"下载 {component.name} 浏览器本体", command), ""
+
+    if op not in ("install", "uninstall"):
+        return None, f"未知的动作 {op!r}（可选：install / uninstall / browser）"
+
+    toolchain = detect_toolchain()
+    if toolchain is None:
+        return None, manual_hint(component)
+
+    if op == "install":
+        targets, note = _install_targets(component)
+        return Plan("install", component, f"安装 {component.name}", toolchain.command("install", *targets), note), ""
+
+    # 只卸这一个发行版。刻意不追着卸它的依赖：那些可能被别的东西共用，
+    # 连坐卸掉会把环境搞坏，而这里的目的只是"让这个组件不再可用"。
+    command = toolchain.command("uninstall", *_uninstall_flags(toolchain), component.distribution)
+    return Plan("uninstall", component, f"卸载 {component.name}", command), ""
+
+
+def _child_env() -> dict[str, str]:
+    """子进程的环境。
+
+    ``FORCE_COLOR=1`` 是关键的一项：``camoufox fetch`` 的进度条用 rich 画，而
+    rich 检测到 stdout 不是终端就**不再实时刷新**——收进管道之后我们只能看到首尾
+    两段，中间十几分钟一片空白。rich 认 ``FORCE_COLOR``，于是它照常按终端输出，
+    我们再自己剥掉 ANSI 序列。``COLUMNS`` 定死宽度，免得它按 80 列之外的什么值排版。
+
+    ``PIP_PROGRESS_BAR=off`` 方向相反，也是对的：pip 的进度条没有任何有用信息
+    （装包的耗时在解析依赖上，不在下载上），而它会刷出几千行几乎相同的噪音。
+    """
+    return {
+        **os.environ,
+        "PIP_PROGRESS_BAR": "off",
+        "PYTHONUNBUFFERED": "1",
+        "FORCE_COLOR": "1",
+        "COLUMNS": "100",
+    }
+
+
+def _iter_progress_lines(stream: Any) -> Iterator[str]:
+    """按 ``\\n`` **和** ``\\r`` 切分子进程的输出。
+
+    进度条是靠回车把光标拉回行首、原地重画实现的，所以它整段下载只产生**一行**
+    （中间全是 ``\\r``）。按 ``\\n`` 读的话，那一行要等下载彻底结束才会吐出来——
+    正是最需要看到进度的那十几分钟里什么都收不到。
+    """
+    buffer = ""
+    while True:
+        chunk = stream.read(1)
+        if not chunk:
+            break
+        if chunk in ("\n", "\r"):
+            if buffer.strip():
+                yield buffer
+            buffer = ""
+            continue
+        buffer += chunk
+    if buffer.strip():
+        yield buffer
+
+
+def execute(
+    command: tuple[str, ...],
+    on_line: Callable[[str], None],
+    *,
+    timeout: int = _TIMEOUT,
+) -> int:
+    """跑一条命令，逐行回调输出，返回退出码。
+
+    绝不抛异常：连命令起不来（找不到可执行文件）和超时都变成一行输出 + 退出码
+    ``-1``。装包失败是常态（网络、权限、解析冲突），调用方要的是那条真实的报错，
+    而不是一个 traceback。
+    """
+    on_line(f"$ {' '.join(command)}")
+    try:
+        process = subprocess.Popen(  # 命令来自白名单常量，shell=False
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_child_env(),
+        )
+    except OSError as e:
+        # 命令根本起不来（找不到可执行文件、没有执行权限）——原样透出
+        on_line(f"无法执行命令：{e}")
+        return -1
+
+    try:
+        assert process.stdout is not None
+        for line in _iter_progress_lines(process.stdout):
+            on_line(strip_ansi(line).rstrip())
+        return process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        on_line(f"超时（{timeout // 60} 分钟）已终止。网络慢的话请在终端里手动执行上面那条命令")
+        return -1
+    except Exception as e:  # pragma: no cover - 兜底，绝不让调用方带着异常退出
+        on_line(f"执行出错：{type(e).__name__}: {e}")
+        return -1
+
+
 class InstallManager:
     """安装任务的调度与状态。
 
@@ -220,30 +508,11 @@ class InstallManager:
 
     def install(self, extra: str) -> tuple[bool, str]:
         """装一个 extra 的 Python 包。"""
-        component = self._lookup(extra)
-        if component is None:
-            return False, f"未知的组件 {extra!r}"
-        toolchain = detect_toolchain()
-        if toolchain is None:
-            return False, manual_hint(component)
-
-        targets, note = _install_targets(component)
-        command = toolchain.command("install", *targets)
-        return self._start(f"安装 {component.name}", command, note=note)
+        return self._plan_and_start("install", extra)
 
     def uninstall(self, extra: str) -> tuple[bool, str]:
         """卸一个 extra 的 Python 包。**不动**浏览器本体，理由见模块开头。"""
-        component = self._lookup(extra)
-        if component is None:
-            return False, f"未知的组件 {extra!r}"
-        toolchain = detect_toolchain()
-        if toolchain is None:
-            return False, manual_hint(component)
-
-        # 只卸这一个发行版。刻意不追着卸它的依赖：那些可能被别的东西共用，
-        # 连坐卸掉会把环境搞坏，而这里的目的只是"让这个组件不再可用"。
-        command = toolchain.command("uninstall", *_uninstall_flags(toolchain), component.distribution)
-        return self._start(f"卸载 {component.name}", command)
+        return self._plan_and_start("uninstall", extra)
 
     def fetch_browser(self, extra: str, kind: str = "chromium") -> tuple[bool, str]:
         """下载 / 安装浏览器本体。
@@ -252,20 +521,13 @@ class InstallManager:
             kind: playwright / patchright 要装哪个内核，取自 ``[BROWSER].browser``。
                 非白名单值一律回落到 chromium。
         """
-        component = self._lookup(extra)
-        if component is None:
-            return False, f"未知的组件 {extra!r}"
-        if not component.browser_command:
-            return False, f"{component.name} 用的是本机已装的 Chrome，不需要下载浏览器本体"
-        installed, _ = _package_state(component)
-        if not installed:
-            # 先装包再下本体，顺序反了必然失败，不如直接说清楚
-            return False, f"请先安装 {component.name} 的 Python 包，再下载浏览器本体"
+        return self._plan_and_start("browser", extra, browser_kind=kind)
 
-        command = _browser_command(component, kind)
-        if command is None:
-            return False, f"不认识 {component.name} 的浏览器本体安装方式"
-        return self._start(f"下载 {component.name} 浏览器本体", command)
+    def _plan_and_start(self, op: InstallOp, extra: str, *, browser_kind: str = "chromium") -> tuple[bool, str]:
+        prepared, reason = plan(op, extra, browser_kind=browser_kind)
+        if prepared is None:
+            return False, reason
+        return self._start(prepared)
 
     # ------------------------------------------------------------------ #
     # 状态
@@ -304,56 +566,74 @@ class InstallManager:
         """白名单查表。这是唯一一处把外部输入变成命令的地方，只允许精确匹配。"""
         return BY_EXTRA.get((extra or "").strip())
 
-    def _start(self, title: str, command: tuple[str, ...], *, note: str = "") -> tuple[bool, str]:
+    def _start(self, prepared: Plan) -> tuple[bool, str]:
         with self._lock:
             if self._current is not None:
                 return False, f"已有任务在执行：{self._current.title}。装包不能并发，请等它跑完"
             self._seq += 1
-            job = Job(id=f"job-{self._seq}", title=title, command=command)
-            if note:
-                job.append(f"（{note}）")
+            job = Job(id=f"job-{self._seq}", title=prepared.title, command=prepared.command, plan=prepared)
+            if prepared.note:
+                job.append(f"（{prepared.note}）")
             self._jobs[job.id] = job
             self._current = job
 
         thread = threading.Thread(target=self._run, args=(job,), name="ipclick-install", daemon=True)
         thread.start()
-        log.info(f"Web 端开始执行：{title} -> {' '.join(command)}")
-        return True, f"{title} 已在后台开始"
+        log.info(f"Web 端开始执行：{prepared.title} -> {prepared.shell_form}")
+        return True, f"{prepared.title} 已在后台开始"
 
     def _run(self, job: Job) -> None:
-        job.append(f"$ {' '.join(job.command)}")
+        stop = threading.Event()
+        watcher = self._watch_size(job, stop)
         try:
-            process = subprocess.Popen(  # 命令来自白名单常量，shell=False
-                job.command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                # 关掉 pip 的进度条：它靠回车刷新同一行，收进管道后会变成
-                # 几千行几乎相同的噪音，把真正的错误挤出保留窗口。
-                env={**os.environ, "PIP_PROGRESS_BAR": "off", "PYTHONUNBUFFERED": "1"},
-            )
-        except OSError as e:
-            # 命令根本起不来（找不到可执行文件、没有执行权限）——原样透出
-            job.append(f"无法执行命令：{e}")
-            self._finish(job, returncode=-1)
-            return
+            self._finish(job, returncode=execute(job.command, job.append))
+        finally:
+            stop.set()
+            if watcher is not None:
+                watcher.join(timeout=2)
 
-        try:
-            assert process.stdout is not None
-            for line in process.stdout:
-                job.append(line.rstrip("\n"))
-            returncode = process.wait(timeout=_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            job.append(f"超时（{_TIMEOUT // 60} 分钟）已终止。网络慢的话请在终端里手动执行上面那条命令")
-            returncode = -1
-        except Exception as e:  # pragma: no cover - 兜底，绝不让线程带着异常退出
-            job.append(f"执行出错：{type(e).__name__}: {e}")
-            returncode = -1
+    def _watch_size(self, job: Job, stop: threading.Event) -> threading.Thread | None:
+        """盯着目标目录长多大，作为进度的兜底来源。
 
-        self._finish(job, returncode=returncode)
+        子进程报不报进度不由我们说了算（rich 的行为、playwright 的版本、pip 的
+        开关都可能变），但"磁盘上多了多少字节"永远量得到。有了它，用户至少能看到
+        数字在动——而"卡住了没有"正是这十几分钟里唯一想知道的事。
+
+        只对**下载浏览器本体**这类任务开：装 Python 包写的是 site-packages，那个
+        目录里本来就有别的东西，量出来的增量没有意义。
+        """
+        if job.plan is None or job.plan.op != "browser":
+            return None
+        root = _browser_root(job.plan.component)
+        if root is None:
+            return None
+
+        # 基线在**起线程之前**量，不是在线程里量。
+        #
+        # 报的是"这次任务写了多少"而不是目录总大小：playwright 与 patchright 共用
+        # ms-playwright，里面可能已经躺着另一个的 600 MB，报总量的话 patchright
+        # 刚开始下就显示"已写入 638 MB"——那个数字比它要下的东西还大。
+        #
+        # 而基线必须早于子进程的第一个字节。放在线程里量的话，线程被调度得晚一点
+        # （机器忙、GIL 争用）就会把子进程已经写下去的部分算进基线，于是进度永远
+        # 显示 0。这个竞态在真实下载里罕见（要几分钟），却正因为罕见才难查。
+        baseline = _dir_size(root)
+
+        def sample() -> None:
+            last_size, last_at = baseline, time.monotonic()
+            while not stop.wait(_SAMPLE_INTERVAL):
+                size = _dir_size(root)
+                now = time.monotonic()
+                elapsed = max(0.001, now - last_at)
+                job.progress.done_bytes = max(0, size - baseline)
+                # 速度按两次采样之间的增量算。负数（解压完删临时文件）当 0——
+                # 界面上出现一个负速度只会让人以为读错了。
+                job.progress.speed = max(0.0, (size - last_size) / elapsed)
+                last_size, last_at = size, now
+
+        thread = threading.Thread(target=sample, name="ipclick-install-size", daemon=True)
+        thread.start()
+        return thread
 
     def _finish(self, job: Job, *, returncode: int) -> None:
         job.returncode = returncode
@@ -420,11 +700,60 @@ def browser_body_location(component: Component) -> tuple[str, int]:
 
     卸载只卸 Python 包，那 1 GB 还在磁盘上。不把这两个数字摆出来的话，用户会
     以为空间已经释放了——这正是 P0-1 里点名要说清楚的事。
+
+    playwright / patchright **共用** ``ms-playwright`` 这个注册表目录，所以对它们
+    报整个目录的大小是错的（两个组件会显示同一个数）。这两个走
+    :func:`playwright_revisions`，只算自己那几个 revision 目录。
     """
+    if component.extra in ("playwright", "patchright"):
+        entries = playwright_revisions(component.extra)
+        if not entries:
+            return "", 0
+        return " · ".join(path.name for path, _ in entries), sum(size for _, size in entries)
+
     root = _browser_root(component)
     if root is None or not root.exists():
         return "", 0
     return str(root), _dir_size(root)
+
+
+def playwright_revisions(engine: str) -> list[tuple[Path, int]]:
+    """``engine`` 这一份实际占用的 revision 目录与各自体积。
+
+    版本号取自驱动自带的 ``browsers.json``——那是**它自己**下载时用的那个号，
+    比在目录里按前缀猜准得多。playwright 与 patchright 钉的号不同（实测
+    chromium-1223 vs chromium-1228），所以同一个 ms-playwright 目录里躺着两份
+    互不相干的构建；页面上要说清这件事，就得能分别算出各自占了多少。
+    """
+    import json
+
+    from ipclick.adapters.browser_engines import playwright_registry_dir
+
+    registry = playwright_registry_dir(engine)
+    if registry is None or not registry.exists():
+        return []
+    try:
+        module = __import__(engine)
+        manifest = Path(str(module.__file__)).parent / "driver" / "package" / "browsers.json"
+        revisions: set[str] = set()
+        for entry in json.loads(manifest.read_text(encoding="utf-8")).get("browsers", []):
+            name, revision = entry.get("name"), entry.get("revision")
+            if not name or not revision:
+                continue
+            # 清单里写 chromium-headless-shell，磁盘上却是
+            # chromium_headless_shell-1223 —— 目录名把名字里的连字符换成了下划线。
+            # 两种拼法都收，漏掉的后果是那一份体积算不进去（页面上显示得偏小）。
+            revisions.add(f"{name}-{revision}")
+            revisions.add(f"{name.replace('-', '_')}-{revision}")
+    except Exception as e:  # 包没装、清单格式变了、读不了
+        log.debug(f"读不到 {engine} 的 browsers.json，无法区分 revision：{e}")
+        return []
+
+    found: list[tuple[Path, int]] = []
+    for child in sorted(registry.iterdir()):
+        if child.is_dir() and child.name in revisions:
+            found.append((child, _dir_size(child)))
+    return found
 
 
 def _browser_root(component: Component) -> Path | None:
@@ -461,9 +790,13 @@ def _dir_size(root: Path) -> int:
 
 __all__ = [
     "InstallManager",
+    "InstallOp",
     "Job",
+    "Plan",
     "Toolchain",
     "browser_body_location",
     "detect_toolchain",
+    "execute",
     "manual_hint",
+    "plan",
 ]

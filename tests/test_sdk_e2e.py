@@ -172,7 +172,7 @@ class TestChannelReuse:
 class TestTransportFailure:
     def test_unreachable_server_returns_error_response_not_none(self):
         """回归：request() 吞掉异常后隐式返回 None，而签名写的是 DownloadResponse。
-        examples 里也是按"拿到 status_code == -1 的响应"来用的。"""
+        文档里也是按"拿到 status_code == -1 的响应"来教的。"""
         with Downloader(host="127.0.0.1", port=_free_port()) as d:
             resp = d.get("http://example.com/x", max_retries=0, timeout=1)
 
@@ -269,7 +269,7 @@ class TestServerSideErrorMapping:
         server.add_insecure_port(f"127.0.0.1:{port}")
         server.start()
         try:
-            with Downloader(host="127.0.0.1", port=port) as d, pytest.raises(AdapterError, match="尚未支持"):
+            with Downloader(host="127.0.0.1", port=port) as d, pytest.raises(AdapterError, match="已移除"):
                 d.get("http://example.com/x", adapter="undetected_chromedriver", max_retries=0)
         finally:
             server.stop(grace=0).wait(timeout=5)

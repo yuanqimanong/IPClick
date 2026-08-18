@@ -85,6 +85,14 @@ forward_timeout = 0
 # 也可以在某个 nodes 条目里写 token = "..." 单独指定，那会覆盖派生值。
 # secret = ""   # ← 别写在这里，写了启动时会告警
 
+# 允许主控远程管理本机的可选组件（装 / 卸 / 下浏览器本体）。
+# 默认关。打开它等于"能调本节点 gRPC 的人可以在本机跑 pip"——包名走白名单
+# （只有 IPClick 自己声明的那五个 extras，绝不拼接输入），但那仍然是从
+# "能代发 HTTP 请求"到"能改本机 Python 环境"的一次实质扩权，得由这台机器的
+# 主人自己按下，而不是随某次升级默默获得。
+# 集群里逐台 SSH 上去装适配器很烦，子节点上打开这一项就能由主控代劳。
+allow_remote_install = false
+
 # 负载均衡策略：round_robin / random / weight
 load_balancer = "round_robin"
 # 连续探测失败多少次才摘除节点（避免一次抖动就让流量反复横跳）
@@ -99,10 +107,10 @@ max_failover = 2
 # 节点列表。address 必填，其余可选。
 # forward = "on" 时这份列表就是集群全貌，包括本机自己——本机也要列进来才会分到活。
 nodes = [
-    # { id = "node-101", address = "192.168.1.101:9527", region = "us-east-1", zone = "1a", weight = 100 },
-    # { id = "node-102", address = "192.168.1.102:9527" },
+    # { id = "node-101", address = "192.168.1.101:9528", region = "us-east-1", zone = "1a", weight = 100 },
+    # { id = "node-102", address = "192.168.1.102:9528" },
     # 这台的令牌不由共享密钥管（比如是别人维护的节点）：
-    # { id = "node-103", address = "192.168.1.103:9527", token = "..." },
+    # { id = "node-103", address = "192.168.1.103:9528", token = "..." },
 ]
 
 # ------- 节点发现 [CLUSTER.discovery] -------
@@ -113,25 +121,34 @@ nodes = [
 [CLUSTER.discovery]
 mode = "static"
 dns_name = ""            # 例如 "ipclick.default.svc.cluster.local"
-port = 9527              # 解析出来的地址统一用这个端口
+port = 9528              # 解析出来的地址统一用这个端口
 refresh_interval = 30    # 重新解析间隔（秒）；0 = 只在启动时解析一次
 
-# ------- 集群状态页 [CLUSTER.status_page] -------
-# 只读页面：节点列表、健康状态、请求统计。不提供任何变更操作——
-# 运维变更请改配置文件，网页改配置等于再开一个高价值攻击面。
-[CLUSTER.status_page]
-enabled = false
-port = 9529
-# 默认只监听本机：状态页会暴露内网节点地址与拓扑，不该默认对外。
-# 需要远程访问请自行加反向代理并做鉴权。
-host = "127.0.0.1"
+# ------- 集群状态页 -------
+# 这里**刻意没有** [CLUSTER.status_page] 这一节。
+#
+# 0.5.0 之前它有 enabled / port / host 三个键，但全项目没有任何一处读它们——
+# 写 enabled = true 什么都不会发生。一个开了没反应的开关比没有这个开关更糟：
+# 人会去查防火墙、查端口、查日志，唯独不会怀疑这一项根本没接上。
+#
+# 只读状态页仍然存在，是一个**库 API**，在你自己的代码里起：
+#
+#     from ipclick.cluster import ClusterDownloader
+#     from ipclick.cluster.status_page import StatusPageServer
+#     with ClusterDownloader() as d:
+#         StatusPageServer(d.snapshot).start(port=9529)   # 默认只监听 127.0.0.1
+#
+# 多数情况下你要的其实是 Web 管理端（ipclick run -w）——它带登录，
+# 覆盖状态页的全部内容还更多。
 
 # ================ 服务端配置 [SERVER] ================
 [SERVER]
 # 监听地址
 host = "[::]"
-# 监听端口
-port = 9527
+# gRPC 监听端口。
+# ⚠️ 0.5.0 起默认值从 9527 改成 9528 —— 9527 让给了 Web 管理端。
+#    从 0.4 升上来的部署请显式写出你原来的端口，否则客户端会连到 Web 端口上。
+port = 9528
 # 最大线程数（每个进行中的请求占用一个线程）
 max_workers = 100
 
@@ -188,6 +205,9 @@ server_name_override = ""
 connect_timeout = 10
 # 下载超时（秒）
 download_timeout = 300
+# 流式下载时每次吐出多少字节。代码里读得到（默认 65536），此前模板里没写，
+# 于是网页上能改、文件里却查不到这一项。
+chunk_size = 65536
 # 是否读取环境变量里的代理设置（HTTP_PROXY / ALL_PROXY）。
 # 默认关闭：代理应由调用方显式指定，而不是取决于服务端所在机器的环境
 trust_env = false
@@ -318,11 +338,19 @@ script_exec = 60    # automation_script 执行超时
 # 命令行 `ipclick run --web` / `-w` 会覆盖下面的 enabled。
 [WEB]
 enabled = false
-port = 9530
+# 管理端端口。0.5.0 起默认 9527（0.4 是 9530）——集群里"主控"这台机器上，
+# 人要访问的是这个端口，把最好记的那个号给它。
+port = 9527
 # 默认只监听本机。这个界面后面就是一个能代发任意请求的服务，不该默认对外；
 # 需要远程访问请用 SSH 隧道，或放在做了 TLS 终止的反向代理之后
 # （本身是明文 HTTP，密码会在网络上裸奔）。
+# 局域网内自用可以填 "0.0.0.0"，或直接 `ipclick run -w --web-lan`（等价写法）。
 host = "127.0.0.1"
+
+# 页面主题：light / dark。浏览器里手动点过主题的话，那一次选择优先于这里。
+# （0.5.0 去掉了 auto"跟随系统"：它取决于浏览器读不读得到桌面偏好，Linux 上常常
+#   读不到并静默变成亮色，失败时毫无迹象。配置里留着 auto 也能启动，按 light 处理。）
+theme = "light"
 # 登录凭据是机密，不放这里 —— 用环境变量 / .env：
 #   IPCLICK_WEB_USER / IPCLICK_WEB_PASSWORD
 # 都不设的话每次启动**随机生成密码并打印到控制台**。

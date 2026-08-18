@@ -100,6 +100,15 @@ _REMOVED_ADAPTERS: dict[str, str] = {
     "requests": '请改用 niquests：API 相同，且支持 HTTP/2 与 HTTP/3。pip install "ipclick[niquests]"',
     "httpx": '请改用 niquests：能力覆盖 httpx（并多支持 HTTP/3）。pip install "ipclick[niquests]"；'
     "需要浏览器指纹伪装则用默认的 curl_cffi",
+    # 从来没实现过，也不打算实现：它基于 selenium + chromedriver，能力和
+    # patchright / camoufox 高度重叠，多养一套的收益抵不上维护成本。
+    #
+    # 放进这张表而不是留着不管，是因为不管的话报的是"尚未支持"——那句话在暗示
+    # "以后会有"，于是有人会去等、去提 issue 问什么时候支持。说清楚"不会有，用
+    # 这两个"才是实话。
+    "undetected_chromedriver": "不会实现（与 patchright / camoufox 能力重叠）。"
+    '需要反检测的 Chromium 用 pip install "ipclick[patchright]"，'
+    '需要最彻底的指纹伪装用 pip install "ipclick[camoufox]"',
 }
 
 

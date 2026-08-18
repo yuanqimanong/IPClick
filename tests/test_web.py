@@ -230,20 +230,126 @@ class TestTemplates:
 
     def test_dashboard_has_nav_to_every_page(self):
         html = render_dashboard(_SNAPSHOT, "admin", "t", True)
-        for path in ("/trace", "/test", "/config", "/nodes"):
+        for path in ("/trace", "/test", "/config", "/nodes", "/skill"):
             assert f'href="{path}"' in html
 
 
 class TestWebConfig:
     def test_defaults(self):
+        from ipclick.ports import DEFAULT_WEB_PORT
+
         c = WebConfig({})
         assert c.enabled is False
-        assert c.port == 9530
+        assert c.port == DEFAULT_WEB_PORT == 9527
         assert c.host == "127.0.0.1", "管理界面不该默认对外"
+        assert c.theme == "light"
 
     def test_bad_port_falls_back(self):
-        assert WebConfig({"port": "abc"}).port == 9530
-        assert WebConfig({"port": 99999}).port == 9530
+        assert WebConfig({"port": "abc"}).port == 9527
+        assert WebConfig({"port": 99999}).port == 9527
+
+    def test_theme_is_clamped(self):
+        """只有两个合法值。写错了当亮色，不让页面白屏。"""
+        assert WebConfig({"theme": "dark"}).theme == "dark"
+        assert WebConfig({"theme": "LIGHT"}).theme == "light"
+        assert WebConfig({"theme": "midnight"}).theme == "light"
+        assert WebConfig({"theme": None}).theme == "light"
+
+    def test_legacy_auto_still_boots(self):
+        """0.5 之前的配置文件里写着 auto。升级后不该让页面出问题。"""
+        assert WebConfig({"theme": "auto"}).theme == "light"
+
+    def test_public_host_detection(self):
+        """决定要不要发那条"密码在网络上裸奔"的告警。"""
+        from ipclick.web.server import is_public_host
+
+        assert is_public_host("0.0.0.0") is True
+        assert is_public_host("192.168.1.10") is True
+        assert is_public_host("127.0.0.1") is False
+        assert is_public_host("localhost") is False
+        assert is_public_host("::1") is False
+
+
+class TestTheme:
+    """两态主题：亮 / 暗，默认亮。
+
+    0.5 去掉了"跟随系统"——那一档靠 ``prefers-color-scheme``，取决于浏览器读不读
+    得到桌面偏好，Linux 上常常读不到并静默回落成亮色。一个失败时毫无迹象的开关
+    比没有这个开关更糟。这里守的就是"它真的没了"，以及优先级没被搞反。
+    """
+
+    @staticmethod
+    def _html_tag(page: str) -> str:
+        """只取 ``<html …>`` 那一段——``data-default-theme`` 这个串在引导脚本里
+        也出现（那是读它的地方），全文匹配会把两者混为一谈。"""
+        match = re.search(r"<html\b[^>]*>", page)
+        assert match is not None
+        return match.group(0)
+
+    def test_only_two_buttons(self):
+        html = render_dashboard(_SNAPSHOT, "admin", "t", True)
+        assert set(re.findall(r'data-theme-set="(\w+)"', html)) == {"light", "dark"}
+        # 按钮文案里不能再有第三档（CSS 注释里提到它是可以的，那是解释为什么去掉）
+        labels = re.findall(r'<button[^>]*data-theme-set="\w+"[^>]*>(.*?)</button>', html, re.S)
+        assert [label.strip() for label in labels] == ["亮", "暗"]
+
+    def test_no_media_query_left(self):
+        """留着那条媒体查询的话，"只保留明暗"就只是把按钮藏起来而已——
+        暗色系统上页面仍然会自己变暗，而用户已经没有开关能拦住它了。"""
+        from ipclick.web.assets import STYLE
+
+        assert "@media (prefers-color-scheme" not in STYLE
+
+    def test_default_is_light(self):
+        from ipclick.web.templates import set_default_theme
+
+        set_default_theme("light")
+        assert 'data-default-theme="light"' in self._html_tag(render_dashboard(_SNAPSHOT, "admin", "t", True))
+
+    def test_dark_default_reaches_the_html_tag(self):
+        from ipclick.web.templates import set_default_theme
+
+        set_default_theme("dark")
+        try:
+            assert 'data-default-theme="dark"' in self._html_tag(render_dashboard(_SNAPSHOT, "admin", "t", True))
+            assert 'data-default-theme="dark"' in self._html_tag(render_login())
+        finally:
+            set_default_theme("light")
+
+    def test_explicit_argument_beats_the_process_default(self):
+        from ipclick.web.templates import set_default_theme
+
+        set_default_theme("dark")
+        try:
+            assert 'data-default-theme="light"' in self._html_tag(render_login(theme="light"))
+        finally:
+            set_default_theme("light")
+
+    def test_boot_script_prefers_local_choice(self):
+        """服务端默认值排在 localStorage 之后——反过来的话，用户每刷新一次，
+        自己刚选的主题就被配置文件推翻一次。"""
+        from ipclick.web.assets import SCRIPT_BOOT
+
+        saved_at = SCRIPT_BOOT.index("localStorage.getItem")
+        fallback_at = SCRIPT_BOOT.index("data-default-theme")
+        assert saved_at < fallback_at
+
+    def test_boot_script_always_pins_a_theme(self):
+        """引导脚本必须在第一帧之前把 data-theme 定下来，否则暗色用户会看到白闪。"""
+        from ipclick.web.assets import SCRIPT_BOOT
+
+        assert "setAttribute('data-theme'" in SCRIPT_BOOT
+        assert "removeAttribute" not in SCRIPT_BOOT
+
+    def test_csp_hashes_still_match_the_scripts(self):
+        """脚本改一个字节、忘了它是被哈希放行的，页面上表现为主题切换静默失效。"""
+        import re
+
+        from ipclick.web.assets import csp, sha256_source
+
+        policy = csp()
+        for source in re.findall(r"<script>(.*?)</script>", render_dashboard(_SNAPSHOT, "a", "t", True), re.S):
+            assert sha256_source(source) in policy
 
 
 # ---------------------------------------------------------------------- #
@@ -438,3 +544,65 @@ class TestHttpFlow:
             assert "取状态失败" in body
         finally:
             server.stop()
+
+
+class TestCspCoversEveryPage:
+    """脚本改一个字节、忘了它是被哈希放行的，页面上表现为交互静默失效——
+    主题切换没反应、安装任务不轮询、弹窗打不开。每一页都验一遍。"""
+
+    def _pages(self) -> dict[str, str]:
+        from ipclick.web.templates import (
+            render_components,
+            render_config,
+            render_deploy,
+            render_skill,
+            render_test,
+        )
+
+        return {
+            "dashboard": render_dashboard(_SNAPSHOT, "a", "t", True),
+            "login": render_login(),
+            "config-basic": render_config(
+                [], "a", "t", config_path="x.toml", messages=[], errors=[], readonly_note=[], tab="basic"
+            ),
+            "config-cluster": render_config(
+                [],
+                "a",
+                "t",
+                config_path="x.toml",
+                messages=[],
+                errors=[],
+                readonly_note=[],
+                tab="cluster",
+                cluster={"nodes": [{"id": "n", "address": "h:1", "weight": 100, "index": 0}], "forward": True},
+            ),
+            "test": render_test({}, None, [], "a", "t"),
+            "components": render_components([], "a", "t", toolchain="pip", job=None, messages=[], errors=[], bodies={}),
+            "skill": render_skill("# x", "a", "t", version="0.5.0", description="d", install_dir="p"),
+            "deploy": render_deploy(
+                {"node_id": "n", "address": "h:1", "toml": "x", "env": "y", "commands": []},
+                "a",
+                "t",
+                total_nodes=1,
+            ),
+        }
+
+    def test_every_inline_script_is_allowed(self):
+        from ipclick.web.assets import csp, sha256_source
+
+        policy = csp()
+        for name, html in self._pages().items():
+            for source in re.findall(r"<script>(.*?)</script>", html, re.S):
+                assert sha256_source(source) in policy, f"{name} 里有一段没被 CSP 放行的脚本"
+
+    def test_no_external_resources(self):
+        """页面不允许任何外部资源——CSP 里 default-src 是 'none'。"""
+        for name, html in self._pages().items():
+            assert 'src="http' not in html, name
+            assert 'href="http' not in html, name
+
+    def test_no_inline_event_handlers(self):
+        """onclick= 这类属性需要 CSP 的 'unsafe-hashes'，等于把内联脚本的口子
+        重新开一条。全部用 addEventListener + data-* 绑定。"""
+        for name, html in self._pages().items():
+            assert not re.search(r"\son(click|load|error|submit|change)\s*=", html), name

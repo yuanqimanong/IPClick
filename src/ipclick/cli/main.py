@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import re
 import unicodedata
 
 import click
@@ -8,17 +9,25 @@ from ipclick import __version__
 from ipclick.adapters.browser_engines import engine_status, resolve_engine
 from ipclick.adapters.browser_settings import BrowserSettings
 from ipclick.auth import load_tokens
+
+# 从子模块直接导入，不走 `from ipclick.cli import agent`：``cli/__init__.py`` 里的
+# `from .main import main` 会让后者变成 __init__ ↔ main 的导入环（运行时能过，
+# 但类型检查器会正确地报 reportImportCycles）。
+from ipclick.cli.agent import component, config_group, fetch, node, status, trace
+from ipclick.cli.skill_cmd import skill
 from ipclick.config_loader import load_config
 from ipclick.config_loader.loader import example_config, example_env
 from ipclick.factory import resolve_mode
 from ipclick.health import check_health
 from ipclick.limiter import LimiterSettings
+from ipclick.ports import DEFAULT_GRPC_PORT, DEFAULT_WEB_PORT
 from ipclick.secrets import SECRETS, describe_source
 from ipclick.server import serve
 from ipclick.tls import TLSSettings, describe
 from ipclick.trace import TraceSettings
 from ipclick.utils.log_util import LogUtil
 from ipclick.web.auth import generate_password
+from ipclick.web.server import is_public_host
 
 
 def _display_width(text: str) -> int:
@@ -54,7 +63,17 @@ def _print_example(ctx: click.Context, _param: click.Parameter, value: str | Non
 )
 @click.pass_context
 def main(ctx: click.Context):
-    """IPClick - 分布式HTTP请求代理工具"""
+    """IPClick - 分布式HTTP请求代理工具
+
+    \b
+    部署：  init / run / health / config-info
+    调用：  fetch / status / trace / node / component / config
+    接入：  skill —— 输出或安装给 AI 代理用的技能包
+
+    "调用"那一组是给程序（尤其是 AI）用的：每条命令都支持 --json，
+    输出一个 JSON 文档到 stdout；退出码分类（0 成功 / 1 失败 / 3 连不上 /
+    4 鉴权失败 / 5 参数或配置被拒）。先跑 `ipclick skill show` 看完整用法。
+    """
     # 不带子命令也不带 --example 时，给出帮助而不是静默退出
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
@@ -63,14 +82,28 @@ def main(ctx: click.Context):
 @main.command()
 @click.option("--force", "-f", is_flag=True, help="覆盖已存在的文件")
 @click.option("--dir", "-d", "target_dir", type=click.Path(path_type=Path), default=".", help="生成到哪个目录")
-def init(force: bool, target_dir: Path):
+@click.option(
+    "--port",
+    "-p",
+    type=int,
+    default=None,
+    help="按端口命名：生成 ipclick-<端口>.toml 并把端口填进去。同机起多个实例时用",
+)
+def init(force: bool, target_dir: Path, port: int | None):
     """在当前目录生成 ipclick.toml 与 .env。
 
     比 `ipclick -e > 文件` 强在：.env 用 600 权限创建、预填一个随机的 Web 密码、
     已存在时不会闷头覆盖、并把 .env 追加进 .gitignore。
+
+    \b
+    同一台机器上起多个实例：
+        ipclick init --port 8001 && ipclick init --port 8002
+        ipclick run --port 8001      # 自动读 ipclick-8001.toml
     """
     target_dir.mkdir(parents=True, exist_ok=True)
-    toml_path = target_dir / "ipclick.toml"
+    # 带 --port 时按端口命名，且 run --port 会优先找这个文件名（见 loader.candidate_names）。
+    # 多实例共用一份配置的症状很隐蔽：两个进程往同一个 trace 库里写，界面上看不出来。
+    toml_path = target_dir / (f"ipclick-{port}.toml" if port else "ipclick.toml")
     env_path = target_dir / ".env"
 
     existing = [p for p in (toml_path, env_path) if p.exists()]
@@ -80,8 +113,19 @@ def init(force: bool, target_dir: Path):
         click.echo("要覆盖请加 --force。注意 .env 里可能有正在用的密钥。", err=True)
         raise click.Abort()
 
-    toml_path.write_text(example_config(), encoding="utf-8")
-    click.echo(f"已生成 {toml_path}")
+    template = example_config()
+    if port:
+        # 把端口填进模板：不填的话生成出来的 ipclick-8001.toml 里写着默认端口，
+        # `run --port 8001` 能读到它但 `run` 不带参数时读的又是另一个值，
+        # 文件名和内容对不上是最容易看走眼的一种。
+        template = re.sub(
+            r"(?ms)(^\[SERVER\].*?^)port = \d+$",
+            lambda m: m.group(1) + f"port = {port}",
+            template,
+            count=1,
+        )
+    toml_path.write_text(template, encoding="utf-8")
+    click.echo(f"已生成 {toml_path}" + (f"（[SERVER].port = {port}）" if port else ""))
 
     # 预填一个随机 Web 密码：留空的话每次重启都会重新生成，运维得盯着控制台。
     password = generate_password()
@@ -102,7 +146,10 @@ def init(force: bool, target_dir: Path):
         click.echo("提示：本目录没有 .gitignore —— 请务必确保 .env 不会被提交", err=True)
 
     click.echo("")
-    click.echo("下一步：把令牌等机密填进 .env，行为配置改 ipclick.toml，然后 ipclick run")
+    click.echo(
+        f"下一步：把令牌等机密填进 .env，行为配置改 {toml_path.name}，然后 "
+        f"ipclick run{f' --port {port}' if port else ''}"
+    )
     click.echo("")
     click.echo("组集群时：在**一台**机器上生成共享密钥，再原样复制到其余机器的 .env——")
     click.echo(f"  IPCLICK_CLUSTER_SECRET={generate_password()}")
@@ -121,6 +168,17 @@ def init(force: bool, target_dir: Path):
     default=None,
     help="Web 管理端端口（覆盖 [WEB].port）。同目录起多个实例时必须岔开，否则第二个起不来",
 )
+@click.option(
+    "--web-host",
+    default=None,
+    help="Web 管理端绑定地址（覆盖 [WEB].host）。填 0.0.0.0 让局域网内其他设备也能访问",
+)
+@click.option(
+    "--web-lan",
+    is_flag=True,
+    default=False,
+    help="--web-host 0.0.0.0 的简写：监听所有网卡，供局域网访问",
+)
 def run(
     config: Path | None,
     port: int | None,
@@ -128,9 +186,18 @@ def run(
     verbose: bool,
     web: bool | None,
     web_port: int | None,
+    web_host: str | None,
+    web_lan: bool,
 ):
     """启动IPClick服务"""
     try:
+        # 两个都给且不一致时直接报错。悄悄让其中一个赢，会让人对着一个自己没写过
+        # 的监听地址排查半天。
+        if web_lan:
+            if web_host and web_host != "0.0.0.0":
+                raise click.UsageError(f"--web-lan 等于 --web-host 0.0.0.0，与 --web-host {web_host} 冲突")
+            web_host = "0.0.0.0"
+
         LogUtil.init(level="DEBUG" if verbose else "INFO")
 
         click.echo("Starting IPClick server...")
@@ -142,9 +209,27 @@ def run(
             click.echo(f"Override host: {host}")
         if web_port:
             click.echo(f"Override web port: {web_port}")
+        if web_host:
+            click.echo(f"Override web host: {web_host}")
+            if is_public_host(web_host):
+                # 这一条要在启动前就说：等日志刷起来之后没人会往回翻。
+                click.echo(
+                    "⚠️  Web 管理端将对本机以外开放，且是明文 HTTP（密码在网络上裸奔）。"
+                    "请确认这是可信网络，并已配置 [SECURITY].auth_token。",
+                    err=True,
+                )
 
-        serve(config_path=str(config) if config else None, port=port, host=host, web=web, web_port=web_port)
+        serve(
+            config_path=str(config) if config else None,
+            port=port,
+            host=host,
+            web=web,
+            web_port=web_port,
+            web_host=web_host,
+        )
 
+    except click.UsageError:
+        raise
     except KeyboardInterrupt:
         click.echo("\nShutting down...")
     except Exception as e:
@@ -166,7 +251,9 @@ def health(host: str, port: int | None, config: Path | None, service: str, timeo
     """
     LogUtil.init(level="ERROR")  # 探活只输出结论，不要日志噪音
 
-    resolved_port = port or int(dict(load_config(str(config) if config else None).get("SERVER", {})).get("port", 9527))
+    resolved_port = port or int(
+        dict(load_config(str(config) if config else None).get("SERVER", {})).get("port", DEFAULT_GRPC_PORT)
+    )
     target = f"{host}:{resolved_port}"
 
     healthy, status = check_health(target, service=service, timeout=timeout)
@@ -191,9 +278,20 @@ def config_info(config: Path | None):
         downloader_cfg = dict(cfg.get("DOWNLOADER", {}))
         monitor = dict(cfg.get("MONITOR", {}))
 
+        # 两个端口都打出来，而且各自标明用途。
+        #
+        # 0.5.0 之前这里只打 "Server port"，Web 端口一个字都不提——而人恰恰是拿
+        # 这条命令去回答"我这台机器到底在哪几个端口上"的。少了一半，剩下那一半
+        # 又不说自己是 gRPC 的，于是浏览器地址栏里的号、这里打出来的号、文档里
+        # 的号三者对不上账。
+        web = dict(cfg.get("WEB", {}))
         click.echo("Current configuration:")
         click.echo(f"  Server host:  {server.get('host', '[::]')}")
-        click.echo(f"  Server port:  {server.get('port', 9527)}")
+        click.echo(f"  gRPC port:    {server.get('port', DEFAULT_GRPC_PORT)}   ← 客户端、SDK、其他节点连这个")
+        click.echo(
+            f"  Web port:     {web.get('port', DEFAULT_WEB_PORT)}   "
+            f"← 浏览器打开这个（{'已启用' if web.get('enabled') else '未启用，用 run -w 开'}）"
+        )
         click.echo(f"  Max workers:  {server.get('max_workers', 10)}")
         click.echo(f"  Log level:    {log_cfg.get('level', 'info')}")
         click.echo(f"  Log output:   {log_cfg.get('output', 'stdout')}")
@@ -284,6 +382,22 @@ def config_info(config: Path | None):
     except Exception as e:
         click.echo(f"Error loading config: {e}", err=True)
         raise click.Abort() from e
+
+
+# --------------------------------------------------------------------------- #
+# 给程序 / AI 调用的那一组
+# --------------------------------------------------------------------------- #
+#
+# 在文件末尾注册，而不是把命令定义搬进来：那一组有近千行，混在部署命令中间会让
+# 这个文件失去"一眼看完 CLI 有哪些入口"的价值。见 ipclick.cli.agent。
+
+main.add_command(fetch)
+main.add_command(status)
+main.add_command(trace)
+main.add_command(node)
+main.add_command(component)
+main.add_command(config_group)
+main.add_command(skill)
 
 
 if __name__ == "__main__":

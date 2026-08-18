@@ -12,9 +12,16 @@ FastAPI 那一串依赖不划算。前端也没有构建链路：布局是纯 CS
 * ``/test`` 试一试：填个网址（或直接粘一条 curl）就地发一次请求，看链路与源码。
   走的是本进程 TaskService 的**同一条**代码路径——包括 SSRF 准入、限流、以及
   开了转发时的分发；也可以点名打到某一个节点。
-* ``/components`` 组件：五个可选 extras 的安装状态与装 / 卸。
-* ``/config`` 配置：白名单内的行为配置可改，**写回 ipclick.toml**（保留注释）。
-* ``/nodes`` 节点：集群节点的增删改（保存即生效）+ 就地测试连接。
+* ``/components`` 组件：五个可选 extras 的安装状态与装 / 卸（带真进度条）。
+  ``?node=<id>`` 时操作的是**那台子节点**——对端要自己开
+  ``[CLUSTER].allow_remote_install``，默认拒绝。
+* ``/config`` 配置：两个分页——**基础设置**（端口、线程、超时、日志…）与
+  **集群设置**（转发开关、节点增删、每台子节点的部署材料）。写回 ipclick.toml
+  （保留注释）。0.5 把 ``/nodes`` 并了进来，老地址会跳转过去。
+* ``/deploy`` 部署材料：给某台子节点生成 ipclick.toml + .env + 启动命令；
+  ``/deploy.zip`` 打包全部。**只生成，不推送**——加一个远程写配置的 RPC 等于
+  "拿下主控 = 能改所有机器的 SSRF 开关"。
+* ``/skill`` AI 接入：随包分发的技能包正文与下载。
 
 能改什么、不能改什么
 --------------------
@@ -43,15 +50,16 @@ import json
 import sys
 import threading
 from typing import Any, final
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 from typing_extensions import override
 
+from ipclick.ports import DEFAULT_WEB_PORT
 from ipclick.utils.log_util import log
 from ipclick.web.assets import csp
 from ipclick.web.auth import SessionStore, WebCredentials
 from ipclick.web.pages import WebPages
-from ipclick.web.templates import dashboard_live, render_dashboard, render_login
+from ipclick.web.templates import dashboard_live, render_dashboard, render_login, set_default_theme
 
 
 #: 会话 cookie 名
@@ -84,18 +92,44 @@ class _QuietThreadingHTTPServer(ThreadingHTTPServer):
         log.exception(f"Web 端处理请求出错（来自 {client_address}）：{error}")
 
 
+#: 主题。刻意只有两个值：0.5 去掉了"跟随系统"，理由见 :mod:`ipclick.web.assets`。
+THEMES: tuple[str, ...] = ("light", "dark")
+
+#: 主题的默认值。
+DEFAULT_THEME = "light"
+
+#: 会被当成"监听所有网卡"的写法。用来判断要不要发明文告警。
+WILDCARD_HOSTS: frozenset[str] = frozenset({"0.0.0.0", "::", "[::]", "*"})
+
+
+def normalize_theme(value: Any) -> str:
+    """把配置里的主题值收敛到 :data:`THEMES` 之一。写错了当亮色，不让页面白屏。
+
+    ``auto`` 是 0.5 之前的值，现在也当亮色——升级后配置文件里留着它不该让页面出问题。
+    """
+    text = str(value or "").strip().lower()
+    return text if text in THEMES else DEFAULT_THEME
+
+
+def is_public_host(host: str) -> bool:
+    """这个监听地址会不会让本机之外的人够得着。"""
+    return host.strip().lower() not in ("127.0.0.1", "::1", "[::1]", "localhost", "")
+
+
 class WebConfig:
     """``[WEB]`` 配置。"""
 
     def __init__(self, config: dict[str, Any] | None = None):
         data = dict(config or {})
         self.enabled: bool = bool(data.get("enabled", False))
-        self.port: int = _as_int(data.get("port"), 9530)
+        self.port: int = _as_int(data.get("port"), DEFAULT_WEB_PORT)
         # 默认只监听本机。管理界面暴露的是运行状态与节点拓扑，
         # 而且它后面就是一个能代发任意请求的服务——不该默认对外。
         self.host: str = str(data.get("host") or "127.0.0.1").strip() or "127.0.0.1"
         self.username: str = str(data.get("username") or "").strip()
         self.password: str = str(data.get("password") or "")
+        #: 页面的默认主题（light / dark）。浏览器里手动点过的选择优先于它。
+        self.theme: str = normalize_theme(data.get("theme"))
 
     def as_credentials_config(self) -> dict[str, Any]:
         return {"username": self.username, "password": self.password}
@@ -126,6 +160,7 @@ class WebServer:
         sessions: SessionStore | None = None,
         pages: WebPages | None = None,
         live_provider: Callable[[], dict[str, Any]] | None = None,
+        theme: str = DEFAULT_THEME,
     ):
         self._provider: Callable[[], dict[str, Any]] = snapshot_provider
         self._credentials: WebCredentials = credentials
@@ -138,6 +173,9 @@ class WebServer:
         #: （那里面有 TLS 解析、集群拓扑、四个引擎的文件系统探测）。
         #: 没注入时回落到完整快照——功能一样，只是贵一点。
         self._live: Callable[[], dict[str, Any]] = live_provider or snapshot_provider
+        #: 页面默认主题。只在浏览器**没有**本地选择时生效——用户点过的那一下
+        #: 永远优先，否则"我明明选了亮色"会在每次刷新时被服务端推翻。
+        self.theme: str = normalize_theme(theme)
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -145,20 +183,28 @@ class WebServer:
     # 生命周期
     # ------------------------------------------------------------------ #
 
-    def start(self, host: str = "127.0.0.1", port: int = 9530) -> str | None:
+    def start(self, host: str = "127.0.0.1", port: int = DEFAULT_WEB_PORT) -> str | None:
         """启动。返回访问地址；起不来返回 None。"""
         if self._httpd is not None:
             return f"http://{host}:{port}/"
+        # 主题是进程级的渲染默认值，在起服务之前定一次。见 templates.set_default_theme。
+        set_default_theme(self.theme)
         try:
             self._httpd = _QuietThreadingHTTPServer((host, port), self._make_handler())
         except OSError as e:
             log.error(f"Web 管理端启动失败 {host}:{port}: {e}")
             return None
 
-        if host not in ("127.0.0.1", "::1", "localhost"):
+        if is_public_host(host):
+            scope = "所有网卡" if host.strip() in WILDCARD_HOSTS else host
             log.warning(
-                f"Web 管理端监听 {host}（非回环地址）且为明文 HTTP——登录密码会在网络上明文传输。"
-                "请放在做了 TLS 终止的反向代理之后，或只监听 127.0.0.1 后用 SSH 隧道访问"
+                f"Web 管理端监听 {scope}（非回环地址）且为明文 HTTP——登录密码会在网络上明文传输。"
+                "局域网内自用可以接受；要跨网段暴露请放在做了 TLS 终止的反向代理之后，"
+                "或改回只监听 127.0.0.1 后用 SSH 隧道访问"
+            )
+            log.warning(
+                "同时请确认 [SECURITY].auth_token 已配置：这个界面的「试一试」能代发任意请求，"
+                "而 gRPC 端口若没开鉴权，同一网段的人绕过网页也能直接调用"
             )
 
         self._thread = threading.Thread(target=self._httpd.serve_forever, name="ipclick-web", daemon=True)
@@ -300,27 +346,78 @@ class WebServer:
                     return self._send(HTTPStatus.OK, body.encode())
 
                 if path == "/components":
-                    body = pages.components_page(session.username, session.csrf_token)
+                    # ?node=<id> 时看的是那台子节点的组件，不是本机的
+                    body = pages.components_page(
+                        session.username, session.csrf_token, node_id=self._query().get("node", "")
+                    )
                     return self._send(HTTPStatus.OK, body.encode())
 
                 if path == "/api/components/status":
-                    return self._json({"job": pages.installer.current()})
+                    return self._json({"job": pages.component_status(self._query().get("node", ""))})
 
                 if path == "/config":
+                    query = self._query()
                     # 带 g= 的是刚生成完机密重定向回来的。取完即弃——
                     # "只显示一次"就是靠这个保证的。
                     body = pages.config_page(
                         session.username,
                         session.csrf_token,
-                        generated_token=self._query().get("g", ""),
+                        generated_token=query.get("g", ""),
+                        tab=query.get("tab", "basic"),
                     )
                     return self._send(HTTPStatus.OK, body.encode())
 
                 if path == "/nodes":
-                    body = pages.nodes_page(session.username, session.csrf_token)
+                    # 0.5 把节点管理并进了配置页的「集群设置」——它本来就是集群
+                    # 配置的一部分。老地址仍然可用，直接送过去。
+                    return self._redirect("/config?tab=cluster")
+
+                if path == "/deploy":
+                    return self._deploy(pages, session)
+
+                if path == "/deploy.zip":
+                    return self._send(
+                        HTTPStatus.OK,
+                        pages.deploy_bundle(),
+                        "application/zip",
+                        [("Content-Disposition", 'attachment; filename="ipclick-cluster.zip"')],
+                    )
+
+                if path == "/skill":
+                    body = pages.skill_page(session.username, session.csrf_token)
                     return self._send(HTTPStatus.OK, body.encode())
 
+                if path == "/skill.md":
+                    # 原文下载。放在登录后面和其余页面一致——这份文档本身不含机密，
+                    # 但"这台机器上跑着 IPClick、版本是多少"就是信息，没理由白送。
+                    # 离线拿同一份：`ipclick skill show`。
+                    return self._send(
+                        HTTPStatus.OK,
+                        pages.skill_markdown().encode(),
+                        "text/markdown; charset=utf-8",
+                        [("Content-Disposition", 'attachment; filename="SKILL.md"')],
+                    )
+
                 return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain; charset=utf-8")
+
+            def _deploy(self, pages: WebPages, session: Any) -> None:
+                """子节点的部署材料。``kind=toml|env`` 单独取原文，否则出整页。"""
+                query = self._query()
+                node_id = query.get("node", "")
+                kind = query.get("kind", "")
+                if kind in ("toml", "env"):
+                    plan = pages.deploy_plan(node_id)
+                    if plan is None:
+                        return self._send(HTTPStatus.NOT_FOUND, "没有这个节点".encode(), "text/plain; charset=utf-8")
+                    text = plan.toml if kind == "toml" else plan.env
+                    name = plan.toml_name if kind == "toml" else ".env"
+                    headers = [("Content-Disposition", f'attachment; filename="{name}"')] if query.get("dl") else None
+                    return self._send(HTTPStatus.OK, text.encode(), "text/plain; charset=utf-8", headers)
+
+                body = pages.deploy_page(node_id, session.username, session.csrf_token)
+                if body is None:
+                    return self._redirect("/config?tab=cluster")
+                return self._send(HTTPStatus.OK, body.encode())
 
             def _json(self, payload: dict[str, Any], status: int = HTTPStatus.OK) -> None:
                 body = json.dumps(payload, ensure_ascii=False, default=str).encode()
@@ -377,14 +474,21 @@ class WebServer:
                     return self._redirect(f"/test?r={pages.stash_test_result(form, result)}")
 
                 if path == "/components":
+                    node_id = form.get("node", "")
+                    if node_id:
+                        # 远程那边没有本地探测缓存要清，重新拉一次列表即可
+                        return self._redirect(f"/components?node={quote(node_id)}")
                     ok, message = pages.refresh_components()
                     log.info(f"Web 端刷新组件状态：{message}")
                     _ = ok
                     return self._redirect("/components")
 
                 if path == "/api/components/action":
-                    ok, message = pages.component_action(form.get("op", ""), form.get("extra", ""))
-                    return self._json({"ok": ok, "message": message, "job": pages.installer.current()})
+                    node_id = form.get("node", "")
+                    ok, message = pages.component_action(form.get("op", ""), form.get("extra", ""), node_id)
+                    return self._json(
+                        {"ok": ok, "message": message, "job": pages.component_status(node_id), "node": node_id}
+                    )
 
                 if path == "/api/nodes/probe":
                     return self._json(pages.probe_node(form.get("node_id", ""), form.get("address", "")))
@@ -395,11 +499,13 @@ class WebServer:
                         # 服务端不留副本，刷新就没了。
                         token = pages.generate_secret(form.get("secret", ""))
                         return self._redirect(f"/config?g={token}" if token else "/config")
+                    if form.get("action") == "add_node":
+                        body = pages.add_node(form, session.username, session.csrf_token)
+                        return self._send(HTTPStatus.OK, body.encode())
+                    if form.get("action") == "remove_node":
+                        body = pages.remove_node(form, session.username, session.csrf_token)
+                        return self._send(HTTPStatus.OK, body.encode())
                     body = pages.save_config(form, session.username, session.csrf_token)
-                    return self._send(HTTPStatus.OK, body.encode())
-
-                if path == "/nodes":
-                    body = pages.save_nodes(form, session.username, session.csrf_token)
                     return self._send(HTTPStatus.OK, body.encode())
 
                 return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain; charset=utf-8")

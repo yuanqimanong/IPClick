@@ -158,6 +158,9 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         #: 供 Ping 报告运行时长。用 monotonic：系统时钟被 NTP 调过之后
         #: wall clock 的差值会变成负数或者跳几个小时。
         self._started_at: float = time.monotonic()
+        #: 远程组件管理用的安装任务管理器。惰性建（多数节点一辈子用不到它），
+        #: 但**进程内唯一**——它靠自己那把锁保证"同一时刻只跑一个任务"。
+        self._install_manager: Any = None
 
         # 目标 URL 准入策略（SSRF 防护）
         self.url_policy: URLPolicy = URLPolicy.from_config(dict(self.config.get("SECURITY", {})))
@@ -745,6 +748,118 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             in_flight=self._recorder.counters.in_flight,
         )
 
+    # ------------------------------------------------------------------ #
+    # 远程组件管理
+    # ------------------------------------------------------------------ #
+
+    @property
+    def remote_install_allowed(self) -> bool:
+        """本节点允不允许别人远程装组件。**默认关**。
+
+        这一位不是形式主义：打开它等于"能调本节点 gRPC 的人可以在本机跑 pip"。
+        包名走白名单（只有 IPClick 自己声明的那五个 extras，绝不拼接输入），但那
+        仍然是从"能代发 HTTP 请求"到"能改本机 Python 环境"的一次实质扩权，必须由
+        这台机器的主人自己按下，而不是随某次升级默默获得。
+        """
+        return bool(dict(self.config.get("CLUSTER", {})).get("allow_remote_install", False))
+
+    @override
+    def Component(self, request: "task_pb2.ComponentReq", context: ServicerContext) -> "task_pb2.ComponentResp":
+        """远程管理本节点上的可选组件。
+
+        走的是和 Web 端**同一个** :class:`~ipclick.web.installer.InstallManager`：
+        同一份白名单、同一条命令规划、同一个"一次只跑一个任务"的约束。另写一条
+        只在 RPC 上成立的安装路径，等于给自己留一个没被另外两个入口测到的分支。
+        """
+        if not self.remote_install_allowed:
+            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+            context.set_details(
+                "本节点未开启远程组件管理。要允许主控代装，请在这台机器的配置里设置 "
+                '[CLUSTER].allow_remote_install = true 并重启——它等于"能调本节点的人可以在本机跑 pip"，'
+                "所以默认是关的。"
+            )
+            return task_pb2.ComponentResp(ok=False, message="远程组件管理未开启", node_id=self.node_id)
+
+        op = (request.op or "").strip()
+        if request.from_node:
+            log.info(f"节点 {request.from_node} 请求在本机执行组件操作：{op} {request.extra}")
+
+        if op == "list":
+            return task_pb2.ComponentResp(
+                ok=True,
+                message="",
+                node_id=self.node_id,
+                components_json=self._components_json(),
+                job=self._component_job(),
+            )
+
+        manager = self._installer()
+        if op == "install":
+            ok, message = manager.install(request.extra)
+        elif op == "uninstall":
+            ok, message = manager.uninstall(request.extra)
+        elif op == "browser":
+            ok, message = manager.fetch_browser(request.extra, request.browser_kind or "chromium")
+        elif op == "status":
+            ok, message = True, ""
+        else:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"未知的组件操作 {op!r}（可选：list / status / install / uninstall / browser）")
+            return task_pb2.ComponentResp(ok=False, message=f"未知的组件操作 {op!r}", node_id=self.node_id)
+
+        return task_pb2.ComponentResp(
+            ok=ok,
+            message=message,
+            node_id=self.node_id,
+            components_json=self._components_json(),
+            job=self._component_job(),
+        )
+
+    def _installer(self) -> Any:
+        """本节点的安装任务管理器。惰性建、进程内唯一。
+
+        唯一是必须的：``InstallManager`` 靠自己那把锁保证"同一时刻只跑一个任务"，
+        每次调用现建一个的话，两个并发请求就能同时往一个 site-packages 里写。
+        """
+        if self._install_manager is None:
+            from ipclick.web.installer import InstallManager
+
+            self._install_manager = InstallManager()
+            self._install_manager.on_finished = _refresh_registry_after_install
+        return self._install_manager
+
+    def _components_json(self) -> str:
+        import json as json_lib
+
+        from ipclick.adapters.browser_settings import BrowserSettings
+        from ipclick.components import snapshot
+
+        browser = BrowserSettings.from_config(dict(self.config.get("BROWSER", {})))
+        return json_lib.dumps(snapshot(browser), ensure_ascii=False, default=str)
+
+    def _component_job(self) -> "task_pb2.ComponentJob | None":
+        """当前（或最近一次）任务，转成 protobuf。"""
+        current = self._installer().current()
+        if not current:
+            return None
+        progress = dict(current.get("progress") or {})
+        percent = progress.get("percent")
+        return task_pb2.ComponentJob(
+            id=str(current.get("id", "")),
+            title=str(current.get("title", "")),
+            command=str(current.get("command", "")),
+            status=str(current.get("status", "")),
+            returncode=int(current.get("returncode") or 0),
+            elapsed_seconds=int(current.get("elapsed") or 0),
+            # -1 表示"量不出来"。proto3 的 double 没有 null，用一个不可能的负数
+            # 表达它，前端据此画不确定态的条而不是一个 0% 的假进度。
+            percent=float(percent) if percent is not None else -1.0,
+            done_bytes=int(progress.get("done_bytes") or 0),
+            speed_bytes=float(progress.get("speed") or 0.0),
+            phase=str(progress.get("phase") or ""),
+            output=list(current.get("output") or []),
+        )
+
     @property
     def auth_required(self) -> bool:
         """本节点有没有启用令牌鉴权。
@@ -792,6 +907,18 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         # 注意：不要清空 registry.ADAPTER_CLASSES。那是模块级的类型注册表，
         # 清掉之后同一进程内再也造不出任何适配器（例如测试里起第二个服务）。
         log.info("TaskService cleanup completed")
+
+
+def _refresh_registry_after_install(job: Any) -> None:
+    """远程装完之后刷新适配器注册表，让新装的东西立刻可用。
+
+    和 Web 端那个回调做同一件事。失败时也刷——可能装了一半，此时该反映的是磁盘上
+    的真实情况，而不是任务开始前的那份快照。
+    """
+    from ipclick.adapters import registry
+
+    registry.refresh()
+    log.info(f"远程组件任务结束（{getattr(job, 'title', '')}），已刷新适配器注册表")
 
 
 def _version() -> str:

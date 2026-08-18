@@ -126,8 +126,26 @@ class TraceRecord:
 
     @property
     def when(self) -> str:
-        """本地时间字符串，给 Web 端直接用。"""
+        """**服务端**本地时间字符串。
+
+        只是个回落值：页面上真正显示的时间由浏览器按**看的人**所在时区渲染
+        （见 :attr:`iso`）。没有 JS 时才用这一份。
+        """
         return datetime.fromtimestamp(self.ts).strftime("%Y-%m-%d %H:%M:%S")
+
+    @property
+    def iso(self) -> str:
+        """带时区偏移的 ISO-8601，例如 ``2026-08-18T16:50:21+08:00``。
+
+        页面把它放在 ``<time datetime="...">`` 上，浏览器据此换算成看的人自己的
+        时区。**必须带偏移量**——不带的话浏览器只能猜，而猜错的表现是"时间看着
+        像那么回事，但就是和自己的表差几个钟头"，很难被当成 bug 报出来。
+
+        :attr:`when` 那种"服务端本地时间"在只有一台机器、人就坐在它旁边时没问题；
+        一旦服务端跑在 UTC 的容器里（Docker 默认就是），东八区的人看到的每一条都
+        慢八小时。
+        """
+        return datetime.fromtimestamp(self.ts).astimezone().isoformat(timespec="seconds")
 
     def as_row(self) -> tuple[Any, ...]:
         """转成 SQLite 的插入元组（列顺序见 _INSERT_SQL）。"""
@@ -434,219 +452,41 @@ def _process_alive(pid: int) -> bool:
     return True
 
 
-@final
-class SQLiteSink:
-    """把链路记录异步写进 SQLite。
+class TraceReader:
+    """只读地打开一个链路记录库。
 
-    ``close()`` 之前所有写入都只经过一个后台线程，因此不需要跨线程共享连接。
-    读取（Web 端查询）每次开一条新连接——sqlite3 的连接不是线程安全的，
-    而 WAL 模式下读不阻塞写。
+    从 :class:`SQLiteSink` 里分出来，是为了让**服务进程之外**的人也能查这些记录
+    ——``ipclick trace list`` 就跑在另一个进程里。它必须只读：
+
+    * 不建表、不迁移。指着一个不存在的路径应该报"没有这个库"，而不是当场造一个
+      空库出来，让人以为"记录丢了"。
+    * 不占用（不写 ``_claim_database`` 标记）。那个标记是给写者用的互斥，
+      查一眼记录不该让服务端以为有第二个进程在抢着写。
+    * 不起后台线程。CLI 跑完就退，多一个 daemon 线程只是多一个退出时的不确定性。
+
+    连接一律走 ``file:...?mode=ro``：查询这条路上物理上不可能写坏数据文件。
     """
 
-    def __init__(self, path: str, retention_days: int = 30, queue_size: int = DEFAULT_QUEUE_SIZE) -> None:
+    def __init__(self, path: str) -> None:
         self.path: str = os.path.abspath(path)
-        self.retention_days: int = retention_days
-        self.dropped: int = 0
-        self.written: int = 0
-        self.failed: bool = False
 
-        self._queue: queue.Queue[TraceRecord | None] = queue.Queue(maxsize=queue_size)
-        self._lock: threading.Lock = threading.Lock()
-        self._last_drop_log: float = 0.0
-        self._closed: bool = False
-
-        self._init_db()
-        self._claim_marker: str = _claim_database(self.path)
-        self._thread: threading.Thread = threading.Thread(target=self._run, name="ipclick-trace", daemon=True)
-        self._thread.start()
-
-    # -------------------------------------------------------------- #
-    # 建库
-    # -------------------------------------------------------------- #
+    def exists(self) -> bool:
+        """库文件在不在。不在时调用方该说"没开落盘 / 路径不对"，而不是返回空列表
+        ——"一条记录都没有"和"根本没这个库"是两回事。
+        """
+        return os.path.isfile(self.path)
 
     def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
         if readonly:
-            # uri 模式的 mode=ro 能保证 Web 端的查询绝不可能写坏数据文件
+            # uri 模式的 mode=ro 能保证查询绝不可能写坏数据文件
             conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=5.0)
         else:
             conn = sqlite3.connect(self.path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         return conn
 
-    def _init_db(self) -> None:
-        parent = os.path.dirname(self.path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        conn = self._connect()
-        try:
-            # WAL：读写互不阻塞。这是"Web 端在查的同时还能继续写"的前提。
-            _ = conn.execute("PRAGMA journal_mode=WAL")
-            # NORMAL：不为每次 commit 做 fsync。断电可能丢最后几条链路记录——
-            # 对可观测性数据这个代价换来的吞吐提升是划算的。
-            _ = conn.execute("PRAGMA synchronous=NORMAL")
-            # 增量整理：按天 DELETE 之后用 incremental_vacuum 回收页面。
-            # 不用 VACUUM——它要独占锁并重写整个文件，库大了会把服务卡住。
-            #
-            # ⚠️ 这条 PRAGMA 只对**新建**的库生效，且必须在建表之前执行（所以它
-            # 在 _SCHEMA_TABLE 上面）。已经存在的库改不了 auto_vacuum 模式，
-            # 语句会被静默忽略，_purge() 里的 incremental_vacuum 也就成了空操作
-            # ——文件不会再缩小，但删数据、查询、保留期都照常工作。真要回收
-            # 旧库的空间，只能停服后手动 VACUUM 重建。
-            _ = conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
-            _ = conn.executescript(_SCHEMA_TABLE)
-            # 先补列再建索引：索引可能引用后加的列
-            self._migrate(conn)
-            _ = conn.executescript(_SCHEMA_INDEXES)
-            conn.commit()
-        finally:
-            conn.close()
-
-    @staticmethod
-    def _migrate(conn: sqlite3.Connection) -> None:
-        """把老库补上后加的列。
-
-        只加列、不删列、不改已有列的类型——那类改动 SQLite 要重建整张表。
-
-        新列的回填是个例外：``host`` 全空的话目标站点排行对历史数据就是一片
-        ``-``，等于这个功能对老库不存在。回填只在**加列的那一次**跑，之后每次
-        启动都只是一次 ``PRAGMA table_info``。
-        """
-        existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(traces)")}
-        if "host" not in existing:
-            _ = conn.execute("ALTER TABLE traces ADD COLUMN host TEXT")
-            # 老行的 host 用 SQL 现补一次：写法和 host_of 对不齐的边角情况
-            # （端口、IPv6）在这里可以接受——它只影响历史数据的排行分组，
-            # 新写入的行走的是 host_of。
-            # 不含 "://" 的行是 record_url = false 时写的，url 里存的**已经是**
-            # host，原样用——和 TraceRecord.host 的兜底保持一致。
-            _ = conn.execute(
-                "UPDATE traces SET host = CASE"
-                "  WHEN instr(url, '://') = 0 THEN COALESCE(NULLIF(url, ''), '-')"
-                "  WHEN instr(substr(url, instr(url, '://') + 3), '/') = 0"
-                "    THEN substr(url, instr(url, '://') + 3)"
-                "  ELSE substr(url, instr(url, '://') + 3,"
-                "              instr(substr(url, instr(url, '://') + 3), '/') - 1)"
-                " END WHERE host IS NULL"
-            )
-            log.info("链路记录库已补上 host 列（用于目标站点排行）")
-
     # -------------------------------------------------------------- #
-    # 写
-    # -------------------------------------------------------------- #
-
-    def submit(self, record: TraceRecord) -> None:
-        """入队，绝不阻塞。队列满就丢并计数。"""
-        if self._closed or self.failed:
-            return
-        try:
-            self._queue.put_nowait(record)
-        except queue.Full:
-            with self._lock:
-                self.dropped += 1
-                dropped = self.dropped
-                now = time.monotonic()
-                should_log = now - self._last_drop_log > 60
-                if should_log:
-                    self._last_drop_log = now
-            if should_log:
-                log.warning(
-                    f"链路记录队列已满，累计丢弃 {dropped} 条（写盘跟不上请求速率；可关闭 [TRACE].sqlite_enabled）"
-                )
-
-    def _run(self) -> None:
-        next_retention = 0.0  # 启动后立即清一次
-        while True:
-            batch = self._drain()
-            if batch is None:
-                break
-            if batch:
-                self._write(batch)
-            if self.failed:
-                # 落盘已经废了（磁盘满、权限、库损坏），继续转下去只会对每一批
-                # 重复同一个错误、刷满日志。submit() 也已经不再入队，这个线程
-                # 没有活可干了——退出，记录降级成只有内存缓冲。
-                break
-            now = time.monotonic()
-            if now >= next_retention:
-                next_retention = now + _RETENTION_INTERVAL
-                self._purge()
-
-    def _drain(self) -> list[TraceRecord] | None:
-        """攒一批。返回 None 表示收到了关闭信号。"""
-        batch: list[TraceRecord] = []
-        try:
-            first = self._queue.get(timeout=_FLUSH_INTERVAL)
-        except queue.Empty:
-            return batch
-        if first is None:
-            return None
-        batch.append(first)
-
-        deadline = time.monotonic() + _FLUSH_INTERVAL
-        while len(batch) < _BATCH_SIZE:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                item = self._queue.get(timeout=remaining)
-            except queue.Empty:
-                break
-            if item is None:
-                # 关闭信号：先把手上这批写完，再退出
-                if batch:
-                    self._write(batch)
-                return None
-            batch.append(item)
-        return batch
-
-    def _write(self, batch: Sequence[TraceRecord]) -> None:
-        try:
-            conn = self._connect()
-            try:
-                _ = conn.executemany(_INSERT_SQL, [r.as_row() for r in batch])
-                conn.commit()
-            finally:
-                conn.close()
-        except sqlite3.Error as e:
-            # 写链路日志失败绝不能影响下载。降级成"只有内存缓冲"并说清原因。
-            self.failed = True
-            log.error(f"链路记录写入失败，已停止落盘（内存记录不受影响）: {e}")
-            return
-        with self._lock:
-            self.written += len(batch)
-
-    def _purge(self) -> None:
-        if self.retention_days <= 0:
-            return
-        cutoff = time.time() - self.retention_days * 86400
-        try:
-            conn = self._connect()
-            try:
-                cur = conn.execute("DELETE FROM traces WHERE ts < ?", (cutoff,))
-                removed = cur.rowcount
-                conn.commit()
-                if removed > 0:
-                    # 回收 DELETE 释放的页面。分批做，不独占锁。
-                    _ = conn.execute("PRAGMA incremental_vacuum(1000)")
-                    conn.commit()
-                    log.info(f"链路记录清理：删除 {removed} 条超过 {self.retention_days} 天的记录")
-            finally:
-                conn.close()
-        except sqlite3.Error as e:
-            log.warning(f"链路记录清理失败: {e}")
-
-    def close(self, timeout: float = 5.0) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        # 队列满时塞不进关闭信号，只能等超时——线程是 daemon，进程退出不受影响
-        with contextlib.suppress(queue.Full):
-            self._queue.put_nowait(None)
-        self._thread.join(timeout=timeout)
-        _release_database(self._claim_marker)
-
-    # -------------------------------------------------------------- #
-    # 读（给 Web 端）
+    # 读
     # -------------------------------------------------------------- #
 
     def query(
@@ -825,6 +665,209 @@ class SQLiteSink:
                 conn.close()
         except sqlite3.Error:
             return 0
+
+
+@final
+class SQLiteSink(TraceReader):
+    """把链路记录异步写进 SQLite。
+
+    ``close()`` 之前所有写入都只经过一个后台线程，因此不需要跨线程共享连接。
+    读取（Web 端查询）每次开一条新连接——sqlite3 的连接不是线程安全的，
+    而 WAL 模式下读不阻塞写。查询方法全部继承自 :class:`TraceReader`。
+    """
+
+    def __init__(self, path: str, retention_days: int = 30, queue_size: int = DEFAULT_QUEUE_SIZE) -> None:
+        super().__init__(path)
+        self.retention_days: int = retention_days
+        self.dropped: int = 0
+        self.written: int = 0
+        self.failed: bool = False
+
+        self._queue: queue.Queue[TraceRecord | None] = queue.Queue(maxsize=queue_size)
+        self._lock: threading.Lock = threading.Lock()
+        self._last_drop_log: float = 0.0
+        self._closed: bool = False
+
+        self._init_db()
+        self._claim_marker: str = _claim_database(self.path)
+        self._thread: threading.Thread = threading.Thread(target=self._run, name="ipclick-trace", daemon=True)
+        self._thread.start()
+
+    # -------------------------------------------------------------- #
+    # 建库
+    # -------------------------------------------------------------- #
+
+    def _init_db(self) -> None:
+        parent = os.path.dirname(self.path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        conn = self._connect()
+        try:
+            # WAL：读写互不阻塞。这是"Web 端在查的同时还能继续写"的前提。
+            _ = conn.execute("PRAGMA journal_mode=WAL")
+            # NORMAL：不为每次 commit 做 fsync。断电可能丢最后几条链路记录——
+            # 对可观测性数据这个代价换来的吞吐提升是划算的。
+            _ = conn.execute("PRAGMA synchronous=NORMAL")
+            # 增量整理：按天 DELETE 之后用 incremental_vacuum 回收页面。
+            # 不用 VACUUM——它要独占锁并重写整个文件，库大了会把服务卡住。
+            #
+            # ⚠️ 这条 PRAGMA 只对**新建**的库生效，且必须在建表之前执行（所以它
+            # 在 _SCHEMA_TABLE 上面）。已经存在的库改不了 auto_vacuum 模式，
+            # 语句会被静默忽略，_purge() 里的 incremental_vacuum 也就成了空操作
+            # ——文件不会再缩小，但删数据、查询、保留期都照常工作。真要回收
+            # 旧库的空间，只能停服后手动 VACUUM 重建。
+            _ = conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            _ = conn.executescript(_SCHEMA_TABLE)
+            # 先补列再建索引：索引可能引用后加的列
+            self._migrate(conn)
+            _ = conn.executescript(_SCHEMA_INDEXES)
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """把老库补上后加的列。
+
+        只加列、不删列、不改已有列的类型——那类改动 SQLite 要重建整张表。
+
+        新列的回填是个例外：``host`` 全空的话目标站点排行对历史数据就是一片
+        ``-``，等于这个功能对老库不存在。回填只在**加列的那一次**跑，之后每次
+        启动都只是一次 ``PRAGMA table_info``。
+        """
+        existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(traces)")}
+        if "host" not in existing:
+            _ = conn.execute("ALTER TABLE traces ADD COLUMN host TEXT")
+            # 老行的 host 用 SQL 现补一次：写法和 host_of 对不齐的边角情况
+            # （端口、IPv6）在这里可以接受——它只影响历史数据的排行分组，
+            # 新写入的行走的是 host_of。
+            # 不含 "://" 的行是 record_url = false 时写的，url 里存的**已经是**
+            # host，原样用——和 TraceRecord.host 的兜底保持一致。
+            _ = conn.execute(
+                "UPDATE traces SET host = CASE"
+                "  WHEN instr(url, '://') = 0 THEN COALESCE(NULLIF(url, ''), '-')"
+                "  WHEN instr(substr(url, instr(url, '://') + 3), '/') = 0"
+                "    THEN substr(url, instr(url, '://') + 3)"
+                "  ELSE substr(url, instr(url, '://') + 3,"
+                "              instr(substr(url, instr(url, '://') + 3), '/') - 1)"
+                " END WHERE host IS NULL"
+            )
+            log.info("链路记录库已补上 host 列（用于目标站点排行）")
+
+    # -------------------------------------------------------------- #
+    # 写
+    # -------------------------------------------------------------- #
+
+    def submit(self, record: TraceRecord) -> None:
+        """入队，绝不阻塞。队列满就丢并计数。"""
+        if self._closed or self.failed:
+            return
+        try:
+            self._queue.put_nowait(record)
+        except queue.Full:
+            with self._lock:
+                self.dropped += 1
+                dropped = self.dropped
+                now = time.monotonic()
+                should_log = now - self._last_drop_log > 60
+                if should_log:
+                    self._last_drop_log = now
+            if should_log:
+                log.warning(
+                    f"链路记录队列已满，累计丢弃 {dropped} 条（写盘跟不上请求速率；可关闭 [TRACE].sqlite_enabled）"
+                )
+
+    def _run(self) -> None:
+        next_retention = 0.0  # 启动后立即清一次
+        while True:
+            batch = self._drain()
+            if batch is None:
+                break
+            if batch:
+                self._write(batch)
+            if self.failed:
+                # 落盘已经废了（磁盘满、权限、库损坏），继续转下去只会对每一批
+                # 重复同一个错误、刷满日志。submit() 也已经不再入队，这个线程
+                # 没有活可干了——退出，记录降级成只有内存缓冲。
+                break
+            now = time.monotonic()
+            if now >= next_retention:
+                next_retention = now + _RETENTION_INTERVAL
+                self._purge()
+
+    def _drain(self) -> list[TraceRecord] | None:
+        """攒一批。返回 None 表示收到了关闭信号。"""
+        batch: list[TraceRecord] = []
+        try:
+            first = self._queue.get(timeout=_FLUSH_INTERVAL)
+        except queue.Empty:
+            return batch
+        if first is None:
+            return None
+        batch.append(first)
+
+        deadline = time.monotonic() + _FLUSH_INTERVAL
+        while len(batch) < _BATCH_SIZE:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                item = self._queue.get(timeout=remaining)
+            except queue.Empty:
+                break
+            if item is None:
+                # 关闭信号：先把手上这批写完，再退出
+                if batch:
+                    self._write(batch)
+                return None
+            batch.append(item)
+        return batch
+
+    def _write(self, batch: Sequence[TraceRecord]) -> None:
+        try:
+            conn = self._connect()
+            try:
+                _ = conn.executemany(_INSERT_SQL, [r.as_row() for r in batch])
+                conn.commit()
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            # 写链路日志失败绝不能影响下载。降级成"只有内存缓冲"并说清原因。
+            self.failed = True
+            log.error(f"链路记录写入失败，已停止落盘（内存记录不受影响）: {e}")
+            return
+        with self._lock:
+            self.written += len(batch)
+
+    def _purge(self) -> None:
+        if self.retention_days <= 0:
+            return
+        cutoff = time.time() - self.retention_days * 86400
+        try:
+            conn = self._connect()
+            try:
+                cur = conn.execute("DELETE FROM traces WHERE ts < ?", (cutoff,))
+                removed = cur.rowcount
+                conn.commit()
+                if removed > 0:
+                    # 回收 DELETE 释放的页面。分批做，不独占锁。
+                    _ = conn.execute("PRAGMA incremental_vacuum(1000)")
+                    conn.commit()
+                    log.info(f"链路记录清理：删除 {removed} 条超过 {self.retention_days} 天的记录")
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            log.warning(f"链路记录清理失败: {e}")
+
+    def close(self, timeout: float = 5.0) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        # 队列满时塞不进关闭信号，只能等超时——线程是 daemon，进程退出不受影响
+        with contextlib.suppress(queue.Full):
+            self._queue.put_nowait(None)
+        self._thread.join(timeout=timeout)
+        _release_database(self._claim_marker)
 
 
 def _escape_like(text: str) -> str:
@@ -1169,6 +1212,7 @@ __all__ = [
     "Counters",
     "RequestTrace",
     "SQLiteSink",
+    "TraceReader",
     "TraceRecord",
     "TraceRecorder",
     "TraceSettings",

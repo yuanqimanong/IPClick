@@ -58,6 +58,11 @@ class TaskServiceStub:
                 request_serializer=task__pb2.PingReq.SerializeToString,
                 response_deserializer=task__pb2.PingResp.FromString,
                 _registered_method=True)
+        self.Component = channel.unary_unary(
+                '/task.TaskService/Component',
+                request_serializer=task__pb2.ComponentReq.SerializeToString,
+                response_deserializer=task__pb2.ComponentResp.FromString,
+                _registered_method=True)
 
 
 class TaskServiceServicer:
@@ -99,6 +104,14 @@ class TaskServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Component(self, request, context):
+        """远程管理可选组件。0.5 新增，**默认关闭**（见 ComponentReq 的说明）。
+        对着 0.4 及更早的节点调会收到 UNIMPLEMENTED，主控据此提示"那台还没升级"。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_TaskServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -121,6 +134,11 @@ def add_TaskServiceServicer_to_server(servicer, server):
                     servicer.Ping,
                     request_deserializer=task__pb2.PingReq.FromString,
                     response_serializer=task__pb2.PingResp.SerializeToString,
+            ),
+            'Component': grpc.unary_unary_rpc_method_handler(
+                    servicer.Component,
+                    request_deserializer=task__pb2.ComponentReq.FromString,
+                    response_serializer=task__pb2.ComponentResp.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -235,6 +253,33 @@ class TaskService:
             '/task.TaskService/Ping',
             task__pb2.PingReq.SerializeToString,
             task__pb2.PingResp.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Component(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/task.TaskService/Component',
+            task__pb2.ComponentReq.SerializeToString,
+            task__pb2.ComponentResp.FromString,
             options,
             channel_credentials,
             insecure,
