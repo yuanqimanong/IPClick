@@ -7,19 +7,24 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import datetime
+import pathlib
 from pathlib import Path
+import re
 import tomllib
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from ipclick.config_loader.writer import format_value, set_nodes, set_values
+from ipclick.config_loader.writer import format_value, save, set_nodes, set_values
 from ipclick.dto.response import Response
+from ipclick.exceptions import ConfigError, ValidationError
 from ipclick.services.task_service import TaskService
-from ipclick.trace import TraceSettings, init_recorder, reset_recorder
+from ipclick.trace import TraceRecord, TraceSettings, init_recorder, reset_recorder
 from ipclick.utils.config_util import Settings
 from ipclick.web.editable import FIELDS, GROUPS, parse_form, parse_nodes, validate_nodes
 from ipclick.web.pages import WebPages
+from ipclick.web.templates import DEFAULT_LIVE_MS, LIVE_INTERVALS
 
 
 SAMPLE = """\
@@ -118,6 +123,86 @@ class TestSetValues:
         assert parsed["SERVER"]["max_workers"] == 4
         assert parsed["DOWNLOADER"]["download_timeout"] == 15
         assert len(changes) == 2
+
+
+class TestInlineTables:
+    """模板里有些子表是内联写法（``viewport = {{ width = 1920, height = 1080 }}``）
+    而不是独立的 ``[BROWSER.viewport]`` 节。
+
+    0.5.0 之前往这种节写值会在文件末尾追加一个同名节头 → 同一个键声明两次 →
+    文件下次启动直接解析不了。事故形状特别糟：写入成功、界面说"已保存"、服务
+    照旧在跑，直到下次重启才炸，那时人早忘了自己在网页上改过什么。
+    """
+
+    SAMPLE = '[BROWSER]\nenabled = true\nviewport = { width = 1920, height = 1080 }\n'
+
+    def test_updates_in_place(self):
+        new, changes = set_values(self.SAMPLE, {"BROWSER.viewport": {"width": 1280}})
+        assert tomllib.loads(new)["BROWSER"]["viewport"] == {"width": 1280, "height": 1080}
+        assert changes == ["[BROWSER].viewport.width = 1280"]
+
+    def test_never_appends_a_duplicate_section(self):
+        new, _ = set_values(self.SAMPLE, {"BROWSER.viewport": {"width": 1280}})
+        assert "[BROWSER.viewport]" not in new
+        assert sum("viewport" in line for line in new.splitlines()) == 1
+
+    def test_adds_a_missing_key_inside_the_table(self):
+        new, _ = set_values(self.SAMPLE, {"BROWSER.viewport": {"scale": 2}})
+        assert tomllib.loads(new)["BROWSER"]["viewport"]["scale"] == 2
+        assert tomllib.loads(new)["BROWSER"]["viewport"]["width"] == 1920
+
+    def test_commas_inside_quotes_are_not_split_points(self):
+        """``body.split(",")`` 会把这一行切错，切错就等于把配置改坏。"""
+        text = '[T]\nx = { ua = "a,b", n = 1 }\n'
+        new, _ = set_values(text, {"T.x": {"n": 5}})
+        assert tomllib.loads(new)["T"]["x"] == {"ua": "a,b", "n": 5}
+
+    def test_nested_brackets_are_not_split_points(self):
+        text = "[T]\nx = { args = [1, 2], n = 1 }\n"
+        new, _ = set_values(text, {"T.x": {"n": 5}})
+        assert tomllib.loads(new)["T"]["x"] == {"args": [1, 2], "n": 5}
+
+    def test_trailing_comment_survives(self):
+        text = "[T]\nx = { n = 1 }  # 别删我\n"
+        new, _ = set_values(text, {"T.x": {"n": 5}})
+        assert "# 别删我" in new
+
+    def test_refuses_when_the_target_is_not_an_editable_table(self):
+        """改不动就明说。猜着写下去的结果是产出一个开不了机的配置。"""
+        with pytest.raises(ConfigError, match="不是可以就地编辑的形式"):
+            _ = set_values("[T]\nx = 1\n", {"T.x": {"n": 5}})
+
+    def test_a_genuinely_absent_section_is_still_appended(self):
+        """真的整节都不存在时，追加行为不变——别把这个修法扩大到不该管的地方。"""
+        new, changes = set_values("[T]\nx = 1\n", {"OTHER.sub": {"n": 5}})
+        assert tomllib.loads(new)["OTHER"]["sub"]["n"] == 5
+        assert "（新增节）" in changes[0]
+
+
+class TestSaveValidatesToml:
+    """写之前先确认还是合法 TOML。这个模块按行做文本编辑（为了保住注释和排版），
+    代价就是存在产出非法 TOML 的可能——那种文件写进去之后要到下次重启才炸。
+    """
+
+    def test_refuses_to_write_invalid_toml(self, tmp_path: Path):
+        target = tmp_path / "ipclick.toml"
+        _ = target.write_text("[A]\nx = 1\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="不是合法 TOML"):
+            _ = save(target, "[A]\n[A]\nx = 1\n")
+
+    def test_the_original_file_is_left_alone(self, tmp_path: Path):
+        target = tmp_path / "ipclick.toml"
+        original = "[A]\nx = 1\n"
+        _ = target.write_text(original, encoding="utf-8")
+        with pytest.raises(ConfigError):
+            _ = save(target, "this is not = = toml")
+        assert target.read_text(encoding="utf-8") == original
+
+    def test_valid_toml_still_writes(self, tmp_path: Path):
+        target = tmp_path / "ipclick.toml"
+        _ = target.write_text("[A]\nx = 1\n", encoding="utf-8")
+        _ = save(target, "[A]\nx = 2\n")
+        assert tomllib.loads(target.read_text(encoding="utf-8"))["A"]["x"] == 2
 
 
 class TestSetNodes:
@@ -231,6 +316,89 @@ class TestEditableWhitelist:
         config = tomllib.loads(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
         missing = [name for name, field in FIELDS.items() if current_value(config, field) is None]
         assert missing == [], f"这些项在默认配置里取不到值，也没有 default: {missing}"
+
+
+class TestEveryFieldRoundTrips:
+    """白名单里的每一项，都必须能写回模板并原样读出来。
+
+    这条测试挡的是加字段时最容易犯的三种错，它们的共同点是**页面上看着完全正常**：
+
+    * 键名写错（配置键是 ``browser``，属性名是 ``kind`` —— 按属性名写会生成一个
+      ``[BROWSER].kind``，谁都不读）
+    * 节名写错（``[BROWSER].page_timeout`` 而不是 ``[BROWSER.timeout].page_load``）
+    * 节在模板里只是个内联表，写回时被追加成重复节头，文件下次启动解析不了
+    """
+
+    def test_all_fields_write_back_and_read_back(self):
+        template = pathlib.Path(
+            str(Path(__import__("ipclick").__file__).parent / "configs" / "default_config.toml")
+        ).read_text(encoding="utf-8")
+
+        probe: dict[str, dict[str, Any]] = {}
+        for field in FIELDS.values():
+            if field.kind == "int":
+                value: Any = int((field.minimum or 0) + 7)
+            elif field.kind == "float":
+                value = float((field.minimum or 0) + 1.5)
+            elif field.kind == "bool":
+                value = True
+            elif field.kind == "choice":
+                value = field.choices[-1]
+            else:
+                value = "probe-value"
+            probe.setdefault(field.section, {})[field.key] = value
+
+        new_text, changes = set_values(template, probe)
+        assert len(changes) == len(FIELDS)
+
+        data = tomllib.loads(new_text)  # 写坏了就炸在这一行
+        for name, field in FIELDS.items():
+            node: Any = data
+            for part in field.section.split("."):
+                assert isinstance(node, dict) and part in node, f"{name}：节 {field.section} 不见了"
+                node = node[part]
+            assert node[field.key] == probe[field.section][field.key], f"{name} 写回后读出来不一样"
+
+    def test_every_field_key_exists_in_the_template(self):
+        """模板里没有的键 = 用户在页面上看到的是 Field.default，而不是这台机器的实际配置。"""
+        template = tomllib.loads(
+            pathlib.Path(
+                str(Path(__import__("ipclick").__file__).parent / "configs" / "default_config.toml")
+            ).read_text(encoding="utf-8")
+        )
+        missing: list[str] = []
+        for name, field in FIELDS.items():
+            node: Any = template
+            for part in field.section.split("."):
+                node = node.get(part, {}) if isinstance(node, dict) else {}
+            if not isinstance(node, dict) or field.key not in node:
+                missing.append(name)
+        assert not missing, f"这些项在 default_config.toml 里没有对应的键：{missing}"
+
+    def test_declared_defaults_match_the_template(self):
+        """``Field.default`` 必须是**代码里真正的默认值**。写错了的话，配置文件里
+        没写这一项时页面会显示一个假值，用户一点保存就把假值固化进文件。
+        """
+        template = tomllib.loads(
+            pathlib.Path(
+                str(Path(__import__("ipclick").__file__).parent / "configs" / "default_config.toml")
+            ).read_text(encoding="utf-8")
+        )
+        wrong: list[str] = []
+        for name, field in FIELDS.items():
+            if field.default is None:
+                continue
+            node: Any = template
+            for part in field.section.split("."):
+                node = node.get(part, {})
+            actual = node.get(field.key)
+            if isinstance(actual, bool) or isinstance(field.default, bool):
+                same = bool(actual) == bool(field.default)
+            else:
+                same = str(actual) == str(field.default)
+            if not same:
+                wrong.append(f"{name}: 声明 {field.default!r}，模板里是 {actual!r}")
+        assert not wrong, wrong
 
 
 class TestParseNodes:
@@ -441,20 +609,104 @@ class TestConfigPage:
         assert not any("要重启" in m for m in messages)
 
 
-class TestNodesPage:
-    def test_save_nodes(self, pages: WebPages):
-        html = pages.save_nodes(
-            {"new_node_address": "10.0.0.7:9527", "new_node_id": "n7", "new_node_weight": "100"},
+class TestClusterTab:
+    """节点管理并进了配置页的「集群设置」——它本来就是集群配置的一部分。"""
+
+    def test_add_node(self, pages: WebPages):
+        html = pages.add_node(
+            {"new_node_host": "10.0.0.7", "new_node_port": "9528", "new_node_id": "n7"},
             "admin",
             "csrf",
         )
         parsed = tomllib.loads(pages.config_path.read_text(encoding="utf-8"))
         assert parsed["CLUSTER"]["nodes"][0]["id"] == "n7"
+        assert parsed["CLUSTER"]["nodes"][0]["address"] == "10.0.0.7:9528"
+        assert "已添加节点" in html
+
+    def test_add_node_defaults_the_port(self, pages: WebPages):
+        """加机器是日常操作，每次让人把端口想一遍纯属拖慢。"""
+        from ipclick.web.pages import NODE_PORT_BASE
+
+        _ = pages.add_node({"new_node_host": "10.0.0.8"}, "admin", "csrf")
+        parsed = tomllib.loads(pages.config_path.read_text(encoding="utf-8"))
+        assert parsed["CLUSTER"]["nodes"][0]["address"] == f"10.0.0.8:{NODE_PORT_BASE}"
+        # id 留空则用 host:port
+        assert parsed["CLUSTER"]["nodes"][0]["id"] == f"10.0.0.8:{NODE_PORT_BASE}"
+
+    def test_port_increments_past_used_ones(self, pages: WebPages):
+        """连着加三台，端口应该是 19001 / 19002 / 19003，而不是全撞在一起。"""
+        from ipclick.web.pages import NODE_PORT_BASE
+
+        for index in range(3):
+            _ = pages.add_node({"new_node_host": f"10.0.0.{index}"}, "u", "c")
+        parsed = tomllib.loads(pages.config_path.read_text(encoding="utf-8"))
+        ports = [int(n["address"].rpartition(":")[2]) for n in parsed["CLUSTER"]["nodes"]]
+        assert ports == [NODE_PORT_BASE, NODE_PORT_BASE + 1, NODE_PORT_BASE + 2]
+
+    def test_remove_node(self, pages: WebPages):
+        """删除是独立按钮：和「保存」共用表单的话，点一次删除会把页面上其余
+        未提交的改动一起写进去。"""
+        _ = pages.add_node({"new_node_host": "10.0.0.1", "new_node_id": "keep"}, "u", "c")
+        _ = pages.add_node({"new_node_host": "10.0.0.2", "new_node_id": "drop"}, "u", "c")
+        html = pages.remove_node({"remove_node": "drop"}, "u", "c")
+        parsed = tomllib.loads(pages.config_path.read_text(encoding="utf-8"))
+        assert [n["id"] for n in parsed["CLUSTER"]["nodes"]] == ["keep"]
+        assert "已移除节点 drop" in html
+
+    def test_remove_unknown_node_is_reported(self, pages: WebPages):
+        assert "没有 id 为" in pages.remove_node({"remove_node": "nope"}, "u", "c")
+
+    def test_remove_keeps_other_pending_edits_out(self, pages: WebPages):
+        """删除表单里只有节点 id，不带配置字段——所以不可能连带写进别的改动。"""
+        _ = pages.add_node({"new_node_host": "10.0.0.1", "new_node_id": "a"}, "u", "c")
+        before = tomllib.loads(pages.config_path.read_text(encoding="utf-8"))["SERVER"]["max_workers"]
+        _ = pages.remove_node({"remove_node": "a", "SERVER.max_workers": "999"}, "u", "c")
+        after = tomllib.loads(pages.config_path.read_text(encoding="utf-8"))["SERVER"]["max_workers"]
+        assert after == before
+
+    def test_add_node_needs_a_host(self, pages: WebPages):
+        assert "请填 IP" in pages.add_node({"new_node_host": "  "}, "admin", "csrf")
+
+    def test_add_node_rejects_duplicate_id(self, pages: WebPages):
+        _ = pages.add_node({"new_node_host": "10.0.0.7", "new_node_id": "dup"}, "u", "c")
+        assert "已经有一个" in pages.add_node({"new_node_host": "10.0.0.9", "new_node_id": "dup"}, "u", "c")
+
+    def test_add_node_rejects_bad_port(self, pages: WebPages):
+        assert "端口必须是数字" in pages.add_node({"new_node_host": "h", "new_node_port": "abc"}, "u", "c")
+
+    def test_saving_the_cluster_tab_writes_nodes(self, pages: WebPages):
+        html = pages.save_config(
+            {"tab": "cluster", "node_id_0": "a", "node_address_0": "1.1.1.1:1", "node_weight_0": "100"},
+            "admin",
+            "csrf",
+        )
+        parsed = tomllib.loads(pages.config_path.read_text(encoding="utf-8"))
+        assert parsed["CLUSTER"]["nodes"][0]["address"] == "1.1.1.1:1"
         assert "已写回" in html
 
+    def test_clearing_an_address_deletes_the_node(self, pages: WebPages):
+        _ = pages.add_node({"new_node_host": "1.1.1.1", "new_node_id": "gone"}, "u", "c")
+        _ = pages.save_config({"tab": "cluster", "node_id_0": "gone", "node_address_0": ""}, "u", "c")
+        parsed = tomllib.loads(pages.config_path.read_text(encoding="utf-8"))
+        assert parsed["CLUSTER"]["nodes"] == []
+
     def test_bad_node_rejected(self, pages: WebPages):
-        html = pages.save_nodes({"new_node_address": "not-an-address"}, "admin", "csrf")
+        html = pages.save_config(
+            {"tab": "cluster", "node_id_0": "a", "node_address_0": "not-an-address"}, "admin", "csrf"
+        )
         assert "host:port" in html
+
+    def test_forward_toggle_writes_on_off_not_true_false(self, pages: WebPages):
+        """配置里是 "on"/"off" 字符串，写成 true/false 的话 ClusterConfig 不认。"""
+        _ = pages.save_config(
+            {"tab": "cluster", "__present__CLUSTER.forward_on": "1", "CLUSTER.forward_on": "on"}, "u", "c"
+        )
+        parsed = tomllib.loads(pages.config_path.read_text(encoding="utf-8"))
+        assert parsed["CLUSTER"]["forward"] == "on"
+
+        _ = pages.save_config({"tab": "cluster", "__present__CLUSTER.forward_on": "1"}, "u", "c")
+        parsed = tomllib.loads(pages.config_path.read_text(encoding="utf-8"))
+        assert parsed["CLUSTER"]["forward"] == "off"
 
     def test_existing_token_is_preserved(self, pages: WebPages):
         """一次网页保存不能把配置文件里手写的令牌抹掉。"""
@@ -463,9 +715,38 @@ class TestNodesPage:
             encoding="utf-8",
         )
         pages.config = Settings({"CLUSTER": {"nodes": [{"id": "a", "address": "1.1.1.1:1", "token": "keepme"}]}})
-        _ = pages.save_nodes({"node_id_0": "a", "node_address_0": "1.1.1.1:1", "node_weight_0": "100"}, "u", "c")
+        _ = pages.save_config(
+            {"tab": "cluster", "node_id_0": "a", "node_address_0": "1.1.1.1:1", "node_weight_0": "100"}, "u", "c"
+        )
         parsed = tomllib.loads(pages.config_path.read_text(encoding="utf-8"))
         assert parsed["CLUSTER"]["nodes"][0]["token"] == "keepme"
+
+
+class TestOnlyChangedValuesAreReported:
+    """表单一次会把整页字段都提交上来。不比对旧值的话，改一个日志级别会被告知
+    "这 7 项需要重启"——人于是开始无视这句提示，而它在真需要时是唯一的信号。"""
+
+    def test_unchanged_fields_are_not_written(self, pages: WebPages):
+        from ipclick.web.editable import FIELDS, current_value
+
+        field = FIELDS["SERVER.max_workers"]
+        same = str(current_value(pages.config, field))
+        html = pages.save_config({"tab": "basic", "SERVER.max_workers": same}, "u", "c")
+        assert "没有可保存的改动" in html
+
+    def test_changed_field_is_written_and_flagged(self, pages: WebPages):
+        html = pages.save_config({"tab": "basic", "SERVER.max_workers": "77"}, "u", "c")
+        assert "1 项" in html
+        assert "worker 线程数" in html
+
+    def test_int_float_equality_does_not_count_as_a_change(self, pages: WebPages):
+        """toml 里写 60 读出来是 int，而超时是 float 字段，解析出来是 60.0。"""
+        from ipclick.web.pages import _same_value  # pyright: ignore[reportPrivateUsage]
+
+        assert _same_value(60, 60.0) is True
+        # bool 是 int 的子类：True == 1 不能被当成"没变"
+        assert _same_value(1, True) is False
+        assert _same_value(True, True) is True
 
 
 class TestTracePage:
@@ -480,11 +761,53 @@ class TestTracePage:
         """
         html = pages.trace_page({}, "admin", "csrf")
         assert "data-live-src=" in html
+        assert f'data-live-interval="{DEFAULT_LIVE_MS}"' in html
         assert 'http-equiv="refresh"' not in html, "不该再整页重载"
 
     def test_live_can_be_turned_off(self, pages: WebPages):
-        html = pages.trace_page({"_": "", "live": ""}, "admin", "csrf")
-        assert "data-live-src=" not in html
+        """关掉的表达方式是间隔 0，**不是**把 data-live-src 去掉。
+
+        0.4 是去掉属性，于是前端再也找不到那个元素，"关闭"这一档一按就没法
+        在前端重新打开——必须重新提交表单整页重载，而重载正好丢掉这一页最
+        在意的滚动位置。
+        """
+        html = pages.trace_page({"_": "", "live": "0"}, "admin", "csrf")
+        assert 'data-live-interval="0"' in html
+        assert "data-live-src=" in html, "元素要留着，否则前端开不回来"
+        assert "实时刷新已关闭" in html
+
+    def test_live_empty_value_still_means_off(self, pages: WebPages):
+        """0.4 的复选框不勾选时提交的是空串。老链接不该变成"默认开"。"""
+        assert 'data-live-interval="0"' in pages.trace_page({"_": "", "live": ""}, "admin", "csrf")
+
+    def test_live_legacy_checkbox_value_maps_to_default(self, pages: WebPages):
+        """``live=1`` 是 0.4 复选框的取值。老书签点开该落到默认档，
+        而不是掉进"取值不认识"的分支变成关闭。
+        """
+        html = pages.trace_page({"_": "", "live": "1"}, "admin", "csrf")
+        assert f'data-live-interval="{DEFAULT_LIVE_MS}"' in html
+
+    @pytest.mark.parametrize("ms", [ms for ms, _, _ in LIVE_INTERVALS])
+    def test_live_every_tier_round_trips(self, pages: WebPages, ms: int):
+        html = pages.trace_page({"_": "", "live": str(ms)}, "admin", "csrf")
+        assert f'data-live-interval="{ms}"' in html
+        assert f'id="live-{ms}" name="live" value="{ms}" checked' in html, "该档的按钮要是选中态"
+
+    def test_live_rejects_arbitrary_intervals(self, pages: WebPages):
+        """只认档位表里的值。放开任意值的话，有人填 100ms，服务端的 worker
+        线程就全耗在渲染这一页上了。
+        """
+        for bogus in ("50", "-1000", "999999", "abc,def"):
+            html = pages.trace_page({"_": "", "live": bogus}, "admin", "csrf")
+            assert f'data-live-interval="{DEFAULT_LIVE_MS}"' in html, bogus
+
+    def test_live_control_has_no_inline_handler(self, pages: WebPages):
+        """CSP 只放行两段脚本的 sha256 哈希，哈希覆盖不到事件处理器属性。
+        写了 onchange= 会被静默拦掉——表现为"点了没反应"，最难查的那一类。
+        """
+        html = pages.trace_page({}, "admin", "csrf")
+        assert "onchange=" not in html
+        assert "onclick=" not in html
 
     def test_live_fragment_keeps_the_filters(self, pages: WebPages):
         """刷新片段必须带上过滤条件，否则刷一次就把筛选冲掉了。"""
@@ -605,3 +928,416 @@ class TestBrowserHangFixes:
         assert "冷启动" in html
         assert "重复点击" in html
         assert "不重试" in html
+
+
+class TestSkillPage:
+    """AI 接入页。技能包本身在 tests/test_skill.py 测，这里只测它在 Web 端的出口。"""
+
+    def test_page_renders_the_packaged_skill(self, pages: WebPages):
+        from ipclick import skill
+
+        html = pages.skill_page("admin", "csrf")
+        assert "ipclick skill install" in html
+        assert skill.description()[:20] in html
+
+    def test_markdown_is_the_same_document_as_the_cli(self, pages: WebPages):
+        """两个出口给的必须是同一份——差一个字都会让"照页面做"和"照 CLI 做"
+        得到不同结论。"""
+        from ipclick import skill
+
+        assert pages.skill_markdown() == skill.markdown()
+
+    def test_page_offers_the_raw_download(self, pages: WebPages):
+        html = pages.skill_page("admin", "csrf")
+        assert 'href="/skill.md"' in html
+
+    def test_skill_body_is_escaped(self, pages: WebPages):
+        """技能正文里有 <b> 之类的字面量吗？没有也要转义——这一页嵌的是别的
+        文件的内容，不转义就是给未来埋雷。"""
+        html = pages.skill_page("admin", "csrf")
+        assert "<script>" not in pages.skill_markdown() or "&lt;script&gt;" in html
+
+
+class TestTestPageParameters:
+    """「试一试」的表单字段必须和 SDK 的 request() 对齐。
+
+    对不齐的后果很隐蔽：页面上试通了，代码里多传一个 proxy 就不通——而这一页
+    存在的全部理由就是"这里看到的行为等于线上行为"。
+    """
+
+    def _request(self, pages: WebPages, form: dict[str, str]):
+        return pages._build_request({"url": "http://example.com/x", **form}, "http://example.com/x")  # pyright: ignore[reportPrivateUsage]
+
+    def test_query_params_become_json(self, pages: WebPages):
+        """协议里 params 是一个字符串字段（服务端按 JSON 解析），不是 map。"""
+        import json
+
+        request = self._request(pages, {"params": "foo=bar\nq=中文"})
+        assert json.loads(request.params) == {"foo": "bar", "q": "中文"}
+
+    def test_cookies_are_parsed(self, pages: WebPages):
+        request = self._request(pages, {"cookies": "sid=abc\ntheme=dark"})
+        assert dict(request.cookies) == {"sid": "abc", "theme": "dark"}
+
+    def test_json_body_uses_the_json_field(self, pages: WebPages):
+        """data 与 json 是两个互斥字段：发 json 时服务端才会带 Content-Type。"""
+        request = self._request(pages, {"body": '{"a":1}', "body_kind": "json"})
+        assert request.json == '{"a":1}'
+        assert not request.data
+
+    def test_raw_body_uses_the_data_field(self, pages: WebPages):
+        request = self._request(pages, {"body": "a=1&b=2", "body_kind": "raw"})
+        assert request.data == b"a=1&b=2"
+        assert not request.json
+
+    def test_bad_json_body_is_rejected(self, pages: WebPages):
+        with pytest.raises(ValidationError, match="JSON"):
+            self._request(pages, {"body": "{不是 json", "body_kind": "json"})
+
+    def test_custom_proxy_passes_through(self, pages: WebPages):
+        request = self._request(pages, {"proxy_mode": "custom", "proxy_url": "http://p:8080"})
+        assert request.proxy == "http://p:8080"
+
+    def test_config_proxy_without_config_is_rejected(self, pages: WebPages):
+        """选了「用配置里的代理」但 [PROXY] 是空的——静默直连会让人以为验过了代理。"""
+        with pytest.raises(ValidationError, match=r"\[PROXY\]"):
+            self._request(pages, {"proxy_mode": "config"})
+
+    def test_no_proxy_by_default(self, pages: WebPages):
+        assert self._request(pages, {}).proxy == ""
+
+    def test_impersonate_only_for_curl_cffi(self, pages: WebPages):
+        assert self._request(pages, {"impersonate": "safari180"}).impersonate == "safari180"
+        # 换成浏览器适配器时这一项没有意义，不该发过去
+        assert self._request(pages, {"adapter": "browser", "impersonate": "safari180"}).impersonate == ""
+
+    def test_retries_default_to_zero(self, pages: WebPages):
+        """诊断路径要看的是**第一次**失败的真实原因。"""
+        assert self._request(pages, {}).max_retries == 0
+
+    def test_retries_are_capped(self, pages: WebPages):
+        from ipclick.web.pages import TEST_RETRIES_MAX
+
+        assert self._request(pages, {"max_retries": "999"}).max_retries == TEST_RETRIES_MAX
+
+    def test_backoff_only_sent_with_retries(self, pages: WebPages):
+        assert not self._request(pages, {"retry_backoff": "3"}).HasField("retry_backoff_seconds")
+        assert self._request(pages, {"max_retries": "2", "retry_backoff": "3"}).retry_backoff_seconds == 3.0
+
+    def test_switches_default_on(self, pages: WebPages):
+        """未提交过表单时（比如从 curl 导入）两个开关按 SDK 的默认值来。"""
+        request = self._request(pages, {"verify": "on", "allow_redirects": "on"})
+        assert request.verify_ssl is True
+        assert request.allow_redirects is True
+
+    def test_switches_can_be_turned_off(self, pages: WebPages):
+        request = self._request(pages, {})
+        assert request.verify_ssl is False
+        assert request.allow_redirects is False
+
+    def test_allowed_status_codes(self, pages: WebPages):
+        assert list(self._request(pages, {"allowed_status_codes": "200, 404"}).allowed_status_codes) == [200, 404]
+
+    def test_bad_status_code_is_rejected(self, pages: WebPages):
+        """写错一个字符就整项丢掉的话，用户以为设了而实际没设。"""
+        with pytest.raises(ValidationError, match="非数字"):
+            self._request(pages, {"allowed_status_codes": "200, abc"})
+
+    def test_bad_automation_config_is_rejected(self, pages: WebPages):
+        with pytest.raises(ValidationError, match="JSON"):
+            self._request(pages, {"automation_config": "{oops"})
+
+    def test_timeout_is_capped(self, pages: WebPages):
+        from ipclick.web.pages import TEST_TIMEOUT_MAX
+
+        assert self._request(pages, {"timeout": "9999"}).timeout_seconds == TEST_TIMEOUT_MAX
+
+    def test_bad_number_names_the_field(self, pages: WebPages):
+        with pytest.raises(ValidationError, match="超时"):
+            self._request(pages, {"timeout": "abc"})
+
+    def test_page_exposes_every_field(self, pages: WebPages):
+        html = pages.test_page({}, None, "admin", "csrf")
+        for name in (
+            "params",
+            "cookies",
+            "proxy_mode",
+            "proxy_url",
+            "impersonate",
+            "max_retries",
+            "retry_backoff",
+            "allowed_status_codes",
+            "verify",
+            "allow_redirects",
+            "automation_config",
+            "body_kind",
+        ):
+            assert f'name="{name}"' in html, name
+
+    def test_script_box_hidden_when_server_disallows(self, pages: WebPages):
+        """allow_scripts 关着时给出理由，而不是放一个填了也不生效的框。"""
+        html = pages.test_page({}, None, "admin", "csrf")
+        assert 'name="automation_script"' not in html
+        assert "allow_scripts" in html
+
+    def test_retry_hint_matches_the_real_cap(self):
+        """提示文案和真正的上界分居两个模块，必须盯着它们不失步。"""
+        from ipclick.web.pages import TEST_RETRIES_MAX
+        from ipclick.web.templates import TEST_RETRIES_MAX_HINT
+
+        assert TEST_RETRIES_MAX == TEST_RETRIES_MAX_HINT
+
+
+class TestTargetNodes:
+    def test_nodes_listed_even_without_forwarding(self, pages: WebPages):
+        """0.4 只在开了转发时才显示这个下拉框。配了节点却看不到它的人，
+        并不知道那层区别，只会觉得功能没做。"""
+        pages.config = Settings(
+            {"CLUSTER": {"nodes": [{"id": "a", "address": "10.0.0.1:9528"}]}}  # 没有 forward = "on"
+        )
+        nodes = pages._target_nodes()  # pyright: ignore[reportPrivateUsage]
+        assert [n["id"] for n in nodes] == ["a"]
+        assert nodes[0]["forwarding"] is False
+
+    def test_no_nodes_means_no_selector(self, pages: WebPages):
+        pages.config = Settings({"CLUSTER": {}})
+        assert pages._target_nodes() == []  # pyright: ignore[reportPrivateUsage]
+        assert 'name="target_node"' not in pages.test_page({}, None, "admin", "csrf")
+
+    def test_unknown_node_is_rejected(self, pages: WebPages):
+        pages.config = Settings({"CLUSTER": {"nodes": [{"id": "a", "address": "10.0.0.1:9528"}]}})
+        result = pages.run_test({"url": "http://example.com/x", "target_node": "nope"})
+        assert result.get("error_only") is True
+        assert "不在集群节点列表里" in result["error"]
+
+
+class TestRemoteComponents:
+    """在**某台子节点**上装组件。
+
+    集群里每台机器都要各自装一遍适配器，逐台 SSH 上去敲命令是部署时最烦的一步。
+    这一组守的是那条路的两端：默认拒绝，以及拒绝时说得清怎么打开。
+    """
+
+    def test_unknown_node_is_reported(self, pages: WebPages):
+        pages.config = Settings({"CLUSTER": {"nodes": [{"id": "a", "address": "10.0.0.1:19001"}]}})
+        result = pages.remote_component("nope", "list")
+        assert result["ok"] is False
+        assert "不在集群节点列表里" in result["message"]
+
+    def test_unreachable_node_is_readable(self, pages: WebPages):
+        """连不上时给一句人话，而不是一坨 gRPC 状态码。"""
+        pages.config = Settings({"CLUSTER": {"nodes": [{"id": "a", "address": "127.0.0.1:1"}]}})
+        result = pages.remote_component("a", "list")
+        assert result["ok"] is False
+        assert "连不上节点 a" in result["message"]
+
+    def test_local_path_unchanged_when_no_node_given(self, pages: WebPages):
+        """不选机器时还是走本机那条路，一个字都不该变。"""
+        ok, message = pages.component_action("install", "不存在的组件")
+        assert ok is False
+        assert "未知的组件" in message
+
+    def test_default_is_off(self):
+        """打开它等于"能调本节点 gRPC 的人可以在本机跑 pip"，不能随升级默认获得。"""
+        from ipclick.services.task_service import TaskService
+
+        service = TaskService(Settings({}))
+        try:
+            assert service.remote_install_allowed is False
+        finally:
+            service.cleanup()
+
+    def test_opt_in_flag(self):
+        from ipclick.services.task_service import TaskService
+
+        service = TaskService(Settings({"CLUSTER": {"allow_remote_install": True}}))
+        try:
+            assert service.remote_install_allowed is True
+        finally:
+            service.cleanup()
+
+    def test_denied_when_off(self):
+        """拒绝时必须说清要改哪一项——笼统的"失败"等于把答案藏起来。"""
+        import grpc
+
+        from ipclick.dto.proto import task_pb2
+        from ipclick.services.task_service import TaskService
+
+        class _Ctx:
+            code = None
+            details = ""
+
+            def set_code(self, code: object) -> None:
+                self.code = code
+
+            def set_details(self, details: str) -> None:
+                self.details = details
+
+        service = TaskService(Settings({}))
+        context = _Ctx()
+        try:
+            response = service.Component(task_pb2.ComponentReq(op="list"), cast(Any, context))
+        finally:
+            service.cleanup()
+        assert response.ok is False
+        assert context.code is grpc.StatusCode.PERMISSION_DENIED
+        assert "allow_remote_install" in context.details
+
+    def test_list_when_allowed(self):
+        import json
+
+        from ipclick.dto.proto import task_pb2
+        from ipclick.services.task_service import TaskService
+
+        class _Ctx:
+            def set_code(self, code: object) -> None: ...
+            def set_details(self, details: str) -> None: ...
+
+        service = TaskService(Settings({"CLUSTER": {"allow_remote_install": True}}))
+        try:
+            response = service.Component(task_pb2.ComponentReq(op="list"), cast(Any, _Ctx()))
+        finally:
+            service.cleanup()
+        assert response.ok is True
+        names = {c["name"] for c in json.loads(response.components_json)}
+        assert "camoufox" in names
+
+    def test_unknown_op_is_rejected(self):
+        import grpc
+
+        from ipclick.dto.proto import task_pb2
+        from ipclick.services.task_service import TaskService
+
+        class _Ctx:
+            code = None
+
+            def set_code(self, code: object) -> None:
+                self.code = code
+
+            def set_details(self, details: str) -> None: ...
+
+        service = TaskService(Settings({"CLUSTER": {"allow_remote_install": True}}))
+        context = _Ctx()
+        try:
+            response = service.Component(task_pb2.ComponentReq(op="rm -rf /"), cast(Any, context))
+        finally:
+            service.cleanup()
+        assert response.ok is False
+        assert context.code is grpc.StatusCode.INVALID_ARGUMENT
+
+    def test_whitelist_still_applies_remotely(self):
+        """包名走白名单这条在远程一侧同样成立——对端跑的是同一个 InstallManager。"""
+        from ipclick.dto.proto import task_pb2
+        from ipclick.services.task_service import TaskService
+
+        class _Ctx:
+            def set_code(self, code: object) -> None: ...
+            def set_details(self, details: str) -> None: ...
+
+        service = TaskService(Settings({"CLUSTER": {"allow_remote_install": True}}))
+        try:
+            response = service.Component(
+                task_pb2.ComponentReq(op="install", extra="requests; rm -rf /"), cast(Any, _Ctx())
+            )
+        finally:
+            service.cleanup()
+        assert response.ok is False
+        assert "未知的组件" in response.message
+
+    def test_job_shape_matches_the_local_one(self):
+        """前端那段渲染进度条的 JS 是同一份，两边差一个字段名就会在远程那条路上
+        静默失效。"""
+        from ipclick.dto.proto import task_pb2
+        from ipclick.web.installer import Job
+        from ipclick.web.pages import _job_from_pb  # pyright: ignore[reportPrivateUsage]
+
+        local = Job(id="j", title="t", command=("x",)).snapshot()
+        remote = _job_from_pb(task_pb2.ComponentJob(id="j", title="t", command="x", percent=-1.0))
+        assert set(remote) == set(local)
+        assert set(remote["progress"]) == set(local["progress"])
+        # -1 是"量不出来"的哨兵（proto3 的 double 没有 null）
+        assert remote["progress"]["percent"] is None
+
+
+class TestRuntimePortDisclosure:
+    """`ipclick run --port X` 不改配置文件，于是配置页那一格显示的是文件里的
+    9528，而进程实际在 X 上。0.5.0 之前页面对此一个字都不说——这是"端口有歧义"
+    那条反馈里最难查的一半：改它、保存、重启，一切"正常"，只是端口不是那个。
+    """
+
+    def test_mismatch_is_called_out(self, pages: WebPages):
+        pages.runtime_ports = {"SERVER.port": 10086}
+        html = pages.config_page("admin", "csrf")
+        assert "当前实际在 10086" in html
+
+    def test_silent_when_they_agree(self, pages: WebPages):
+        from ipclick.web.editable import FIELDS, current_value
+
+        pages.runtime_ports = {"SERVER.port": int(current_value(pages.config, FIELDS["SERVER.port"]))}
+        assert "当前实际在" not in pages.config_page("admin", "csrf")
+
+    def test_silent_when_nothing_was_overridden(self, pages: WebPages):
+        pages.runtime_ports = {}
+        assert "当前实际在" not in pages.config_page("admin", "csrf")
+
+    def test_display_only_never_written_back(self, pages: WebPages):
+        """只影响显示。要是它能被写回文件，`--port` 就会在下次保存时被固化进
+        配置——那是把一个临时覆盖变成永久的，没人会预期。
+        """
+        from ipclick.web.editable import FIELDS, current_value
+
+        pages.runtime_ports = {"SERVER.port": 10086}
+        _ = pages.config_page("admin", "csrf")
+        assert int(current_value(pages.config, FIELDS["SERVER.port"])) != 10086
+
+
+class TestTimezone:
+    """时间列必须按**看的人**的时区显示，不是服务端的。
+
+    服务端渲染 ``datetime.fromtimestamp()`` 得到的是服务端本地时间。只有一台机器、
+    人就坐在它旁边时没问题；一旦服务端跑在 UTC 的容器里（Docker 默认就是），
+    东八区的人看到的每一条都慢八小时。而且症状很温和——"时间看着像那么回事，
+    就是和自己的表对不上"——很少有人会把它当成 bug 报出来。
+    """
+
+    def test_record_iso_carries_an_offset(self):
+        """不带偏移量的话浏览器只能猜，猜错就是差几个钟头。"""
+        record = TraceRecord(
+            ts=1_755_000_000.0, uuid="u", node_id="n", adapter="curl_cffi",
+            method="GET", url="http://x", status_code=200, duration_ms=1, size=1,
+        )
+        assert re.search(r"[+-]\d{2}:\d{2}$", record.iso), f"没有时区偏移：{record.iso}"
+        assert datetime.fromisoformat(record.iso).timestamp() == pytest.approx(1_755_000_000.0, abs=1)
+
+    def test_trace_table_emits_a_time_element(self, pages: WebPages):
+        _ = pages.run_test({"url": "http://example.com/tz"})
+        html = pages.trace_page({}, "admin", "csrf")
+        assert "<time datetime=" in html
+
+    def test_the_fallback_text_is_still_a_readable_time(self, pages: WebPages):
+        """没有 JS 时标签里的文字要仍然可读（维持旧行为），不能变成空白。"""
+        _ = pages.run_test({"url": "http://example.com/tz"})
+        html = pages.trace_page({}, "admin", "csrf")
+        match = re.search(r"<time datetime=\"[^\"]+\">([^<]+)</time>", html)
+        assert match is not None
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", match.group(1))
+
+    def test_dashboard_recent_requests_too(self):
+        """总览的「最近请求」和请求流走的是同一个表格渲染函数，别只修一处。"""
+        from ipclick.web.templates import render_dashboard
+
+        record = TraceRecord(
+            ts=1_755_000_000.0, uuid="u", node_id="n", adapter="curl_cffi",
+            method="GET", url="http://example.com/tz", status_code=200, duration_ms=1, size=1,
+        )
+        html = render_dashboard({"recent": [record], "trace": {}}, "admin", "csrf", False)
+        assert "<time datetime=" in html
+
+    def test_daily_buckets_say_they_are_server_side(self):
+        """按天趋势是 SQLite 按服务端时区分好的桶——浏览器换算只能挪显示，
+        挪不动已经分好的桶。所以要如实标注，别让人以为是自己那边的"今天"。
+        """
+        from ipclick.web.templates import _daily
+
+        html = _daily([{"day": "2026-08-18", "total": 3, "ok": 2, "failed": 1, "avg_ms": 12}])
+        assert "服务端本地时区" in html

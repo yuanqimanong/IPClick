@@ -99,11 +99,16 @@ class TestRegistry:
     def test_default_adapter_is_curl_cffi(self):
         assert get_default_adapter().adapter_name == "curl_cffi"
 
-    def test_unimplemented_adapter_raises_adapter_error(self):
-        """枚举里还留着 undetected_chromedriver，但没实现——要给出清楚的报错，
-        而不是静默回退到别的适配器。"""
-        with pytest.raises(AdapterError, match="尚未支持"):
+    def test_never_implemented_adapter_says_it_wont_be(self):
+        """undetected_chromedriver 从来没实现过，也不打算实现。
+
+        报"尚未支持"是在暗示"以后会有"，于是有人会去等、去提 issue 问什么时候支持。
+        它和 httpx / requests 一样归入"已移除"，明确说不会有、该改用什么。
+        """
+        with pytest.raises(AdapterError, match="已移除") as excinfo:
             get_adapter("undetected_chromedriver")
+        assert "patchright" in str(excinfo.value)
+        assert "尚未支持" not in str(excinfo.value), "这句话在暗示以后会实现"
 
     def test_error_lists_available_adapters(self):
         with pytest.raises(AdapterError, match="curl_cffi"):

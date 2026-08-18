@@ -21,6 +21,7 @@ from typing import Any, Protocol
 
 from ipclick.cluster.node import Node
 from ipclick.exceptions import ConfigError
+from ipclick.ports import DEFAULT_GRPC_PORT
 from ipclick.utils.log_util import log
 
 
@@ -44,7 +45,7 @@ class DiscoveryConfig:
     #: dns 模式：要解析的域名
     dns_name: str = ""
     #: dns 模式：解析出来的地址统一用这个端口
-    port: int = 9527
+    port: int = DEFAULT_GRPC_PORT
     #: 重新解析的间隔（秒）。0 表示只在启动时解析一次。
     refresh_interval: float = 30.0
 

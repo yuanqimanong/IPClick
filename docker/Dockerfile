@@ -53,11 +53,11 @@ RUN mkdir -p /home/ipclick/.ipclick /app/data \
 
 USER ipclick
 
-EXPOSE 9527
+EXPOSE 9528 9527
 
 # 走 grpc.health.v1 标准健康检查，而不是只探 TCP 端口通不通——
 # 端口能连上不代表服务真的在可服务状态（例如正在优雅停机）。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ipclick health --host 127.0.0.1 --port 9527 --timeout 3 || exit 1
+    CMD ipclick health --host 127.0.0.1 --port 9528 --timeout 3 || exit 1
 
 CMD ["ipclick", "run"]

@@ -58,8 +58,26 @@ def _apply_env_overrides(config: Settings) -> None:
         config.setdefault(section, {})[key] = value
 
 
-@lru_cache(maxsize=3)
-def load_config(config_path: str | Path | None = None) -> Settings:
+def candidate_names(port: int | None = None) -> list[str]:
+    """自动查找时按什么顺序试文件名。
+
+    带 ``--port`` 时**先**找 ``ipclick-<端口>.toml``。这是为"一台机器上起多个实例"
+    准备的：``ipclick run --port 8001`` 与 ``--port 8002`` 各读各的配置，于是两者
+    可以有不同的 worker 数、不同的限流、不同的链路库。
+
+    0.4 只能靠 ``-c`` 一个个指过去，而那要求每次启动都记得带上——漏一次的症状是
+    两个实例共用一份配置、往同一个 trace 库里写，界面上完全看不出来。
+
+    找不到按端口命名的那个就回落到 ``ipclick.toml``，所以单实例部署一个字都不用改。
+    """
+    names: list[str] = []
+    if port:
+        names += [f"ipclick-{port}.toml", f".ipclick-{port}.toml"]
+    return [*names, "ipclick.toml", ".ipclick.toml"]
+
+
+@lru_cache(maxsize=8)
+def load_config(config_path: str | Path | None = None, port: int | None = None) -> Settings:
     # .env 先加载：它只填补尚未设置的环境变量，之后 ENV_OVERRIDES 统一读取。
     load_dotenv()
 
@@ -68,8 +86,8 @@ def load_config(config_path: str | Path | None = None) -> Settings:
     if config_path:
         user_path = Path(config_path)
     else:
-        # 自动查找常见文件名
-        for name in ["ipclick.toml", ".ipclick.toml"]:
+        # 自动查找常见文件名（带端口的优先，见 candidate_names）
+        for name in candidate_names(port):
             if Path(name).exists():
                 user_path = Path(name)
                 break
@@ -104,6 +122,7 @@ __all__ = [
     "DEFAULT_CONFIG_PATH",
     "ENV_OVERRIDES",
     "HOME_CONFIG_PATH",
+    "candidate_names",
     "example_config",
     "example_env",
     "load_config",

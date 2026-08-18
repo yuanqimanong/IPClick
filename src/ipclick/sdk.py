@@ -20,6 +20,7 @@ from ipclick.exceptions import (
     ValidationError,
 )
 from ipclick.limiter import HostLimitTimeout
+from ipclick.ports import DEFAULT_GRPC_PORT, port_hint
 from ipclick.secrets import proxy_config
 from ipclick.tls import TLSSettings, channel_credentials, channel_options, describe
 from ipclick.utils.config_util import Settings
@@ -194,7 +195,7 @@ class ClientBase:
         # 优先级：函数参数 > 配置文件 > 内置默认值
         server_config: dict[str, Any] = dict(self.config.get("SERVER", {}))
         self.host: str = host or server_config.get("host") or "127.0.0.1"
-        self.port: int = int(port or server_config.get("port") or 9527)
+        self.port: int = int(port or server_config.get("port") or DEFAULT_GRPC_PORT)
 
         # 服务端可能监听 "[::]"/"0.0.0.0"（所有网卡），但客户端不能拿它当目标地址
         if self.host in ("[::]", "::", "0.0.0.0", ""):
@@ -259,6 +260,11 @@ class ClientBase:
         # 要么调大 [DOWNLOADER] 里的 per_host 限额。
         if code is grpc.StatusCode.RESOURCE_EXHAUSTED:
             return HostLimitTimeout(f"服务端限流：{details}")
+        # 连不上时附一句端口提示。0.5.0 把 9527 让给了 Web 管理端，从 0.4 升上来
+        # 的调用方仍然连 9527 就会握到一个 HTTP 服务上——gRPC 报出来的错误
+        # （UNAVAILABLE / 握手失败）和"端口变了"这件事看不出任何关系。
+        if code is grpc.StatusCode.UNAVAILABLE:
+            return TransportError(f"gRPC 调用失败 [{code}]: {details}{port_hint(self.port)}")
         return TransportError(f"gRPC 调用失败 [{code}]: {details}")
 
     def _should_retry_rpc(self, error: grpc.RpcError, attempt: int) -> bool:
@@ -490,7 +496,7 @@ class Downloader(ClientBase):
             return self.download(task)
         except TransportError as e:
             # 只吞传输层失败：调用方拿到的东西必须始终满足 -> DownloadResponse
-            # 的签名（examples 也是这么用的）。
+            # 的签名（Wiki 的「SDK 用法」也是这么用的）。
             #
             # 注意这里不能写 `except IPClickError`——ValidationError 也是它的子类，
             # 于是「适配器名拼错」这类参数错误会被伪装成 status_code == -1 的

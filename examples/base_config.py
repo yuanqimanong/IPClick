@@ -1,5 +1,0 @@
-BASE_URL = "https://httpbun.com"
-HTTPBIN_GET_URL = f"{BASE_URL}/get"
-HTTPBIN_POST_URL = f"{BASE_URL}/post"
-HTTPBIN_HEADERS_URL = f"{BASE_URL}/headers"
-HTTPBIN_IP_URL = f"{BASE_URL}/ip"

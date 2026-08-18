@@ -52,8 +52,10 @@ class TestConfig:
             DiscoveryConfig.from_config({"discovery": {"mode": "dns"}})
 
     def test_bad_numbers_fall_back(self):
+        from ipclick.ports import DEFAULT_GRPC_PORT
+
         c = DiscoveryConfig.from_config({"discovery": {"port": "abc", "refresh_interval": -1}})
-        assert (c.port, c.refresh_interval) == (9527, 30.0)
+        assert (c.port, c.refresh_interval) == (DEFAULT_GRPC_PORT, 30.0)
 
     def test_zero_refresh_means_once(self):
         assert DiscoveryConfig.from_config({"discovery": {"refresh_interval": 0}}).refresh_interval == 0.0
@@ -72,7 +74,7 @@ class TestStatic:
 
 
 class TestDns:
-    def _discovery(self, *hosts: str, port: int = 9527) -> DnsDiscovery:
+    def _discovery(self, *hosts: str, port: int = 9528) -> DnsDiscovery:
         return DnsDiscovery(
             DiscoveryConfig(mode="dns", dns_name="ipclick.svc", port=port),
             resolver=_addrinfo(*hosts),
@@ -80,7 +82,7 @@ class TestDns:
 
     def test_resolves_to_nodes(self):
         nodes = self._discovery("10.0.0.1", "10.0.0.2").resolve()
-        assert [n.address for n in nodes] == ["10.0.0.1:9527", "10.0.0.2:9527"]
+        assert [n.address for n in nodes] == ["10.0.0.1:9528", "10.0.0.2:9528"]
 
     def test_uses_configured_port(self):
         assert self._discovery("10.0.0.1", port=8080).resolve()[0].port == 8080
@@ -102,7 +104,7 @@ class TestDns:
     def test_id_is_address_so_state_survives_refresh(self):
         """DNS 里没有稳定的节点标识，用地址做 id 才能在多次解析之间对上同一个节点。"""
         nodes = self._discovery("10.0.0.1").resolve()
-        assert nodes[0].id == "10.0.0.1:9527"
+        assert nodes[0].id == "10.0.0.1:9528"
 
     def test_failure_reuses_last_result(self):
         """DNS 抖一下就把整个集群摘空，比暂时用着略微过期的列表危险得多。"""
@@ -194,7 +196,7 @@ class TestPoolRefresh:
         hosts.append("10.0.0.2")  # 扩容触发刷新
         pool.refresh_nodes(force=True)
 
-        kept = next(n for n in pool.snapshot()["nodes"] if n["id"] == "10.0.0.1:9527")
+        kept = next(n for n in pool.snapshot()["nodes"] if n["id"] == "10.0.0.1:9528")
         assert kept["total_requests"] == 2, "刷新把已有节点的统计清零了"
         assert kept["status"] == "unhealthy", "刷新把已有节点的健康状态清零了"
 

@@ -155,8 +155,10 @@ class TestConfigPrecedence:
     def test_bad_env_value_is_ignored_not_fatal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         """环境变量写错了不该让服务起不来，但也不能变成 0 端口。"""
         monkeypatch.chdir(tmp_path)
+        from ipclick.ports import DEFAULT_GRPC_PORT
+
         monkeypatch.setenv("IPCLICK_PORT", "not-a-number")
-        assert load_config()["SERVER"]["port"] == 9527
+        assert load_config()["SERVER"]["port"] == DEFAULT_GRPC_PORT
 
     def test_empty_env_value_is_ignored(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         """`IPCLICK_HOST=` 是"没设"，不是"设成空字符串"。"""
@@ -224,3 +226,50 @@ class TestExampleConfig:
     def test_keeps_comments(self):
         """模板的价值一大半在注释上——被剥掉就只剩一堆没头没尾的键。"""
         assert "#" in example_config()
+
+
+class TestPerPortConfigFiles:
+    """同一台机器上起多个实例：`--port 8001` 与 `--port 8002` 各读各的配置。
+
+    0.4 只能靠 -c 一个个指过去，而那要求每次启动都记得带上——漏一次的症状是
+    两个实例共用一份配置、往同一个 trace 库里写，界面上完全看不出来。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear(self):
+        load_config.cache_clear()
+        yield
+        load_config.cache_clear()
+
+    def test_port_specific_file_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "ipclick.toml").write_text("[SERVER]\nmax_workers = 10\n", encoding="utf-8")
+        (tmp_path / "ipclick-8001.toml").write_text("[SERVER]\nmax_workers = 77\n", encoding="utf-8")
+        assert load_config(None, 8001)["SERVER"]["max_workers"] == 77
+
+    def test_falls_back_to_the_plain_name(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """单实例部署一个字都不用改。"""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "ipclick.toml").write_text("[SERVER]\nmax_workers = 10\n", encoding="utf-8")
+        assert load_config(None, 9999)["SERVER"]["max_workers"] == 10
+
+    def test_no_port_ignores_the_port_specific_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "ipclick.toml").write_text("[SERVER]\nmax_workers = 10\n", encoding="utf-8")
+        (tmp_path / "ipclick-8001.toml").write_text("[SERVER]\nmax_workers = 77\n", encoding="utf-8")
+        assert load_config()["SERVER"]["max_workers"] == 10
+
+    def test_candidate_order(self):
+        from ipclick.config_loader.loader import candidate_names
+
+        assert candidate_names(8001)[0] == "ipclick-8001.toml"
+        assert candidate_names(None) == ["ipclick.toml", ".ipclick.toml"]
+
+    def test_writer_targets_the_same_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """页面写回的必须是进程实际读的那一个，否则就成了"改了没反应"。"""
+        from ipclick.config_loader.writer import target_path
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "ipclick-8001.toml").write_text("[SERVER]\n", encoding="utf-8")
+        assert target_path(None, 8001).name == "ipclick-8001.toml"
+        assert target_path(None, None).name == "ipclick.toml"

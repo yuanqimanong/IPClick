@@ -1,5 +1,6 @@
 """CLI 行为。"""
 
+import importlib
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -7,6 +8,14 @@ import pytest
 
 from ipclick import __version__
 from ipclick.cli.main import main
+
+
+#: 拿模块对象本身来打桩。
+#:
+#: 不能写 ``monkeypatch.setattr("ipclick.cli.main.serve", ...)``——``cli/__init__.py``
+#: 里的 ``from .main import main`` 把包属性 ``ipclick.cli.main`` 绑成了那个 Group
+#: 对象，于是这个点分路径会解析到命令而不是模块，报 "Group has no attribute serve"。
+_cli_main = importlib.import_module("ipclick.cli.main")
 
 
 @pytest.fixture
@@ -37,6 +46,50 @@ class TestRunOptions:
     def test_nonexistent_config_rejected(self, runner: CliRunner):
         result = runner.invoke(main, ["run", "--config", "/no/such/file.toml"])
         assert result.exit_code != 0
+
+    def test_web_host_flags_exist(self, runner: CliRunner):
+        output = runner.invoke(main, ["run", "--help"]).output
+        assert "--web-host" in output
+        assert "--web-lan" in output
+        assert "0.0.0.0" in output
+
+    def test_web_lan_reaches_the_web_config(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch):
+        """--web-lan 只是 --web-host 0.0.0.0 的简写，必须真的传下去。"""
+        captured: dict[str, object] = {}
+
+        def fake_serve(**kwargs: object) -> None:
+            captured.update(kwargs)
+
+        monkeypatch.setattr(_cli_main, "serve", fake_serve)
+        result = runner.invoke(main, ["run", "-w", "--web-lan"])
+        assert result.exit_code == 0
+        assert captured["web_host"] == "0.0.0.0"
+        assert captured["web"] is True
+
+    def test_web_host_is_passed_through(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch):
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(_cli_main, "serve", lambda **kw: captured.update(kw))
+        result = runner.invoke(main, ["run", "-w", "--web-host", "192.168.1.10"])
+        assert result.exit_code == 0
+        assert captured["web_host"] == "192.168.1.10"
+
+    def test_conflicting_web_host_is_an_error(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch):
+        """悄悄让其中一个赢，会让人对着一个自己没写过的监听地址排查半天。"""
+        monkeypatch.setattr(_cli_main, "serve", lambda **kw: None)
+        result = runner.invoke(main, ["run", "-w", "--web-lan", "--web-host", "127.0.0.1"])
+        assert result.exit_code != 0
+        assert "冲突" in result.output
+
+    def test_public_web_host_warns_before_starting(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch):
+        """这条要在启动前说：日志刷起来之后没人会往回翻。"""
+        monkeypatch.setattr(_cli_main, "serve", lambda **kw: None)
+        result = runner.invoke(main, ["run", "-w", "--web-lan"])
+        assert "明文 HTTP" in result.output
+
+    def test_loopback_web_host_does_not_warn(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(_cli_main, "serve", lambda **kw: None)
+        result = runner.invoke(main, ["run", "-w", "--web-host", "127.0.0.1"])
+        assert "明文 HTTP" not in result.output
 
 
 class TestConfigInfo:
@@ -263,3 +316,36 @@ class TestInit:
 
         runner.invoke(main, ["init", "--dir", str(tmp_path)])
         tomllib.loads((tmp_path / "ipclick.toml").read_text())
+
+
+class TestInitPerPort:
+    """同机多实例：ipclick init --port 8001 出 ipclick-8001.toml。"""
+
+    def test_names_the_file_by_port(self, runner: CliRunner, tmp_path: Path):
+        result = runner.invoke(main, ["init", "--dir", str(tmp_path), "--port", "8001"])
+        assert result.exit_code == 0
+        assert (tmp_path / "ipclick-8001.toml").exists()
+        assert not (tmp_path / "ipclick.toml").exists()
+
+    def test_writes_the_port_into_the_file(self, runner: CliRunner, tmp_path: Path):
+        """文件名和内容对不上是最容易看走眼的一种：ipclick-8001.toml 里写着
+        默认端口的话，`run --port 8001` 与 `run` 读到的是两个不同的值。"""
+        import tomllib
+
+        runner.invoke(main, ["init", "--dir", str(tmp_path), "--port", "8001"])
+        parsed = tomllib.loads((tmp_path / "ipclick-8001.toml").read_text(encoding="utf-8"))
+        assert parsed["SERVER"]["port"] == 8001
+
+    def test_plain_init_is_unchanged(self, runner: CliRunner, tmp_path: Path):
+        import tomllib
+
+        from ipclick.ports import DEFAULT_GRPC_PORT
+
+        runner.invoke(main, ["init", "--dir", str(tmp_path)])
+        parsed = tomllib.loads((tmp_path / "ipclick.toml").read_text(encoding="utf-8"))
+        assert parsed["SERVER"]["port"] == DEFAULT_GRPC_PORT
+
+    def test_next_step_names_the_right_file(self, runner: CliRunner, tmp_path: Path):
+        output = runner.invoke(main, ["init", "--dir", str(tmp_path), "--port", "8001"]).output
+        assert "ipclick-8001.toml" in output
+        assert "ipclick run --port 8001" in output

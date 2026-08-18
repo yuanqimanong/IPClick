@@ -496,11 +496,12 @@ def test_no_plaintext_fallback_anywhere():
     只允许已知位置出现 insecure：两个客户端、服务端绑定、健康探活、
     集群转发、节点探测。每一处都必须是 if tls.enabled 的 else 分支——
     转发那处由 test_forwarding_uses_tls 正面验证，探测那处由
-    test_probe_uses_tls 正面验证。
+    TestProbe.test_probe_over_tls 正面验证，「试一试」点名直连那处由
+    test_web_direct_send_uses_tls 正面验证。
     """
     src = Path(__file__).resolve().parent.parent / "src" / "ipclick"
     offenders: list[str] = []
-    allowed = {"sdk.py", "aio.py", "server.py", "health.py", "tls.py", "forwarder.py", "probe.py"}
+    allowed = {"sdk.py", "aio.py", "server.py", "health.py", "tls.py", "forwarder.py", "probe.py", "pages.py"}
     for file in src.rglob("*.py"):
         if "_pb2" in file.name or file.name in allowed:
             continue
@@ -508,6 +509,47 @@ def test_no_plaintext_fallback_anywhere():
         if "insecure_channel" in text or "add_insecure_port" in text:
             offenders.append(str(file.relative_to(src)))
     assert not offenders, f"这些文件绕过了 TLS 通路: {offenders}"
+
+
+def test_web_direct_send_uses_tls(pki: dict[str, str], monkeypatch: pytest.MonkeyPatch):
+    """「试一试」点名直连节点这一跳必须真的走 TLS，而不是在允许清单里挂个名。
+
+    这条路是 0.5 新增的：没开服务端转发时，Web 端会绕过本进程的路由，直接对那台
+    机器发一次 gRPC。正面证据：目标节点只接受 TLS，配了 TLS 能打通、不配就打不通。
+    """
+    from ipclick.trace import TraceSettings, init_recorder, reset_recorder
+    from ipclick.web.pages import WebPages
+
+    server_tls = TLSSettings(enabled=True, cert_file=pki["server_cert"], key_file=pki["server_key"])
+
+    for port in _serve(server_tls, monkeypatch):
+
+        def _pages(tls_enabled: bool, target: int = 0) -> WebPages:
+            security: dict[str, Any] = (
+                {"tls": {"enabled": True, "ca_file": pki["ca"], "server_name_override": "localhost"}}
+                if tls_enabled
+                else {}
+            )
+            return WebPages(
+                Settings(
+                    {
+                        "SECURITY": security,
+                        "CLUSTER": {"nodes": [{"id": "peer", "address": f"127.0.0.1:{target}"}]},
+                    }
+                ),
+                init_recorder(TraceSettings(memory_size=10)),
+            )
+
+        request = task_pb2.ReqTask(uuid="t", url="http://example.com/x", timeout_seconds=5)
+        try:
+            secure = _pages(True, port)._direct_send(request, "peer")  # pyright: ignore[reportPrivateUsage]
+            assert secure.status_code == 200, "配了 TLS 却打不通"
+
+            # 明文去连一个只接受 TLS 的服务端，必须失败
+            with pytest.raises(grpc.RpcError):
+                _ = _pages(False, port)._direct_send(request, "peer")  # pyright: ignore[reportPrivateUsage]
+        finally:
+            reset_recorder()
 
 
 def test_forwarding_uses_tls(pki: dict[str, str], monkeypatch: pytest.MonkeyPatch):

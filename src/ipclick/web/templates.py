@@ -11,8 +11,24 @@
 
 from typing import Any
 
+from ipclick.ports import DEFAULT_GRPC_PORT
 from ipclick.trace import TraceRecord
 from ipclick.web.assets import SCRIPT_BOOT, SCRIPT_MAIN, STYLE
+
+
+#: 「重试次数」输入框的提示上界。真正的上界在 :data:`ipclick.web.pages.TEST_RETRIES_MAX`，
+#: 这里只是提示文案——模板层不该 import pages（那会造成 pages ↔ templates 的环）。
+TEST_RETRIES_MAX_HINT = 5
+
+#: 节点地址输入框 placeholder 里那个示例端口。
+#:
+#: **不是**新节点的预填值——那个由 :func:`ipclick.web.pages.next_node_port` 从
+#: 19001 起算。这里只是"地址长什么样"的示范，所以用产品默认的 gRPC 端口。
+#:
+#: 0.5.0 之前这个常量定义了却零引用，placeholder 里写的是字面量 ``9528``：
+#: 同一件事三个来源（常量、字面量、19001 预填），改常量不会跟着变。这正是
+#: :mod:`ipclick.ports` 的模块文档开头警告过的那种失配。
+DEFAULT_GRPC_PORT_HINT = DEFAULT_GRPC_PORT
 
 
 def esc(text: Any) -> str:
@@ -48,6 +64,9 @@ _ICONS: dict[str, str] = {
     '<rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
     "sliders": '<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/><circle cx="9" cy="6" r="2"/>'
     '<circle cx="15" cy="12" r="2"/><circle cx="8" cy="18" r="2"/>',
+    "sparkles": '<path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/>'
+    '<path d="m6.3 6.3 2.4 2.4"/><path d="m15.3 15.3 2.4 2.4"/><path d="m17.7 6.3-2.4 2.4"/>'
+    '<path d="m8.7 15.3-2.4 2.4"/>',
     "share": '<circle cx="6" cy="12" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/>'
     '<path d="m8.6 10.6 6.8-3.2"/><path d="m8.6 13.4 6.8 3.2"/>',
 }
@@ -59,7 +78,7 @@ NAV: tuple[tuple[str, str, str], ...] = (
     ("/test", "试一试", "flask"),
     ("/components", "组件", "blocks"),
     ("/config", "配置", "sliders"),
-    ("/nodes", "节点", "share"),
+    ("/skill", "AI 接入", "sparkles"),
 )
 
 
@@ -138,14 +157,43 @@ def _card(title: str, body: str, *, hint: str = "", actions: str = "") -> str:
 
 
 # --------------------------------------------------------------------------- #
+# 默认主题
+# --------------------------------------------------------------------------- #
+
+#: ``[WEB].theme`` 的进程级默认值（``light`` / ``dark``）。
+#:
+#: 刻意做成模块级状态而不是逐层传参：它一个进程内只在启动时定一次（改配置要重启），
+#: 而"要传到哪"是**八个**页面函数——为一个常量把八条签名各加一个参数，读代码的人
+#: 每次都要顺着这个参数走一遍才能确认它没在中途被改掉。需要在测试里定死时，
+#: 各 render 函数仍然接受显式的 ``theme=``。
+_default_theme = "light"
+
+
+def set_default_theme(theme: str) -> None:
+    """设置页面默认主题（``light`` / ``dark``）。由 WebServer 启动时调用。"""
+    global _default_theme
+    _default_theme = "dark" if theme == "dark" else "light"
+
+
+def _theme_attr(theme: str | None) -> str:
+    """``<html>`` 上的默认主题标记。
+
+    总是写出来（不像 0.5 之前那样"auto 时留空"）：引导脚本据此在第一帧之前就把
+    ``data-theme`` 定下来，避免暗色用户看到一闪而过的白屏。
+    """
+    resolved = theme if theme in ("light", "dark") else _default_theme
+    return f' data-default-theme="{attr(resolved)}"'
+
+
+# --------------------------------------------------------------------------- #
 # 登录
 # --------------------------------------------------------------------------- #
 
 
-def render_login(error: str | None = None) -> str:
+def render_login(error: str | None = None, *, theme: str | None = None) -> str:
     error_html = f'<div class="msg err" style="margin-top:1rem">{esc(error)}</div>' if error else ""
     return f"""<!doctype html>
-<html lang="zh-CN"><head>
+<html lang="zh-CN"{_theme_attr(theme)}><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>IPClick 登录</title>
 <style>{STYLE}</style>
@@ -183,6 +231,7 @@ def _page(
     rail: str = "",
     version: str = "",
     job_running: bool = False,
+    theme: str | None = None,
 ) -> str:
     """页面外壳：左导航 + 主内容（+ 右状态栏）。"""
     nav = "".join(
@@ -195,7 +244,7 @@ def _page(
     actions_html = f'<div class="head-actions">{actions}</div>' if actions else ""
 
     return f"""<!doctype html>
-<html lang="zh-CN"><head>
+<html lang="zh-CN"{_theme_attr(theme)}><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} · IPClick</title>
 <style>{STYLE}</style>
@@ -211,8 +260,7 @@ def _page(
     <div class="spacer"></div>
     <div class="foot">
       <div class="theme" role="group" aria-label="主题">
-        <button type="button" data-theme-set="auto" aria-pressed="true">跟随系统</button>
-        <button type="button" data-theme-set="light" aria-pressed="false">亮</button>
+        <button type="button" data-theme-set="light" aria-pressed="true">亮</button>
         <button type="button" data-theme-set="dark" aria-pressed="false">暗</button>
       </div>
       <div class="who">已登录：{esc(username)}</div>
@@ -289,12 +337,19 @@ def render_dashboard(snapshot: dict[str, Any], username: str, csrf: str, actions
     }
 """
 
+    # 两个端口分开列，各自写清楚是谁的。0.5.0 之前这里只有一行没标注的
+    # 「监听地址」（那是 gRPC 的），而 Web 端口在整个界面上一次都没出现过——
+    # 人开着浏览器看这一页，会理所当然地把那个地址读成"这个网页的地址"。
     rail = f"""
   <h2>服务端</h2>
   <table class="kv">{
         _rows(
             [
-                ("监听地址", f"<code>{esc(server.get('address', '?'))}</code>"),
+                ("gRPC 监听", f"<code>{esc(server.get('grpc_address') or server.get('address', '?'))}</code>"),
+                (
+                    "Web 管理端",
+                    f"<code>{esc(server.get('web_address'))}</code>" if server.get("web_address") else "未启用",
+                ),
                 ("本节点 id", f"<code>{esc(server.get('node_id', '?'))}</code>"),
                 ("运行模式", esc(server.get("mode", "?"))),
                 ("worker 线程", esc(server.get("max_workers", "?"))),
@@ -372,7 +427,10 @@ def render_dashboard(snapshot: dict[str, Any], username: str, csrf: str, actions
         csrf,
         "/",
         title="总览",
-        subtitle=f"监听 <code>{esc(server.get('address', '?'))}</code>",
+        subtitle=(
+            f"gRPC <code>{esc(server.get('grpc_address') or server.get('address', '?'))}</code>"
+            + (f" · Web <code>{esc(server.get('web_address'))}</code>" if server.get("web_address") else "")
+        ),
         version=str(server.get("version", "")),
         rail=rail,
     )
@@ -562,6 +620,68 @@ def _cluster_table(nodes: list[dict[str, Any]], csrf: str, actions_enabled: bool
 # --------------------------------------------------------------------------- #
 
 
+#: 请求流的刷新频率档位：(毫秒, 按钮文字, 副标题里的说法)。0 = 关掉。
+#:
+#: 只给这几档而不是一个数字输入框，是因为这里没有"任意值"的用处：1 秒是盯着看，
+#: 5 秒是开着当背景，30 秒是挂一天也不心疼。给输入框只会让人填出 100ms 然后
+#: 把服务端的 worker 线程全占在渲染上。
+LIVE_INTERVALS: tuple[tuple[int, str, str], ...] = (
+    (0, "关闭", "实时刷新已关闭"),
+    (1000, "1 秒", "每秒更新"),
+    (5000, "5 秒", "每 5 秒更新"),
+    (30000, "30 秒", "每 30 秒更新"),
+)
+
+#: 没选过时用哪一档。5 秒：1 秒会让每次滚动都被重排打断，30 秒又不像"实时"。
+DEFAULT_LIVE_MS = 5000
+
+
+def live_label(ms: int) -> str:
+    """某一档的副标题说法。取不到就按秒数拼一句，不至于显示空白。"""
+    for value, _, text in LIVE_INTERVALS:
+        if value == ms:
+            return text
+    return f"每 {ms // 1000} 秒更新"
+
+
+def _live_control(current_ms: int) -> str:
+    """刷新频率的分段选择器。
+
+    用 ``radio + label`` 而不是一排 ``<button>``：
+    一是没有 JS 也能用（连同过滤条一起提交，选择留在 URL 里）；
+    二是键盘方向键天然能切换，``role="radiogroup"`` 的语义也是白送的。
+
+    **不能用行内 ``onchange``**——页面的 CSP 只放行了两段脚本的 sha256 哈希，
+    哈希覆盖不到事件处理器属性，写了会被静默拦掉（表现为点了没反应）。
+    事件在 :data:`ipclick.web.assets.SCRIPT_MAIN` 里用 ``addEventListener`` 绑。
+    """
+    buttons = "".join(
+        f'<input type="radio" id="live-{ms}" name="live" value="{ms}"'
+        f'{" checked" if ms == current_ms else ""}>'
+        f'<label for="live-{ms}">{esc(text)}</label>'
+        for ms, text, _ in LIVE_INTERVALS
+    )
+    return (
+        '<div><label id="live-seg-label">实时刷新</label>'
+        f'<div class="seg" id="live-seg" role="radiogroup" aria-labelledby="live-seg-label">{buttons}</div></div>'
+    )
+
+
+def _live_status(current_ms: int) -> str:
+    """「正在刷新」的活体指示。
+
+    没有它的话，页面安静地待着时人分不清是"没有新请求"还是"刷新根本没在跑"——
+    上一版就因为这个被当成过坏了。圆点的脉动完全由 CSS 驱动，JS 只负责
+    改这行字和加 ``paused`` 类。
+    """
+    paused = " paused" if not current_ms else ""
+    return (
+        f'<div class="livebar{paused}" id="live-bar">'
+        f'<span class="livedot" aria-hidden="true"></span>'
+        f'<span id="live-status">{esc(live_label(current_ms))}</span></div>'
+    )
+
+
 def _trace_table(records: list[TraceRecord], *, show_node: bool = True) -> str:
     if not records:
         return '<p class="note">还没有记录。发一个请求，或用<a href="/test">试一试</a>页面造一个。</p>'
@@ -583,7 +703,7 @@ def _trace_table(records: list[TraceRecord], *, show_node: bool = True) -> str:
             else ""
         )
         rows.append(
-            f'<tr><td class="nowrap">{esc(record.when)}</td>'
+            f'<tr><td class="nowrap"><time datetime="{attr(record.iso)}">{esc(record.when)}</time></td>'
             f"<td>{_status_pill(record.status_code)}</td>"
             f"<td>{esc(record.method)}</td>"
             f'<td><span class="url" title="{attr(record.url)}">{esc(record.url or "—")}</span></td>'
@@ -660,10 +780,14 @@ def render_trace(
     csrf: str,
     *,
     source: str = "memory",
-    live: bool = True,
+    live_ms: int = DEFAULT_LIVE_MS,
     fragment_url: str = "/fragment/trace",
 ) -> str:
-    """请求流页面。``live`` 打开时那一块每 3 秒自己更新，就是"实时看着请求打进来"。"""
+    """请求流页面。``live_ms`` 是刷新间隔（毫秒），0 表示关掉。
+
+    0.5.0 之前这里是个复选框、频率写死 3 秒。3 秒是个两头不讨好的值：盯着调
+    某个请求时嫌慢，开着当监控又太密。现在给 :data:`LIVE_INTERVALS` 那几档。
+    """
     process = dict(stats.get("process") or {})
     adapters = sorted({r.adapter for r in records} | set((process.get("by_adapter") or {}).keys()))
     adapter_options = "".join(
@@ -683,7 +807,10 @@ def render_trace(
         )
     )
 
-    live_attrs = f' data-live-src="{attr(fragment_url)}" data-live-interval="3000"' if live else ""
+    # ``data-live-src`` 永远在，用 ``data-live-interval="0"`` 表示关掉。
+    # 0.4 是关掉时把属性整个去掉，于是"关闭"这一档一按就没法在前端再打开了——
+    # 必须重新提交表单、整页重载，而重载正好丢掉这一页最在意的滚动位置。
+    live_attrs = f' data-live-src="{attr(fragment_url)}" data-live-interval="{live_ms}"'
     body = f"""
   <section class="card">
     <form method="get" action="/trace" class="filters">
@@ -693,13 +820,11 @@ def render_trace(
       <div><label for="f-kw">URL 包含</label><input id="f-kw" name="q" value="{attr(filters.get("q", ""))}"></div>
       <div><label for="f-limit">条数</label>
         <input id="f-limit" name="limit" value="{attr(filters.get("limit", "100"))}" style="min-width:5rem"></div>
-      <div class="check">
-        <input type="checkbox" id="f-live" name="live" value="1"{" checked" if live else ""}>
-        <label for="f-live">实时刷新</label>
-      </div>
+      {_live_control(live_ms)}
       <div><button type="submit">应用</button></div>
       <input type="hidden" name="_" value="1">
     </form>
+    {_live_status(live_ms)}
   </section>
   <div{live_attrs}>{trace_live(records, stats, source=source)}</div>
 """
@@ -709,7 +834,7 @@ def render_trace(
         csrf,
         "/trace",
         title="请求流",
-        subtitle="实时看请求打进来" + ("（每 3 秒更新）" if live else "（实时刷新已关闭）"),
+        subtitle=f"实时看请求打进来（{live_label(live_ms)}）",
     )
 
 
@@ -750,7 +875,10 @@ def _daily(daily: list[dict[str, Any]]) -> str:
         '<th class="right">失败</th><th class="right">平均耗时</th></tr>'
     )
     table = f'<div class="scroll"><table class="data"><thead>{head}</thead><tbody>{rows}</tbody></table></div>'
-    return _card("按天趋势", table)
+    # 这里的"天"是 SQLite 按**服务端**本地时区分好的桶（date(ts,'unixepoch','localtime')），
+    # 不能像上面那些时刻一样交给浏览器换算——换算只能挪显示，挪不动已经分好的桶。
+    # 所以如实标注它是服务端时区，别让人以为是自己那边的"今天"。
+    return _card("按天趋势", table, hint="按服务端本地时区分天")
 
 
 # --------------------------------------------------------------------------- #
@@ -768,12 +896,17 @@ def render_test(
     nodes: list[dict[str, Any]] | None = None,
     curl_notes: list[str] | None = None,
     curl_error: str = "",
+    allow_scripts: bool = False,
 ) -> str:
     """ "试一试"页面：填个 URL 就地发一次请求，看链路和源码。
 
     请求走的是本进程的 TaskService，和真实调用方走的是**同一条**代码路径——
     包括 SSRF 准入、限流、以及（开了转发时）分发到子节点。所以这里看到的
     行为就是线上行为，而不是另写一套只在页面上成立的逻辑。
+
+    表单字段与 :meth:`ipclick.sdk.Downloader.request` 一一对应。常用的几项摊开，
+    其余收进「更多参数」——0.4 只有 5 个字段，于是"页面上试通了、代码里加个
+    proxy 就不通"这类问题根本验不出来，而那正是这一页该解决的。
     """
     adapter_select = _adapter_select(choices, form.get("adapter", ""))
     method_options = "".join(
@@ -781,6 +914,7 @@ def render_test(
         for m in ("GET", "POST", "HEAD", "PUT", "PATCH", "DELETE", "OPTIONS")
     )
     node_row = _target_node_row(nodes or [], form.get("target_node", ""))
+    advanced = _test_advanced(form, allow_scripts=allow_scripts)
 
     import_notes = "".join(f'<div class="msg caution">{esc(n)}</div>' for n in (curl_notes or []))
     import_error = f'<div class="msg err">{esc(curl_error)}</div>' if curl_error else ""
@@ -825,12 +959,16 @@ def render_test(
       </div>
       <div class="field-row">
         <label for="t-body">请求体<span class="hint">POST/PUT 时用；留空则不带</span></label>
-        <textarea id="t-body" name="body" rows="3">{esc(form.get("body", ""))}</textarea>
+        <div>
+          <textarea id="t-body" name="body" rows="3">{esc(form.get("body", ""))}</textarea>
+          <div class="inline-choice">{_body_kind_radios(form.get("body_kind", "raw"))}</div>
+        </div>
       </div>
       <div class="field-row">
         <label for="t-headers">额外请求头<span class="hint">每行一个 <code>Name: value</code></span></label>
         <textarea id="t-headers" name="headers" rows="3">{esc(form.get("headers", ""))}</textarea>
       </div>
+      {advanced}
       <div class="actions">
         <button class="primary" type="submit">发送请求</button>
         <span class="note">照常受 SSRF 准入与限流约束，也会像真实请求一样出现在<a href="/trace">请求流</a>里。</span>
@@ -878,18 +1016,184 @@ def _adapter_select(choices: list[dict[str, Any]], selected: str) -> str:
     return f'<select id="t-adapter" name="adapter">{"".join(groups)}</select>'
 
 
+#: curl_cffi 能伪装的指纹里挑出来的常用几个。
+#:
+#: 不列全部（当前版本有 53 个）：下拉框里塞 53 项没人找得到自己要的那个，而这几个
+#: 覆盖了绝大多数场景。要用别的就直接在输入框里敲——这是个 ``<input list=…>``，
+#: 下拉只是建议，不是白名单。
+IMPERSONATE_SUGGESTIONS: tuple[str, ...] = (
+    "chrome",
+    "chrome124",
+    "chrome131",
+    "chrome136",
+    "safari180",
+    "safari180_ios",
+    "edge101",
+    "firefox133",
+)
+
+
+def _checkbox(name: str, label: str, checked: bool, hint: str = "") -> str:
+    """带"我在表单里"标记的复选框。
+
+    没勾时浏览器**不提交**这个键，所以光看 ``name in form`` 分不清"没勾"和"这一页
+    压根没有这一项"。配置页早就靠一个同名隐藏标记解决了，这里同一套写法。
+    """
+    hint_html = f'<span class="hint">{hint}</span>' if hint else ""
+    return (
+        f'<label class="check-inline"><input type="hidden" name="__present__{attr(name)}" value="1">'
+        f'<input type="checkbox" name="{attr(name)}"{" checked" if checked else ""}>'
+        f"<span>{esc(label)}</span>{hint_html}</label>"
+    )
+
+
+def _body_kind_radios(selected: str) -> str:
+    """请求体按 raw 还是 JSON 发。
+
+    协议里 ``data`` 与 ``json`` 是两个字段且互斥，所以这不是可以省掉的细节：
+    发 ``json`` 时服务端会带上 ``Content-Type: application/json``，发 ``data``
+    不会。0.4 只有一个文本框，等于永远只能验前者。
+    """
+    options = (("raw", "原样发送（data）"), ("json", "作为 JSON 发送（json）"))
+    return "".join(
+        f'<label class="check-inline"><input type="radio" name="body_kind" value="{attr(value)}"'
+        f"{' checked' if (selected or 'raw') == value else ''}><span>{esc(label)}</span></label>"
+        for value, label in options
+    )
+
+
+def _test_advanced(form: dict[str, str], *, allow_scripts: bool) -> str:
+    """「更多参数」折叠区：其余与 ``request()`` 对齐的字段。
+
+    默认折叠，但**填过东西就自动展开**——提交后回到页面却看不到自己设过的代理，
+    会让人以为那一项没生效。
+    """
+    advanced_keys = (
+        "cookies",
+        "params",
+        "proxy_mode",
+        "proxy_url",
+        "impersonate",
+        "max_retries",
+        "retry_backoff",
+        "allowed_status_codes",
+        "automation_config",
+        "automation_script",
+    )
+    touched = any((form.get(k) or "").strip() and form.get(k) != "none" for k in advanced_keys)
+    # verify / allow_redirects 默认都是"开"，所以只有被关掉才算动过
+    touched = touched or (form and (form.get("verify") != "on" or form.get("allow_redirects") != "on"))
+
+    proxy_mode = form.get("proxy_mode") or "none"
+    proxy_options = "".join(
+        f'<option value="{attr(value)}"{" selected" if proxy_mode == value else ""}>{esc(label)}</option>'
+        for value, label in (
+            ("none", "不走代理"),
+            ("config", "用配置文件里的 [PROXY]"),
+            ("custom", "自定义（下面填）"),
+        )
+    )
+    suggestions = "".join(f'<option value="{attr(v)}">' for v in IMPERSONATE_SUGGESTIONS)
+
+    script_row = (
+        f"""
+      <div class="field-row">
+        <label for="t-script">页内脚本<span class="hint">浏览器渲染专属。返回值走
+          <code>x-ipclick-script-result</code> 响应头</span></label>
+        <textarea id="t-script" name="automation_script" rows="3"
+          placeholder="return document.title">{esc(form.get("automation_script", ""))}</textarea>
+      </div>"""
+        if allow_scripts
+        else """
+      <div class="field-row">
+        <label>页内脚本</label>
+        <div class="note">服务端未开启（<code>[BROWSER].allow_scripts = false</code>）。
+          它等于允许调用方在服务端的浏览器里跑任意 JS，只能改配置文件打开。</div>
+      </div>"""
+    )
+
+    return f"""
+      <details class="more"{" open" if touched else ""}>
+        <summary>更多参数<span class="hint">与 SDK 的 request() 一一对应</span></summary>
+      <div class="field-row">
+        <label for="t-params">查询参数<span class="hint">每行一个 <code>k=v</code>，会拼到 URL 后面</span></label>
+        <textarea id="t-params" name="params" rows="2">{esc(form.get("params", ""))}</textarea>
+      </div>
+      <div class="field-row">
+        <label for="t-cookies">Cookie<span class="hint">每行一个 <code>k=v</code></span></label>
+        <textarea id="t-cookies" name="cookies" rows="2">{esc(form.get("cookies", ""))}</textarea>
+      </div>
+      <div class="field-row">
+        <label for="t-proxy-mode">代理</label>
+        <div>
+          <select id="t-proxy-mode" name="proxy_mode">{proxy_options}</select>
+          <input name="proxy_url" style="margin-top:.375rem"
+                 placeholder="http://user:pass@host:8080（选「自定义」时填）"
+                 value="{attr(form.get("proxy_url", ""))}">
+          <span class="hint">选「用配置文件里的 [PROXY]」等价于 SDK 的 <code>proxy=True</code>；
+            账号密码取自 .env，不会回显。</span>
+        </div>
+      </div>
+      <div class="field-row">
+        <label for="t-imp">浏览器指纹<span class="hint">仅 <code>curl_cffi</code>；留空按 chrome 处理</span></label>
+        <div>
+          <input id="t-imp" name="impersonate" list="imp-list" value="{attr(form.get("impersonate", ""))}"
+                 placeholder="chrome">
+          <datalist id="imp-list">{suggestions}</datalist>
+        </div>
+      </div>
+      <div class="field-row">
+        <label for="t-retries">重试<span class="hint">默认 0：诊断要看的是<b>第一次</b>失败的真实原因</span></label>
+        <div class="two-up">
+          <input id="t-retries" name="max_retries" value="{attr(form.get("max_retries", "0"))}"
+                 placeholder="次数（0-{TEST_RETRIES_MAX_HINT}）">
+          <input name="retry_backoff" value="{attr(form.get("retry_backoff", ""))}" placeholder="退避基数（秒）">
+        </div>
+      </div>
+      <div class="field-row">
+        <label for="t-codes">允许的状态码<span class="hint">这些不算失败、不触发重试。留空用服务端默认</span></label>
+        <input id="t-codes" name="allowed_status_codes" placeholder="200, 404"
+               value="{attr(form.get("allowed_status_codes", ""))}">
+      </div>
+      <div class="field-row">
+        <label>开关</label>
+        <div class="check-row">
+          {_checkbox("verify", "校验目标站点证书", form.get("verify", "on") == "on")}
+          {_checkbox("allow_redirects", "跟随重定向", form.get("allow_redirects", "on") == "on")}
+        </div>
+      </div>
+      <div class="field-row">
+        <label for="t-auto">自动化配置<span class="hint">浏览器渲染专属，JSON。如
+          <code>{{"wait_for_selector": "#app", "screenshot": true}}</code></span></label>
+        <textarea id="t-auto" name="automation_config" rows="2">{esc(form.get("automation_config", ""))}</textarea>
+      </div>
+      {script_row}
+      <p class="note">刻意没有 <code>stream</code>：这一页同步等结果再整页渲染，
+        流式在这里没有任何可观察的差别，放个开关只会让人以为验证过了。</p>
+      </details>"""
+
+
 def _target_node_row(nodes: list[dict[str, Any]], selected: str) -> str:
     """ "目标节点"下拉。没配集群就整行不显示——单机部署不该看到集群相关的控件。"""
     if not nodes:
         return ""
-    options = '<option value="">按策略自动选（默认）</option>' + "".join(
+    forwarding = bool(nodes[0].get("forwarding"))
+    default_label = "按策略自动选（默认）" if forwarding else "本机执行（默认）"
+    options = f'<option value="">{esc(default_label)}</option>' + "".join(
         f'<option value="{attr(n.get("id"))}"{" selected" if str(n.get("id")) == selected else ""}>'
         f"{esc(n.get('id'))} — {esc(n.get('address'))}{'（本机）' if n.get('is_self') else ''}</option>"
         for n in nodes
     )
+    # 没开转发时也能点名：这一页会绕过本进程的路由，直连那台机器发一次 gRPC。
+    # 不说清楚的话，"本机不转发"和"点名生效了"看起来是矛盾的。
+    hint = (
+        "强制打到这一台，跳过负载均衡。验证新加的节点用"
+        if forwarding
+        else "本机未开服务端转发，选中某一台时由本页<b>直连</b>它发一次请求（用集群内部令牌）"
+    )
     return f"""
       <div class="field-row">
-        <label for="t-node">目标节点<span class="hint">强制打到这一台，跳过负载均衡。验证新加的节点用</span></label>
+        <label for="t-node">目标节点<span class="hint">{hint}</span></label>
         <div><select id="t-node" name="target_node">{options}</select></div>
       </div>"""
 
@@ -960,6 +1264,10 @@ def render_components(
     messages: list[str],
     errors: list[str],
     bodies: dict[str, tuple[str, int]],
+    registry_dir: str = "~/.cache/ms-playwright",
+    nodes: list[dict[str, Any]] | None = None,
+    active_node: str = "",
+    remote: bool = False,
 ) -> str:
     """可选组件：安装状态 + 装 / 卸。
 
@@ -971,23 +1279,71 @@ def render_components(
     browser = [c for c in components if c.get("kind") == "browser"]
     running = bool(job and job.get("status") == "running")
 
+    # playwright / patchright 那张对照表。目录、revision 与体积由 pages 层量好
+    # 传进来——这个模块只管渲染，不碰文件系统。
+    shared = [c for c in browser if c.get("extra") in ("playwright", "patchright")]
+    revisions = (
+        "".join(
+            f"<tr><td><code>{esc(c.get('name'))}</code></td>"
+            f"<td><code>{esc(bodies.get(str(c.get('extra')), ('', 0))[0] or '—（未下载）')}</code></td>"
+            f"<td class='nowrap'>{_bytes(size) if (size := bodies.get(str(c.get('extra')), ('', 0))[1]) else '—'}</td></tr>"
+            for c in shared
+        )
+        or '<tr><td colspan="3" class="note">两个都没装</td></tr>'
+    )
+
     body = f"""
   {_messages(messages, errors)}
+  {_component_target(nodes or [], active_node)}
+
   <div class="msg tip">
     <b>「Python 包」和「浏览器本体」是两件事。</b>
     <code>pip install</code> 只装前者；camoufox 的本体有 1 GB 上下，缺了它第一次请求会当场
     开始下载并超时，所以这里提前拦住而不是等它去下。<br>
-    安装用的是 <code>{esc(toolchain)}</code>，绑定当前解释器，不会装到别的环境去。
+    {
+        "装到的是 <b>" + esc(active_node) + "</b> 那台机器上（由它自己执行，主控只是把请求转过去）。"
+        if remote
+        else "安装用的是 <code>" + esc(toolchain) + "</code>，绑定当前解释器，不会装到别的环境去。"
+    }
   </div>
 
-  <section class="card" id="job-box"{"" if job else " hidden"}>
+  <section class="card" id="job-box" data-active-node="{attr(active_node)}"{"" if job else " hidden"}>
     <div class="card-head"><h2>执行中的任务</h2></div>
     <div id="job-title">{_job_title(job)}</div>
+    <div class="prog" id="job-progress"{"" if running else " hidden"}>
+      <div class="track"><div class="fill indeterminate"></div></div>
+      <div class="meta"></div>
+    </div>
     <pre class="term" id="job-output">{esc(chr(10).join(job.get("output") or [])) if job else ""}</pre>
   </section>
 
   {_card("HTTP 适配器", _component_cards(http, csrf, bodies, running), hint="curl_cffi 是核心依赖，随主包一起装")}
   {_card("浏览器渲染", _component_cards(browser, csrf, bodies, running), hint="一台机器通常只会用其中一个")}
+
+  {
+        ""
+        if remote
+        else f'''
+  <section class="card">
+    <div class="card-head"><h2>playwright 与 patchright 的浏览器本体</h2>
+      <span class="hint">经常被问：装了一个能不能省掉另一个</span></div>
+    <p class="note">
+      <b>不能。</b>两者的本体下到<b>同一个目录</b>（<code>{esc(registry_dir)}</code>），
+      但各自钉的 chromium <b>版本号不同</b>，所以是两份独立的构建，各约 150–170 MB：
+    </p>
+    <div class="scroll"><table class="data">
+      <thead><tr><th>组件</th><th>它自己那几个 revision</th><th>占用</th></tr></thead>
+      <tbody>{revisions}</tbody>
+    </table></div>
+    <p class="note" style="margin-top:.75rem">
+      共用的部分确实只下一份（比如 <code>ffmpeg</code>）。所以两个都装时，第二个的增量
+      小于它单独装的体积——但省不掉那份 chromium。
+      patchright 是 playwright 的<b>反检测分支</b>，Python 包也是两个独立的发行版，
+      同理不能合并。<b>一台机器通常只需要其中一个</b>：要反检测选 patchright，
+      要行为最可预期选 playwright。
+    </p>
+  </section>'''
+    }
 """
     actions = (
         f'<form method="post" action="/components" class="inline-form">{_hidden(csrf, "refresh")}'
@@ -1003,6 +1359,38 @@ def render_components(
         actions=actions,
         job_running=running,
     )
+
+
+def _component_target(nodes: list[dict[str, Any]], active: str) -> str:
+    """「装到哪台机器」选择器。没配集群就整块不显示。
+
+    和「试一试」的目标节点是同一个心智模型：先选机器，再操作。集群里每台都要各自
+    装一遍适配器，而逐台 SSH 上去敲命令是部署时最烦的一步。
+    """
+    if not nodes:
+        return ""
+    options = f'<option value=""{"" if active else " selected"}>本机</option>' + "".join(
+        f'<option value="{attr(n.get("id"))}"{" selected" if str(n.get("id")) == active else ""}>'
+        f"{esc(n.get('id'))} — {esc(n.get('address'))}{'（本机）' if n.get('is_self') else ''}</option>"
+        for n in nodes
+    )
+    return f"""
+  <section class="card">
+    <div class="card-head"><h2>装到哪台机器</h2>
+      <span class="hint">集群里每台都要各自装一遍——在这里点名，不用逐台 SSH 上去</span></div>
+    <form method="get" action="/components" class="filters">
+      <div>
+        <label for="c-node">目标机器</label>
+        <select id="c-node" name="node">{options}</select>
+      </div>
+      <div class="check"><button type="submit">切换</button></div>
+    </form>
+    <p class="note" style="margin-top:.5rem">
+      子节点默认<b>不允许</b>被远程操作。要放开，在那台机器的配置里设
+      <code>[CLUSTER].allow_remote_install = true</code> 并重启——它等于"能调那台
+      gRPC 的人可以在它上面跑 pip"，所以不会随升级默认打开。
+    </p>
+  </section>"""
 
 
 def _job_title(job: dict[str, Any] | None) -> str:
@@ -1101,6 +1489,24 @@ def _component_card(component: dict[str, Any], bodies: dict[str, tuple[str, int]
 # --------------------------------------------------------------------------- #
 
 
+#: 配置页的分页：``(键, 标题, 副标题)``
+CONFIG_TABS: tuple[tuple[str, str, str], ...] = (
+    ("basic", "基础设置", "这一台自己的端口、线程、超时、日志、浏览器与链路记录"),
+    ("cluster", "集群设置", "转发开关、节点增删、以及每台子节点的部署材料"),
+)
+
+
+def _config_tabs(active: str) -> str:
+    return (
+        '<div class="tabs">'
+        + "".join(
+            f'<a href="/config?tab={attr(key)}" class="{"on" if key == active else ""}">{esc(label)}</a>'
+            for key, label, _ in CONFIG_TABS
+        )
+        + "</div>"
+    )
+
+
 def render_config(
     groups: list[tuple[str, list[dict[str, Any]]]],
     username: str,
@@ -1112,32 +1518,43 @@ def render_config(
     readonly_note: list[tuple[str, Any]],
     generators: list[dict[str, Any]] | None = None,
     generated: dict[str, Any] | None = None,
+    tab: str = "basic",
+    cluster: dict[str, Any] | None = None,
 ) -> str:
-    sections: list[str] = []
-    for title, fields in groups:
-        rows = "".join(_config_row(field) for field in fields)
-        sections.append(f"<fieldset><legend>{esc(title)}</legend>{rows}</fieldset>")
+    """配置页。两个分页：基础设置 / 集群设置，右上角一个保存按钮。
 
-    body = f"""
-  {_messages(messages, errors)}
-  {_generated_secret(generated)}
+    0.4 是一整页平铺的 fieldset：一台单机部署的人要在集群、转发、节点这些和他
+    无关的项里翻找自己要改的超时；而组集群的人又得在配置页和另一个 ``/nodes``
+    页之间来回跳。分成两页之后各看各的，节点管理也并进了「集群设置」——它本来
+    就是集群配置的一部分。
+    """
+    active = tab if tab in {key for key, _, _ in CONFIG_TABS} else "basic"
+    subtitle = next(sub for key, _, sub in CONFIG_TABS if key == active)
 
+    sections = "".join(
+        f"<fieldset><legend>{esc(title)}</legend>{''.join(_config_row(field) for field in fields)}</fieldset>"
+        for title, fields in groups
+    )
+    # 表单里带上当前分页：保存完要回到人刚才看的那一页，而不是弹回第一页。
+    tab_field = f'<input type="hidden" name="tab" value="{attr(active)}">'
+
+    if active == "cluster":
+        main = _cluster_tab(cluster or {}, sections, csrf, tab_field)
+        extra = ""
+    else:
+        main = f"""
   <section class="card">
     <div class="card-head">
       <h2>可编辑项</h2>
       <span class="hint">保存后写回 <code>{esc(config_path)}</code>（先留一份 <code>.bak</code>）</span>
     </div>
     <p class="note">文件里的注释与格式都保留，只替换被改动那一行的值。</p>
-    <form method="post" action="/config">
-      {_hidden(csrf, "save_config")}
-      {"".join(sections)}
-      <div class="actions">
-        <button class="primary" type="submit">保存到 {esc(config_path)}</button>
-        <span class="note">标了 <b>需重启</b> 的项，改完要重启 ipclick 才生效。</span>
-      </div>
+    <form method="post" action="/config" id="config-form">
+      {_hidden(csrf, "save_config")}{tab_field}
+      {sections}
     </form>
-  </section>
-
+  </section>"""
+        extra = f"""
   {_secret_generators(generators or [], csrf)}
 
   <section class="card">
@@ -1146,9 +1563,195 @@ def render_config(
        关掉内网拦截、改掉令牌的管理端，等于给自己装了个跳板。要改请编辑
        <code>{esc(config_path)}</code> 或 <code>.env</code> 后重启。</p>
     <table class="kv">{_rows(readonly_note)}</table>
-  </section>
+  </section>"""
+
+    body = f"""
+  {_config_tabs(active)}
+  {_messages(messages, errors)}
+  {_generated_secret(generated)}
+  {main}
+  {extra}
 """
-    return _page(body, username, csrf, "/config", title="配置", subtitle=f"<code>{esc(config_path)}</code>")
+    # 保存按钮放右上角：两个分页的表单都很长，按钮跟在最下面的话，改完上面一项
+    # 还要滚到底去点。form 属性让它能提交页面里那个 id="config-form" 的表单。
+    actions = (
+        '<span class="note">带 <span class="pill bad restart">需重启</span> 的项改完要重启 ipclick</span>'
+        '<button class="primary" type="submit" form="config-form">保存到 toml</button>'
+    )
+    return _page(
+        body,
+        username,
+        csrf,
+        "/config",
+        title="配置",
+        subtitle=f"{esc(subtitle)} · 写回 <code>{esc(config_path)}</code>",
+        actions=actions,
+    )
+
+
+def _cluster_tab(cluster: dict[str, Any], sections: str, csrf: str, tab_field: str) -> str:
+    """「集群设置」分页。
+
+    自上而下就是组一个集群的顺序：先决定要不要转发（决定了它是不是集群），
+    再加机器，最后把每台机器该有的东西拿走。0.4 把这三件事分在两个页面上，
+    中间那步（加节点）还得先知道 ``/nodes`` 这个页面存在。
+    """
+    nodes = list(cluster.get("nodes") or [])
+    forward = bool(cluster.get("forward"))
+    secret_ready = bool(cluster.get("secret_configured"))
+    token_ready = bool(cluster.get("auth_configured"))
+
+    cards = "".join(_node_card(node) for node in nodes) or (
+        '<p class="note">还没有节点。点右上角「添加节点」，填个 IP 和端口就行——其余用预置默认值。</p>'
+    )
+
+    # 转发开关单独拎到最上面：它决定了下面那些节点到底参不参与路由。
+    # 混在 fieldset 里的话，人会以为"加了节点就是集群了"，而实际没开转发时
+    # 本进程根本不分发。
+    switch = f"""
+  <section class="card">
+    <div class="card-head"><h2>服务端转发</h2>
+      <span class="hint">开了才是"集群模式"——本机收到任务后按策略分给下面的节点</span></div>
+    <form method="post" action="/config" id="config-form">
+      {_hidden(csrf, "save_config")}{tab_field}
+      <div class="field-row">
+        <label>模式</label>
+        <div class="check-row">
+          {
+        _checkbox(
+            "CLUSTER.forward_on",
+            "开启服务端转发",
+            forward,
+            "关着时本机只处理自己收到的请求，下面的节点仅用于「试一试」点名直连",
+        )
+    }
+        </div>
+      </div>
+      {sections}
+    </form>
+  </section>"""
+
+    return f"""
+  {switch}
+
+  <section class="card">
+    <div class="card-head"><h2>集群节点</h2>
+      <span class="hint">{len(nodes)} 台。每台机器上的这份列表都该是一样的</span>
+      <div class="head-actions">
+        <a class="btn" href="/deploy.zip">全部下载（zip）</a>
+        <button type="button" class="primary" data-dialog="add-node">添加节点</button>
+      </div>
+    </div>
+    <div class="nodes-grid">{cards}</div>
+    <p class="note" style="margin-top:.75rem">
+      改完地址或权重点右上角<b>保存</b>；<b>删除</b>是独立按钮，点了就生效。
+      节点的 <code>token</code> 不接受从网页写入——机密只走 <code>.env</code>。
+      需要给某台单独指定令牌时，在配置文件里给那一项加 <code>token = "..."</code>。
+    </p>
+  </section>
+
+  <!-- 删除走自己的表单：和"保存"那个表单分开，否则删一台会连带把页面上其余
+       未提交的改动一起写进去，而人只点了「删除」。 -->
+  <form method="post" action="/config" id="remove-node-form" hidden>
+    {_hidden(csrf, "remove_node")}{tab_field}
+  </form>
+
+  {_add_node_dialog(csrf, tab_field, int(cluster.get("next_port") or 0))}
+
+  <section class="card">
+    <div class="card-head"><h2>凭据</h2>
+      <span class="hint">生成一次，复制到每台子节点的 .env</span></div>
+    <table class="kv">
+      <tr><th>gRPC 鉴权令牌</th><td>{_pill("已配置", "ok") if token_ready else _pill("未配置 —— 任何人都能调用", "bad")}
+        <span class="note">调用方 → 服务端。整个集群用同一个，听主控的。</span></td></tr>
+      <tr><th>集群共享密钥</th><td>{_pill("已配置", "ok") if secret_ready else _pill("未配置 —— 节点间不鉴权", "warn")}
+        <span class="note">节点 → 节点。由它<b>派生</b>出每台各不相同的令牌，
+          所以拿到 B 的令牌调不了 C；而你只需要复制这一个值到所有机器。</span></td></tr>
+    </table>
+    <p class="note" style="margin-top:.75rem">两个都在下面「基础设置」页的「生成凭据」里一键生成。
+      生成的值<b>只显示一次</b>，服务端不留副本。</p>
+  </section>"""
+
+
+def _node_card(node: dict[str, Any]) -> str:
+    """一台节点的卡片。
+
+    表单字段挂在页面上那个 id="config-form" 的表单里（HTML 的 form 属性），
+    所以这里不需要 csrf —— 那一份由宿主表单带。
+
+    展示 + 三个动作：测试连接（就地出结论）、拿部署材料、删除。编辑地址走的是
+    同一个表单——把 id/address/weight 做成可改的输入框，比"点编辑再弹一个框"少一步。
+    """
+    node_id = str(node.get("id", ""))
+    index = node.get("index", 0)
+    is_self = bool(node.get("is_self"))
+    return f"""
+  <div class="node-card" data-node-row>
+    <div class="top">
+      <span class="nm">{esc(node_id)}</span>
+      {_pill("本机", "info") if is_self else ""}
+    </div>
+    <label>地址</label>
+    <input name="node_address_{attr(index)}" value="{attr(node.get("address", ""))}" data-node-address
+           form="config-form" placeholder="10.0.0.7:{DEFAULT_GRPC_PORT_HINT}">
+    <input type="hidden" name="node_id_{attr(index)}" value="{attr(node_id)}" form="config-form">
+    <div class="two-up">
+      <div><label>权重</label>
+        <input name="node_weight_{attr(index)}" value="{attr(node.get("weight", 100))}" form="config-form"></div>
+      <div><label>状态</label><div class="note">{esc(node.get("status") or "未探测")}</div></div>
+    </div>
+    <div class="acts">
+      <button type="button" class="small" data-probe="{attr(node_id)}">测试连接</button>
+      <a class="btn small" href="/deploy?node={attr(node_id)}">部署材料</a>
+      <button type="submit" class="small danger" form="remove-node-form"
+              name="remove_node" value="{attr(node_id)}"
+              data-confirm="确定从集群里移除 {attr(node_id)} 吗？（只改本机的节点列表，不动那台机器）"
+      >删除</button>
+    </div>
+    <div class="result" data-probe-result></div>
+  </div>"""
+
+
+def _add_node_dialog(csrf: str, tab_field: str, next_port: int) -> str:
+    """「添加节点」弹窗。
+
+    只要 IP 一项必填，其余给预置默认值——加机器是集群的日常操作，每次都让人把
+    端口、id、权重想一遍纯属拖慢。端口预填下一个没被占用的（见
+    :func:`ipclick.web.pages.next_node_port`），id 留空就用 ``host:port``。
+    """
+    return f"""
+  <div class="dialog" id="add-node" hidden>
+    <div class="dialog-box">
+      <div class="card-head"><h2>添加节点</h2>
+        <button type="button" class="small" data-dialog-close>关闭</button></div>
+      <form method="post" action="/config">
+        {_hidden(csrf, "add_node")}{tab_field}
+        <div class="field-row">
+          <label for="n-host">IP / 主机名 <b>*</b></label>
+          <input id="n-host" name="new_node_host" required placeholder="10.0.0.7" autocomplete="off">
+        </div>
+        <div class="field-row">
+          <label for="n-port">端口</label>
+          <div><input id="n-port" name="new_node_port" value="{next_port}" placeholder="{next_port}">
+            <span class="hint">子节点的 gRPC 端口。已自动填了下一个没被占用的</span></div>
+        </div>
+        <div class="field-row">
+          <label for="n-id">节点 id</label>
+          <div><input id="n-id" name="new_node_id" placeholder="留空则用 主机:端口" autocomplete="off">
+            <span class="hint">链路记录里的"谁执行的"就是它，起个好认的名字</span></div>
+        </div>
+        <div class="field-row">
+          <label for="n-weight">权重</label>
+          <div><input id="n-weight" name="new_node_weight" value="100">
+            <span class="hint">只在负载均衡策略为 weight 时有意义</span></div>
+        </div>
+        <div class="actions">
+          <button class="primary" type="submit">添加并保存</button>
+          <span class="note">会立即写回 toml 并生效，不用重启。</span>
+        </div>
+      </form>
+    </div>
+  </div>"""
 
 
 def _generated_secret(generated: dict[str, Any] | None) -> str:
@@ -1223,12 +1826,24 @@ def _config_row(field: dict[str, Any]) -> str:
     name = str(field["name"])
     kind = str(field["kind"])
     value = field.get("value")
-    hint_parts: list[str] = []
-    if field.get("hint"):
-        hint_parts.append(str(field["hint"]))
-    if field.get("restart"):
-        hint_parts.append("<b>需重启</b>")
-    hint = f'<span class="hint">{" · ".join(hint_parts)}</span>' if hint_parts else ""
+    # 「需重启」用警示色的徽标，不是灰色提示文字里的一个 <b>。
+    #
+    # 它和旁边那句"这个选项是干什么的"完全不是一类信息：后者读一次就够，前者是
+    # 改完之后必须记得做的动作。混在同一行灰字里，人扫过去只会看见解释、漏掉动作，
+    # 然后对着一个"改了没生效"的界面排查。
+    restart = '<span class="pill bad restart">需重启</span>' if field.get("restart") else ""
+    hint = f'<span class="hint">{esc(field["hint"])}</span>' if field.get("hint") else ""
+
+    # 文件里写的和进程实际在听的不是一个数（`ipclick run --port X` 不改文件）。
+    # 不说出来的话，这一格就是在撒谎——而且是最难查的那种：改它、保存、重启，
+    # 一切"正常"，只是端口根本不是页面上显示的那个。
+    running = int(field.get("running") or 0)
+    if running:
+        hint += (
+            f'<span class="pill warn running">当前实际在 {running}</span>'
+            f'<span class="hint">这一格是<b>文件里</b>的值。命令行的 --port 覆盖了它，'
+            f"改这里要连同启动命令一起改，否则重启后又变回 {running}</span>"
+        )
 
     if kind == "bool":
         checked = " checked" if bool(value) else ""
@@ -1245,110 +1860,173 @@ def _config_row(field: dict[str, Any]) -> str:
     else:
         control = f'<input id="{attr(name)}" name="{attr(name)}" value="{attr("" if value is None else value)}">'
 
-    return f'<div class="field-row"><label for="{attr(name)}">{esc(field["label"])}{hint}</label><div>{control}</div></div>'
+    return (
+        f'<div class="field-row"><label for="{attr(name)}">{esc(field["label"])}{restart}{hint}</label>'
+        f"<div>{control}</div></div>"
+    )
 
 
 # --------------------------------------------------------------------------- #
-# 节点
+# AI 接入
 # --------------------------------------------------------------------------- #
 
 
-def render_nodes(
-    nodes: list[dict[str, Any]],
+def render_deploy(
+    plan: dict[str, Any],
     username: str,
     csrf: str,
     *,
-    config_path: str,
-    self_id: str,
-    forward: bool,
-    internal_auth: bool,
-    messages: list[str],
-    errors: list[str],
-    hot_reload: bool = False,
+    total_nodes: int,
 ) -> str:
-    rows: list[str] = []
-    for index, node in enumerate(nodes):
-        is_self = str(node.get("id")) == self_id
-        node_id = str(node.get("id", ""))
-        rows.append(
-            f"<tr data-node-row>"
-            f'<td><input name="node_id_{index}" value="{attr(node_id)}"></td>'
-            f'<td><input name="node_address_{index}" data-node-address value="{attr(node.get("address", ""))}"></td>'
-            f'<td style="width:6rem"><input name="node_weight_{index}" value="{attr(node.get("weight", 100))}"></td>'
-            f"<td>{_pill('本机', 'info') if is_self else ''}</td>"
-            f'<td class="note">{esc(node.get("token_source", ""))}</td>'
-            f'<td class="nowrap"><button type="button" class="small" data-probe="{attr(node_id)}">测试连接</button>'
-            f'<div class="result" data-probe-result></div></td>'
-            f"</tr>"
-        )
+    """一台子节点的部署材料：两个文件 + 两种启动命令，都能复制或下载。
 
-    auth_note = (
-        '<div class="msg good">✓ 已配置集群共享密钥，每个节点的令牌由它派生（各节点令牌互不相同）。</div>'
-        if internal_auth
-        else '<div class="msg err">未配置集群内部鉴权：任何能连到这些端口的人都可以借本集群发请求。'
-        "请在<b>所有</b>节点的 <code>.env</code> 里放同一个 <code>IPCLICK_CLUSTER_SECRET</code>——"
-        '可以在<a href="/config">配置</a>页一键生成。</div>'
-    )
-    reload_note = (
-        "保存后<b>立即生效</b>，不需要重启：新节点马上参与转发轮询。"
-        if hot_reload
-        else "本进程没开服务端转发，保存只写文件；开了转发的节点保存后会立即生效。"
+    **只生成，不推送。** 加一个"把配置写到远端"的 RPC 就等于：拿下主控 = 能改所有
+    机器上的配置文件，包括 SSRF 拦截开关。生成的东西由人复制过去，攻击面一点没变。
+    """
+    node_id = str(plan.get("node_id", ""))
+    commands = "".join(
+        f"""
+      <label>{esc(item["title"])}</label>
+      <div class="copy-row">
+        <pre id="cmd-{index}">{esc(item["command"])}</pre>
+        <button type="button" class="small" data-copy="cmd-{index}">复制</button>
+      </div>"""
+        for index, item in enumerate(plan.get("commands") or [])
     )
 
     body = f"""
-  {_messages(messages, errors)}
-  {auth_note}
-  <div class="msg tip">
-    服务端转发：{_pill("已开启", "ok") if forward else _pill("未开启", "mute")} ·
-    本节点 <code>{esc(self_id or "未识别")}</code> ·
-    转发开关在<a href="/config">配置</a>页。<b>本机也要列进下面的表格</b>才会分到活。
+  <div class="msg caution">
+    <b>下面的 <code>.env</code> 里是真实的令牌。</b>复制到子节点之后请
+    <code>chmod 600 .env</code>，并且别把它提交进版本库。
   </div>
 
   <section class="card">
-    <div class="card-head">
-      <h2>节点列表</h2>
-      <span class="hint">写回 <code>{esc(config_path)}</code> 的 <code>[CLUSTER].nodes</code></span>
-    </div>
-    <form method="post" action="/nodes">
-      {_hidden(csrf, "save_nodes")}
-      <div class="scroll"><table class="data">
-        <thead><tr><th>id</th><th>地址 host:port</th><th>权重</th><th></th><th>令牌来源</th><th></th></tr></thead>
-        <tbody>{"".join(rows)}
-          <tr>
-            <td><input name="new_node_id" placeholder="留空则用地址"></td>
-            <td><input name="new_node_address" placeholder="192.168.1.101:9527"></td>
-            <td><input name="new_node_weight" value="100"></td>
-            <td colspan="3" class="note">新增一行</td>
-          </tr>
-        </tbody>
-      </table></div>
-      <div class="actions">
-        <button class="primary" type="submit">保存节点列表</button>
-        <span class="note">把某一行的地址清空 = 删除该节点。{reload_note}</span>
+    <div class="card-head"><h2>{esc(plan.get("toml_name", "ipclick.toml"))}</h2>
+      <span class="hint">按端口命名，所以几台节点的配置能并排放在同一个目录里</span>
+      <div class="head-actions">
+        <button type="button" class="small" data-copy="dep-toml">复制</button>
+        <a class="btn small" href="/deploy?node={attr(node_id)}&amp;kind=toml&amp;dl=1"
+           download="{attr(plan.get("toml_name", "ipclick.toml"))}">下载</a>
       </div>
-    </form>
-    <p class="note" style="margin-top:.75rem">
-      「测试连接」只验<b>连通性</b>和<b>集群内部鉴权</b>，不发业务请求。
-      失败时会区分"连不上"（查进程和网络）和"鉴权不通过"（核对各节点 <code>.env</code> 里的
-      <code>IPCLICK_CLUSTER_SECRET</code>）——这两种的排查方向完全相反。
-    </p>
-    <p class="note">节点的 <code>token</code> 不接受从网页写入——机密只走 <code>.env</code>。
-      需要给某个节点单独指定令牌时，请在配置文件里给那一项加 <code>token = "..."</code>。</p>
+    </div>
+    <pre id="dep-toml">{esc(plan.get("toml", ""))}</pre>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>.env</h2>
+      <span class="hint">两个值都取自主控当前生效的那份，复制过去必然对得上</span>
+      <div class="head-actions">
+        <button type="button" class="small" data-copy="dep-env">复制</button>
+        <a class="btn small" href="/deploy?node={attr(node_id)}&amp;kind=env&amp;dl=1"
+           download=".env">下载</a>
+      </div>
+    </div>
+    <pre id="dep-env">{esc(plan.get("env", ""))}</pre>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>在那台机器上怎么起</h2>
+      <span class="hint">两种写法挑一种：uv 建的 venv 默认不装 pip，反过来很多机器上没有 uv</span></div>
+    {commands}
   </section>
 """
-    return _page(body, username, csrf, "/nodes", title="集群节点", subtitle="加减机器、就地验证连通性与鉴权")
+    actions = (
+        f'<a class="btn" href="/config?tab=cluster">返回集群设置</a>'
+        f'<a class="btn primary" href="/deploy.zip">全部 {total_nodes} 台打包下载</a>'
+    )
+    return _page(
+        body,
+        username,
+        csrf,
+        "/config",
+        title=f"部署 {node_id}",
+        subtitle=f"复制到 <code>{esc(plan.get('address', ''))}</code> 那台机器上",
+        actions=actions,
+    )
+
+
+def render_skill(
+    markdown: str,
+    username: str,
+    csrf: str,
+    *,
+    version: str,
+    description: str,
+    install_dir: str,
+) -> str:
+    """把技能包摊在页面上：装它的两条命令 + 全文 + 下载。
+
+    技能本身是随包分发的（``ipclick skill install`` 就够了），这一页解决的是
+    **发现**问题：管理端是运维唯一一定会打开的地方，"原来还能让 AI 直接用"这件事
+    必须在这里被看见，否则它只存在于 ``--help`` 的第七行里。
+    """
+    body = f"""
+  <div class="msg tip">
+    技能包（Skill）是一份 Markdown：告诉 AI 代理<b>什么时候</b>该用 IPClick、<b>怎么用</b>。
+    装进项目之后，直接对它说"用 ipclick 抓一下 …"就行，不必再逐条解释命令。
+  </div>
+
+  <section class="card">
+    <div class="card-head"><h2>装到项目里</h2>
+      <span class="hint">在<b>装了 ipclick 的那个环境</b>里执行</span></div>
+    <p class="note">写到 <code>{esc(install_dir)}</code>，Claude Code 这类代理会自动发现它。</p>
+    <pre id="skill-install">ipclick skill install</pre>
+    <div class="actions">
+      <button type="button" data-copy="skill-install">复制命令</button>
+      <a class="btn" href="/skill.md" download="SKILL.md">下载 SKILL.md</a>
+    </div>
+    <p class="note" style="margin-top:.75rem">
+      已经存在且被你改过时不会覆盖——要覆盖加 <code>--force</code>。
+      升级 IPClick 之后重装一次，用法说明会跟着版本走。
+    </p>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>它会让 AI 知道什么</h2>
+      <span class="hint">v{esc(version)}</span></div>
+    <p class="note">{esc(description)}</p>
+    <p class="note">
+      正文里写清了输出契约（<code>--json</code> 时 stdout 只有一个 JSON 文档）、
+      五档退出码分别该往哪儿查、以及几个最容易踩的坑
+      （响应体默认截断、装包和下浏览器本体是两件事、别猜适配器名）。
+    </p>
+    <pre id="skill-body">{esc(markdown)}</pre>
+    <div class="actions">
+      <button type="button" data-copy="skill-body">复制全文</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>先让它自检</h2></div>
+    <p class="note">技能里第一条就是这句——AI 会先问清楚这台机器能干什么，再决定用哪个适配器：</p>
+    <pre id="skill-status">ipclick status --json</pre>
+    <div class="actions"><button type="button" data-copy="skill-status">复制</button></div>
+  </section>
+"""
+    return _page(
+        body,
+        username,
+        csrf,
+        "/skill",
+        title="AI 接入",
+        subtitle="把 IPClick 的用法交给 AI 代理——一份随版本走的技能包",
+    )
 
 
 __all__ = [
+    "DEFAULT_LIVE_MS",
+    "LIVE_INTERVALS",
     "NAV",
     "dashboard_live",
     "esc",
+    "live_label",
     "render_components",
     "render_config",
     "render_dashboard",
     "render_login",
-    "render_nodes",
+    "render_skill",
     "render_test",
     "render_trace",
+    "set_default_theme",
     "trace_live",
 ]

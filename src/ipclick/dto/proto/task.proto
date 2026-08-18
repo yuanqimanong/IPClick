@@ -175,6 +175,56 @@ message PingResp {
 }
 
 
+// 远程管理这台节点上的可选组件（装 / 卸 / 下浏览器本体 / 查状态）。
+//
+// 存在的理由：集群里每台机器都要各自装一遍适配器，而"逐台 SSH 上去敲命令"是
+// 这套东西部署时最烦的一步。主控的组件页因此需要能点名一台机器。
+//
+// **默认关闭**，要在被操作的那台上显式打开 [CLUSTER].allow_remote_install。
+// 这一位不是形式主义：打开它等于"能调本节点 gRPC 的人可以在本机跑 pip"。虽然包名
+// 走白名单（只有 IPClick 自己声明的那五个 extras，绝不拼接输入），但那仍然是从
+// "能代发 HTTP 请求"到"能改本机 Python 环境"的一次实质扩权，必须由机器的主人
+// 自己按下。关着时返回 PERMISSION_DENIED 并说清要改哪一项。
+message ComponentReq {
+  // 动作：list / install / uninstall / browser
+  // list 是只读的，仍然受 allow_remote_install 管——"这台装了什么"本身也是信息。
+  string op = 1;
+  // 组件的 extra 名。必须能在 ipclick.components.BY_EXTRA 里查到，查不到直接拒。
+  // op = "list" 时忽略。
+  string extra = 2;
+  // 仅 op = "browser"：要装哪个内核（chromium / firefox / webkit）。
+  string browser_kind = 3;
+  string from_node = 4;  // 发起方节点 id，只写日志
+}
+
+message ComponentJob {
+  string id = 1;
+  string title = 2;
+  string command = 3;      // 实际执行的命令，原样透出，便于核对"到底往哪个环境装了什么"
+  string status = 4;       // running / succeeded / failed
+  int32 returncode = 5;
+  int32 elapsed_seconds = 6;
+  // 进度。percent < 0 表示"量不出来"——那时前端画不确定态的条，
+  // 而不是显示一个 0% 的假进度。
+  double percent = 7;
+  int64 done_bytes = 8;
+  double speed_bytes = 9;
+  string phase = 10;       // 下载中 / 解压中 …
+  repeated string output = 11;
+}
+
+message ComponentResp {
+  bool ok = 1;
+  string message = 2;
+  string node_id = 3;                  // 对端自报的 id，核对有没有点错机器
+  ComponentJob job = 4;                // 正在跑或最近一次的任务；没有则不设
+  // op = "list" 时填：每个组件的状态，JSON 数组（结构同 ipclick.components.snapshot）。
+  // 用 JSON 而不是再定义一串 message：那份结构还在演进，跟着改 proto 会让
+  // 版本兼容变成负担，而这里是纯展示数据。
+  string components_json = 5;
+}
+
+
 // =====================================
 // 服务定义
 // =====================================
@@ -195,4 +245,8 @@ service TaskService {
   // 0.4 新增——对着 0.3 的节点调会收到 UNIMPLEMENTED，调用方据此判断"连上了、
   // 鉴权也过了，只是那台还没升级"。
   rpc Ping(PingReq) returns (PingResp) {}
+
+  // 远程管理可选组件。0.5 新增，**默认关闭**（见 ComponentReq 的说明）。
+  // 对着 0.4 及更早的节点调会收到 UNIMPLEMENTED，主控据此提示"那台还没升级"。
+  rpc Component(ComponentReq) returns (ComponentResp) {}
 }

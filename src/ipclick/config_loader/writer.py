@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import tomllib
 from typing import Any
 
 from ipclick.exceptions import ConfigError
@@ -64,6 +65,94 @@ def _section_bounds(lines: list[str], section: str) -> tuple[int, int] | None:
     if start is None:
         return None
     return start, len(lines)
+
+
+#: ``key = { a = 1, b = 2 }  # 注释`` 拆成「头部」「花括号里的内容」「尾部」。
+#: TOML 1.0 的内联表必须写在一行里，所以单行正则是够的。
+_INLINE_TABLE_RE = re.compile(r"^(\s*[^=\s]+\s*=\s*)\{(.*)\}(\s*(?:#.*)?)$")
+
+
+def _split_inline_pairs(body: str) -> list[str] | None:
+    """按**顶层**逗号切开内联表的内容。
+
+    不能直接 ``body.split(",")``：引号里的逗号（``ua = "a,b"``）和嵌套结构里的
+    逗号（``args = [1, 2]``）都会被切错，切错就等于把配置改坏。
+
+    看不懂的结构一律返回 None，让调用方去走"明确报错"那条路——写坏一个配置文件
+    的代价远大于少支持一种写法。
+    """
+    parts: list[str] = []
+    current = ""
+    depth = 0
+    quote = ""
+    for char in body:
+        if quote:
+            current += char
+            if char == quote:
+                quote = ""
+            continue
+        if char in "\"'":
+            quote = char
+        elif char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif char == "," and depth == 0:
+            parts.append(current)
+            current = ""
+            continue
+        current += char
+    if depth or quote:
+        return None
+    if current.strip():
+        parts.append(current)
+    return parts
+
+
+def _set_in_inline_table(lines: list[str], parent: str, table: str, key: str, literal: str) -> bool:
+    """把 ``key = literal`` 写进 ``[parent]`` 里那个叫 ``table`` 的内联表。
+
+    改成了返回 True，没找到可安全编辑的内联表返回 False。
+
+    存在的理由：模板里有些子表是内联写法（``viewport = {{ width = 1920, height = 1080 }}``）
+    而不是独立的 ``[BROWSER.viewport]`` 节。对这种节按"找不到节就在末尾追加一个"
+    处理，会让同一个键被声明两次，产出的文件下次启动直接解析不了。
+    """
+    bounds = _section_bounds(lines, parent)
+    if bounds is None:
+        return False
+    start, end = bounds
+    index = _find_key(lines, start + 1, end, table)
+    if index is None:
+        return False
+
+    raw = lines[index]
+    newline = "\n" if raw.endswith("\n") else ""
+    match = _INLINE_TABLE_RE.match(raw.rstrip("\r\n"))
+    if match is None:
+        return False
+
+    head, body, tail = match.group(1), match.group(2), match.group(3)
+    pairs = _split_inline_pairs(body)
+    if pairs is None:
+        return False
+
+    key_re = re.compile(r"^\s*" + re.escape(key) + r"\s*=")
+    for position, pair in enumerate(pairs):
+        if key_re.match(pair):
+            leading = pair[: len(pair) - len(pair.lstrip())]
+            pairs[position] = f"{leading}{key} = {literal}"
+            break
+    else:
+        pairs.append(f" {key} = {literal}")
+
+    # 每项统一成 " k = v"，再用逗号连起来——原样保留各项前后的空格会让
+    # "改过的那一项"和"没改的"排版不一致，看起来像文件被弄乱了。
+    body_out = ",".join(f" {pair.strip()}" for pair in pairs)
+    lines[index] = f"{head}{{{body_out} }}{tail}{newline}"
+    return True
 
 
 def _find_key(lines: list[str], start: int, end: int, key: str) -> int | None:
@@ -126,6 +215,21 @@ def set_values(text: str, updates: dict[str, dict[str, Any]]) -> tuple[str, list
             bounds = _section_bounds(lines, section)
 
             if bounds is None:
+                # 没有 [section] 这个节头。先看看它是不是父节里的一个**内联表**
+                # （``viewport = { width = 1920, height = 1080 }``）——那种情况下
+                # 直接追加一个 [section] 节头会让同一个键被声明两次，产出的文件
+                # 下次启动解析不了（save() 现在会拦住，但那时保存已经失败了）。
+                parent, _, table = section.rpartition(".")
+                if parent and _set_in_inline_table(lines, parent, table, key, literal):
+                    changes.append(f"[{parent}].{table}.{key} = {literal}")
+                    continue
+                if parent and _section_bounds(lines, parent) is not None:
+                    # 父节在，但那一项既不是内联表也不是子节——改不动，明说。
+                    # 猜着写下去的结果是产出一个开不了机的配置。
+                    raise ConfigError(
+                        f"改不了 [{section}].{key}：配置文件里 [{parent}] 下的 {table} "
+                        f"不是可以就地编辑的形式。请手工编辑这个文件"
+                    )
                 # 整节都不存在：追加到末尾。注释说明它是被界面加进来的，
                 # 否则以后看到一个没有任何说明的裸节会一头雾水。
                 if lines and not lines[-1].endswith("\n"):
@@ -209,15 +313,33 @@ def set_nodes(text: str, nodes: list[dict[str, Any]]) -> str:
 
 
 def save(path: Path, text: str, *, backup: bool = True) -> Path | None:
-    """原子写入，并可留一份备份。
+    """原子写入，并可留一份备份。写之前先确认它还是合法 TOML。
+
+    **为什么要校验。** 这个模块是按行做文本编辑的，不是"读成对象再序列化回去"——
+    那样做会把注释和排版全丢掉，而这个文件里的注释是给人看的主要内容。代价是
+    存在产出非法 TOML 的可能：:func:`set_values` 遇到只以**内联表**形式存在的节
+    （``viewport = {{ width = 1920 }}``）会在文件末尾追加一个 ``[BROWSER.viewport]``
+    表头，于是同一个键被声明两次，文件下次启动直接解析不了。
+
+    这种事故的形状特别糟：写入是成功的，界面提示"已保存"，服务照旧在跑，
+    直到下一次重启才炸——那时候人早就不记得自己在网页上改过什么了。所以在这里
+    拦一道：宁可保存失败并说清原因，也不要写出一个开不了机的配置。
 
     Returns:
         备份文件路径；没做备份则为 None。
 
     Raises:
-        ConfigError: 写入失败（目录不可写、磁盘满等）。
+        ConfigError: 内容不是合法 TOML，或写入失败（目录不可写、磁盘满等）。
     """
     path = Path(path)
+    try:
+        _ = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(
+            f"拒绝写入 {path}：改完之后的内容不是合法 TOML（{e}）。"
+            f"文件没有被改动。这是 IPClick 自己的 bug，请带上你改的那一项去提 issue"
+        ) from e
+
     backup_path: Path | None = None
     try:
         if backup and path.exists():
@@ -240,24 +362,29 @@ def save(path: Path, text: str, *, backup: bool = True) -> Path | None:
     return backup_path
 
 
-def target_path(config_path: str | Path | None = None) -> Path:
+def target_path(config_path: str | Path | None = None, port: int | None = None) -> Path:
     """该往哪个文件写。
 
     绝不写包内的 default_config.toml——那是随包分发的模板，改它会在下次
     ``pip install --upgrade`` 时被覆盖，而且会影响同机的其他项目。
+
+    查找顺序和 :func:`~ipclick.config_loader.loader.candidate_names` 保持一致：
+    带端口时先找 ``ipclick-<端口>.toml``。两边不一致的后果是"页面上改的和进程
+    实际读的不是同一个文件"，而那种错位在界面上完全看不出来。
     """
-    from ipclick.config_loader.loader import DEFAULT_CONFIG_PATH
+    from ipclick.config_loader.loader import DEFAULT_CONFIG_PATH, candidate_names
 
     if config_path:
         path = Path(config_path)
         if path.resolve() == DEFAULT_CONFIG_PATH.resolve():
             raise ConfigError("不能修改包内的默认配置模板，请先 ipclick init 生成本地 ipclick.toml")
         return path
-    for name in ("ipclick.toml", ".ipclick.toml"):
+    names = candidate_names(port)
+    for name in names:
         candidate = Path(name)
         if candidate.exists():
             return candidate
-    return Path("ipclick.toml")
+    return Path(names[0])
 
 
 __all__ = [

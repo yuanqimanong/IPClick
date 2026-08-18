@@ -23,6 +23,7 @@ from ipclick.exceptions import ConfigError
 from ipclick.factory import resolve_mode
 from ipclick.health import HealthReporter
 from ipclick.limiter import LimiterSettings
+from ipclick.ports import DEFAULT_GRPC_PORT
 from ipclick.secrets import warn_secrets_in_config
 from ipclick.services import TaskService
 from ipclick.tls import TLSSettings, describe, server_credentials, warn_if_insecure
@@ -51,9 +52,13 @@ class IPClickServer:
         host: str | None = None,
         port: int | None = None,
         web_port: int | None = None,
+        web_host: str | None = None,
     ):
         self._config_path: str | None = config_path
-        self.config: Settings = load_config(config_path)
+        # 带 --port 时先找 ipclick-<端口>.toml：一台机器上起多个实例时，
+        # 各读各的配置（不同的 worker 数、限流、链路库）。见 loader.candidate_names。
+        self._cli_port: int | None = port
+        self.config: Settings = load_config(config_path, port)
 
         # 监听地址在这里就定下来，而不是等到 start()。
         #
@@ -62,7 +67,7 @@ class IPClickServer:
         # 链路记录器都在这个构造函数里初始化，所以端口得比它们更早确定。
         server_section = dict(self.config.get("SERVER", {}))
         self._host: str = host or str(server_section.get("host", "[::]"))
-        self._port: int = int(port if port else server_section.get("port", 9527))
+        self._port: int = int(port if port else server_section.get("port", DEFAULT_GRPC_PORT))
 
         # 按配置里的 [LOG] 节初始化日志（此前这一节完全没被读取过）；
         # [GENERAL].debug 为真时强制 DEBUG 级别
@@ -94,6 +99,11 @@ class IPClickServer:
             self.web_config.enabled = web
         if web_port:
             self.web_config.port = web_port
+        # --web-host 0.0.0.0 让同一局域网里的手机 / 另一台机器也能打开管理端。
+        # 默认仍然只监听 127.0.0.1，改这一项要显式写出来——非回环 + 明文 HTTP
+        # 的组合会在 WebServer.start() 里告警。
+        if web_host:
+            self.web_config.host = web_host
         self._web_server: WebServer | None = None
         self._web_pages: WebPages | None = None
         self._listen_addr: str = ""
@@ -116,6 +126,10 @@ class IPClickServer:
             self.recorder,
             task_service=self.task_service,
             config_path=self._config_path,
+            cli_port=self._cli_port,
+            # 进程实际在听的两个端口。配置页读的是文件，这两个数只用于在
+            # 命令行覆盖过端口时把"文件里写的"和"实际在跑的"同时摆出来。
+            runtime_ports={"SERVER.port": self._port, "WEB.port": self.web_config.port},
             # 保存节点之后立即重建路由，不用重启。页面层没有权限碰这些对象，
             # 所以由服务端注入一个回调。
             on_cluster_changed=self._reload_cluster,
@@ -126,6 +140,7 @@ class IPClickServer:
             action_handler=self._web_action,
             pages=self._web_pages,
             live_provider=self._live_snapshot,
+            theme=self.web_config.theme,
         )
         self._start_node_pool()
         url = self._web_server.start(self.web_config.host, self.web_config.port)
@@ -185,6 +200,21 @@ class IPClickServer:
         return {
             "server": {
                 "address": self._listen_addr,
+                # 两个端口分开报，而且都取**运行时实际值**。
+                #
+                # 0.5.0 之前整个 Web 端一次都没显示过自己在哪个端口上：仪表盘只有
+                # 一行没标注的「监听地址」（那是 gRPC 的）。于是人一边看着浏览器
+                # 地址栏里的 9527，一边看着页面上的 10086，再加上文档里的 9528，
+                # 三个数字凑不出"谁是谁"——这正是"端口有歧义"那条反馈的由来。
+                #
+                # 必须取 self._port / self.web_config 而不是配置文件里的值：
+                # `ipclick run --port X` 时两者不一样，而配置页读的是文件那一份。
+                "grpc_address": f"{self._host}:{self._port}",
+                "grpc_port": self._port,
+                "web_address": (
+                    f"{self.web_config.host}:{self.web_config.port}" if self.web_config.enabled else ""
+                ),
+                "web_port": self.web_config.port if self.web_config.enabled else 0,
                 "version": __version__,
                 "mode": mode,
                 "node_id": getattr(self.task_service, "node_id", self.recorder.node_id),
@@ -518,6 +548,7 @@ def serve(
     *,
     web: bool | None = None,
     web_port: int | None = None,
+    web_host: str | None = None,
 ):
     """启动IPClick服务器的便捷函数。
 
@@ -527,6 +558,8 @@ def serve(
         config_path (str | None): 自定义配置文件路径。如果为None，则使用默认配置。
         host (str | None): 绑定地址。如果为None，则使用默认地址（如localhost）。
         port (int | None): 服务端口。如果为None，则使用默认端口（如8080）。
+        web_host (str | None): Web 管理端的绑定地址（覆盖 ``[WEB].host``）。
+            传 ``0.0.0.0`` 让同一局域网内的其他设备也能访问。
     Returns:
         None: 函数执行成功返回None。
 
@@ -534,7 +567,7 @@ def serve(
     try:
         # host/port 交给构造函数：{port} 占位符要在日志与链路记录初始化之前
         # 拿到最终端口（见 IPClickServer.__init__）
-        server = IPClickServer(config_path, web=web, host=host, port=port, web_port=web_port)
+        server = IPClickServer(config_path, web=web, host=host, port=port, web_port=web_port, web_host=web_host)
         server.start()
     except KeyboardInterrupt:
         pass  # 正常退出
