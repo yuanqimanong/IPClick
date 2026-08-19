@@ -23,6 +23,7 @@ class _Ctx:
     def set_details(self, _details: str) -> None: ...
     def is_active(self) -> bool:
         return True
+
     def invocation_metadata(self) -> tuple[()]:
         return ()
 

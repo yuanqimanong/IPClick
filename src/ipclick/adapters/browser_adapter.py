@@ -47,7 +47,12 @@ from ipclick.adapters.base import (
     raise_if_script_error,
     retry,
 )
-from ipclick.adapters.browser_settings import BLOCKABLE_RESOURCES, WAIT_UNTIL_CHOICES, BrowserSettings
+from ipclick.adapters.browser_settings import (
+    BLOCKABLE_RESOURCES,
+    WAIT_UNTIL_CHOICES,
+    BrowserSettings,
+    resolve_max_pages,
+)
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError
@@ -83,6 +88,8 @@ class _BrowserWorker:
     def __init__(self, settings: BrowserSettings, engine: str):
         self._settings: BrowserSettings = settings
         self._engine: str = engine
+        #: 上一次算出来的页面上限，只用于变化时打一条日志，避免每次重建都刷屏
+        self._resolved_pages: int = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._start_lock: threading.Lock = threading.Lock()
@@ -146,8 +153,14 @@ class _BrowserWorker:
             launched = await browser_engines.launch(self._engine, self._settings)
             self._playwright = launched.driver
             self._browser = launched.browser
-            # 信号量跟着浏览器一起重建：旧的那个可能还扣着已经消失的页面的额度
-            self._semaphore = asyncio.Semaphore(self._settings.max_pages)
+            # 信号量跟着浏览器一起重建：旧的那个可能还扣着已经消失的页面的额度。
+            # max_pages = 0 时按本机内存推导（浏览器页面是内存瓶颈，不是 CPU），
+            # 每次重建都重算一次——机器上别的进程占了多少内存是会变的。
+            limit = resolve_max_pages(self._settings.max_pages, self._engine)
+            if limit != self._resolved_pages:
+                self._resolved_pages = limit
+                log.info(f"{self._engine} 页面并发上限：{limit}（max_pages={self._settings.max_pages or 'auto'}）")
+            self._semaphore = asyncio.Semaphore(limit)
             return self._browser
 
     @staticmethod

@@ -356,6 +356,19 @@ block_resources = ["image", "media", "font"]
 # ⚠️ camoufox 是 Firefox 加一整套扩展，单个 context 的内存开销明显高于 Chromium 系。
 #    内存紧张的机器（≤4GB）用 camoufox 时建议设成 1~2，否则会开始换页——请求
 #    从几秒变成几分钟，看起来像卡死。
+#
+# 0 = 按本机**可用内存**自动推导（不是按 CPU 核数——浏览器页面是内存瓶颈；
+# 按核数算的话一台 16 核 4GB 的机器会开出 16 个 camoufox 页面、约 6.4GB，
+# 直接换页。核数只用来封顶）。推导时：
+#   * 按引擎区分单页预算：camoufox 400MB，chromium 系 250MB
+#   * 给系统留 1GB 余量，硬上限 16
+#   * 容器里优先读 cgroup 限额，不看 /proc/meminfo —— 后者报的是**宿主机**内存，
+#     照它推导会在 512MB 的容器里开十几个页面然后被 OOM killer 杀掉，
+#     而现象只是"容器莫名其妙重启"
+#   * 读不出内存就退回下面这个静态默认值
+#
+# 默认保持 4 而不是 0：自动推导会因机器而异，静默改变既有部署的行为不合适。
+# 想让它跟着机器走就显式写 0。
 max_pages = 4
 # 是否允许请求携带 automation_script。
 # automation_script 是**在页面里执行的 JavaScript**（不是 Python）：
