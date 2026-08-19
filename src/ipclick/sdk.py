@@ -11,7 +11,7 @@ from ipclick.auth import AUTH_TOKEN_ENV, build_client_metadata, load_tokens
 from ipclick.compression import CompressionPolicy
 from ipclick.config_loader import load_config
 from ipclick.dto.models import DownloadResponse, DownloadTask, HttpMethod, IPClickAdapter, ProxyConfig
-from ipclick.dto.proto import task_pb2_grpc
+from ipclick.dto.proto import task_pb2, task_pb2_grpc
 from ipclick.exceptions import (
     AdapterError,
     AuthenticationError,
@@ -21,38 +21,31 @@ from ipclick.exceptions import (
 )
 from ipclick.limiter import HostLimitTimeout
 from ipclick.ports import DEFAULT_GRPC_PORT, port_hint
+from ipclick.rpc import client_options, credentials_for, open_channel
+from ipclick.rpc.options import KEEPALIVE_TIME_MS, MIN_PING_INTERVAL_WITHOUT_DATA_MS
 from ipclick.secrets import proxy_config
-from ipclick.tls import TLSSettings, channel_credentials, channel_options, describe
-from ipclick.utils.config_util import Settings
+from ipclick.tls import TLSSettings, describe
+from ipclick.utils.coerce import as_float, as_int
+from ipclick.utils.config_util import Settings, section
 from ipclick.utils.log_util import log
 
 
-_MAX_MESSAGE_LENGTH = 500 * 1024 * 1024
-
 _RPC_TIMEOUT_MARGIN = 30.0
 
+_REFUSED_MARKERS = ("refused_stream", "concurrent rpc limit")
 
-def _as_int(value: Any, default: int) -> int:
-    try:
-        result = int(value)
-    except (TypeError, ValueError):
-        return default
-    return result if result >= 0 else default
-
-
-def _as_float(value: Any, default: float) -> float:
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return default
-    return result if result >= 0 else default
-
-
-_REFUSED_MARKERS = ("refused_stream", "concurrent rpc limit", "too_many_pings")
+_KEEPALIVE_MARKERS = ("too_many_pings", "keepalive")
 
 
 def unavailable_hint(details: str | None, port: int) -> str:
     lowered = (details or "").lower()
+    if any(marker in lowered for marker in _KEEPALIVE_MARKERS):
+        return (
+            "（服务端因 **keepalive ping 过于频繁**发了 GOAWAY，与并发上限无关："
+            f"客户端每 {KEEPALIVE_TIME_MS // 1000}s 一次 ping，而服务端要求间隔不小于 "
+            f"{MIN_PING_INTERVAL_WITHOUT_DATA_MS // 1000}s。两端版本不一致时才会出现，"
+            "请把服务端升到与客户端同一版本）"
+        )
     if any(marker in lowered for marker in _REFUSED_MARKERS):
         return (
             "（服务端**并发已满**并主动拒流，不是连不上：它在途的 RPC 数已达 "
@@ -61,15 +54,6 @@ def unavailable_hint(details: str | None, port: int) -> str:
         )
     return port_hint(port)
 
-
-CHANNEL_OPTIONS: list[tuple[str, Any]] = [
-    ("grpc.max_send_message_length", _MAX_MESSAGE_LENGTH),
-    ("grpc.max_receive_message_length", _MAX_MESSAGE_LENGTH),
-    ("grpc.enable_http_proxy", 0),
-    ("grpc.keepalive_time_ms", 60000),
-    ("grpc.keepalive_timeout_ms", 30000),
-    ("grpc.keepalive_permit_without_calls", True),
-]
 
 _TASK_FIELDS = frozenset(
     {
@@ -110,7 +94,7 @@ class StreamedResponse:
         self.error: str | None = header.error_message or None
         self.content_length: int = header.content_length
 
-    def _read_header(self) -> Any:
+    def _read_header(self) -> "task_pb2.TaskRespHeader":
         try:
             first = next(self._iter)
         except grpc.RpcError as e:
@@ -175,24 +159,24 @@ class ClientBase:
         self.config_path: str | None = config_path
         self.config: Settings = load_config(self.config_path)
 
-        server_config: dict[str, Any] = dict(self.config.get("SERVER", {}))
+        server_config: dict[str, Any] = section(self.config, "SERVER")
         self.host: str = host or server_config.get("host") or "127.0.0.1"
         self.port: int = int(port or server_config.get("port") or DEFAULT_GRPC_PORT)
 
         if self.host in ("[::]", "::", "0.0.0.0", ""):
             self.host = "127.0.0.1"
 
-        security_config = dict(self.config.get("SECURITY", {}))
+        security_config = section(self.config, "SECURITY")
         resolved_token = token or (load_tokens(security_config) or (None,))[0]
         self._metadata: tuple[tuple[str, str], ...] = build_client_metadata(resolved_token)
 
         self.tls: TLSSettings = tls or TLSSettings.from_config(security_config)
-        self._credentials: grpc.ChannelCredentials | None = channel_credentials(self.tls) if self.tls.enabled else None
-        self._channel_options: list[tuple[str, Any]] = CHANNEL_OPTIONS + channel_options(self.tls)
+        self._credentials: grpc.ChannelCredentials | None = credentials_for(self.tls)
+        self._channel_options: list[tuple[str, Any]] = client_options(self.tls)
 
-        client_config = dict(self.config.get("CLIENT", {}))
-        self.rpc_max_retries: int = _as_int(client_config.get("rpc_max_retries"), 2)
-        self.rpc_retry_backoff: float = _as_float(client_config.get("rpc_retry_backoff"), 0.5)
+        client_config = section(self.config, "CLIENT")
+        self.rpc_max_retries: int = as_int(client_config.get("rpc_max_retries"), 2, minimum=0)
+        self.rpc_retry_backoff: float = as_float(client_config.get("rpc_retry_backoff"), 0.5, minimum=0.0)
         self.compression: CompressionPolicy = CompressionPolicy(client_config)
         self._closed: bool = False
 
@@ -307,19 +291,11 @@ class Downloader(ClientBase):
 
         with self._lock:
             if self._stub is None:
-                self._channel = (
-                    grpc.secure_channel(
-                        self.target,
-                        self._credentials,
-                        options=self._channel_options,
-                        compression=grpc.Compression.Gzip,
-                    )
-                    if self._credentials is not None
-                    else grpc.insecure_channel(
-                        self.target,
-                        options=self._channel_options,
-                        compression=grpc.Compression.Gzip,
-                    )
+                self._channel = open_channel(
+                    self.target,
+                    credentials=self._credentials,
+                    options=self._channel_options,
+                    compression=grpc.Compression.Gzip,
                 )
                 self._stub = task_pb2_grpc.TaskServiceStub(self._channel)
         return self._stub

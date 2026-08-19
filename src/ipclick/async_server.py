@@ -8,6 +8,7 @@ from typing_extensions import override
 
 from ipclick.auth import TokenAuthInterceptor, extract_token, is_exempt, token_matches
 from ipclick.dto.proto import task_pb2_grpc
+from ipclick.rpc import server_options
 from ipclick.services.async_task_service import AsyncTaskService
 from ipclick.trace import get_recorder
 from ipclick.utils.log_util import log
@@ -62,19 +63,7 @@ def build_async_server(
         ),
         maximum_concurrent_rpcs=max_concurrent_rpcs,
         interceptors=interceptors,
-        options=[
-            ("grpc.keepalive_time_ms", 60000),
-            ("grpc.keepalive_timeout_ms", 30000),
-            ("grpc.keepalive_permit_without_calls", True),
-            ("grpc.http2.max_pings_without_data", 2),
-            ("grpc.http2.min_time_between_pings_ms", 10000),
-            ("grpc.http2.min_ping_interval_without_data_ms", 120000),
-            ("grpc.max_send_message_length", 500 * 1024 * 1024),
-            ("grpc.max_receive_message_length", 500 * 1024 * 1024),
-            ("grpc.max_concurrent_streams", max_concurrent_streams),
-            ("grpc.enable_http_proxy", 0),
-            ("grpc.so_reuseport", 1 if reuseport else 0),
-        ],
+        options=server_options(max_concurrent_streams=max_concurrent_streams, reuseport=reuseport),
         compression=compression,
     )
 
@@ -115,6 +104,8 @@ async def serve_async(
     except asyncio.CancelledError:
         await server.stop(grace=10)
         raise
+    finally:
+        await service.acleanup()
 
 
 __all__ = ["AsyncTaskService", "build_async_server", "serve_async"]

@@ -1,12 +1,12 @@
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 import json
 import queue
 import threading
 import time
 from typing import Any, cast
 
-import grpc
 from grpc import ServicerContext
 from typing_extensions import override
 
@@ -22,11 +22,15 @@ from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.models import METHOD_MAP, IPClickAdapter
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
 from ipclick.dto.response import Response
-from ipclick.exceptions import AdapterError, URLNotAllowedError
-from ipclick.limiter import HostLimiter, HostLimitTimeout, build_limiter
+from ipclick.limiter import HostLimiter, build_limiter
+from ipclick.protocols import ShardableLimiter
+from ipclick.server_settings import ServerSettings
+from ipclick.services.components import ComponentService
+from ipclick.services.detached import DetachedContext
+from ipclick.services.errors import CallerGone, classify, report
 from ipclick.trace import RequestTrace, TraceRecorder, get_recorder
 from ipclick.utils import json_hook
-from ipclick.utils.config_util import Settings
+from ipclick.utils.config_util import Settings, section
 from ipclick.utils.log_util import log
 from ipclick.utils.url_util import URLPolicy, validate_url
 
@@ -34,10 +38,6 @@ from ipclick.utils.url_util import URLPolicy, validate_url
 _DEFAULT_VERIFY_SSL = True
 _DEFAULT_ALLOW_REDIRECTS = True
 _DEFAULT_STREAM = False
-
-
-class CallerGone(Exception):
-    pass
 
 
 def caller_still_waiting(context: object) -> bool:
@@ -64,6 +64,13 @@ def is_forwarded(context: object) -> bool:
         return False
 
 
+def _adapter_display_name(pb_value: int) -> str:
+    try:
+        return IPClickAdapter.from_pb(pb_value).display_name
+    except ValueError:
+        return "unknown"
+
+
 def _build_trace(tr: RequestTrace | None) -> "task_pb2.Trace | None":
     if tr is None:
         return None
@@ -76,43 +83,26 @@ def _build_trace(tr: RequestTrace | None) -> "task_pb2.Trace | None":
     )
 
 
-class _IsolatedContext:
-    def __init__(self, metadata: tuple[tuple[str, str], ...] = ()) -> None:
-        self._metadata: tuple[tuple[str, str], ...] = metadata
-
-    def set_code(self, _code: object) -> None: ...
-
-    def set_details(self, _details: str) -> None: ...
-
-    def is_active(self) -> bool:
-        return True
-
-    def invocation_metadata(self) -> tuple[tuple[str, str], ...]:
-        return self._metadata
-
-
 class TaskService(task_pb2_grpc.TaskServiceServicer):
     def __init__(self, config: Settings):
         self.config: Settings = config
 
-        self.adapter_settings: AdapterSettings = AdapterSettings.from_config(dict(self.config.get("DOWNLOADER", {})))
-        self.browser_settings: BrowserSettings = BrowserSettings.from_config(dict(self.config.get("BROWSER", {})))
+        self.adapter_settings: AdapterSettings = AdapterSettings.from_config(section(self.config, "DOWNLOADER"))
+        self.browser_settings: BrowserSettings = BrowserSettings.from_config(section(self.config, "BROWSER"))
 
         self._adapter_cache: dict[str, DownloaderAdapter] = {}
         self._cache_lock: threading.Lock = threading.Lock()
         self._recorder: TraceRecorder = get_recorder()
-        self.node_id: str = str(dict(self.config.get("CLUSTER", {})).get("self_id", "") or "") or (
-            self._recorder.node_id
-        )
+        self.node_id: str = str(section(self.config, "CLUSTER").get("self_id", "") or "") or (self._recorder.node_id)
 
-        downloader_config = dict(self.config.get("DOWNLOADER", {}))
+        downloader_config = section(self.config, "DOWNLOADER")
         self._chunk_size: int = int(downloader_config.get("chunk_size", DEFAULT_CHUNK_SIZE) or DEFAULT_CHUNK_SIZE)
-        self._batch_concurrency: int = max(1, int(dict(self.config.get("SERVER", {})).get("max_workers", 10) or 10))
+        self._batch_concurrency: int = ServerSettings.from_config(section(self.config, "SERVER")).max_workers
         self._batch_executor: ThreadPoolExecutor | None = None
         self._started_at: float = time.monotonic()
-        self._install_manager: Any = None
+        self.components: ComponentService = ComponentService(self.config, _refresh_registry_after_install)
 
-        self.url_policy: URLPolicy = URLPolicy.from_config(dict(self.config.get("SECURITY", {})))
+        self.url_policy: URLPolicy = URLPolicy.from_config(section(self.config, "SECURITY"))
 
         self.host_limiter: HostLimiter = build_limiter(downloader_config)
 
@@ -132,7 +122,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 "内网地址拦截未启用；若服务端对不受信任的调用方开放，请设置 [SECURITY].block_private_networks = true"
             )
 
-    def limiters_for_sharding(self) -> list[Any]:
+    def limiters_for_sharding(self) -> list[ShardableLimiter]:
         return [self.host_limiter]
 
     def _cache_key(self, name: str) -> str:
@@ -156,92 +146,68 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @override
     def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
-        log.debug("Received request: {} for URL: {}", request.uuid, request.url)
-        start_time = time.monotonic()
-        method_name = METHOD_MAP.get(request.method, "GET")
-
-        try:
-            adapter_name = IPClickAdapter.from_pb(request.adapter).display_name
-        except ValueError:
-            adapter_name = "unknown"
-
-        with self._recorder.track_request(adapter_name, method_name, uuid=request.uuid, url=request.url) as tr:
-            tr.node_id = self.node_id
-            tr.forwarded = is_forwarded(context)
+        started = time.monotonic()
+        with self.track(request, context) as tr:
             try:
-                adapter_member = IPClickAdapter.from_pb(request.adapter)
-                adapter_name = adapter_member.display_name
-                adapter = self._get_cached_adapter(adapter_name)
-                tr.adapter = adapter.adapter_name
-
-                validate_url(request.url, self.url_policy)
-
-                if not caller_still_waiting(context):
-                    log.info(f"Request {request.uuid} 在开工前发现调用方已断开，放弃")
-                    raise CallerGone
-
+                adapter = self.prepare(request, context, tr)
                 response = self._execute_download(adapter, request, tr)
-                tr.attempts = response.attempts
-                grpc_response = self._build_grpc_response(request, response, tr)
-
+                grpc_response = self.accept(request, response, tr)
             except Exception as e:
                 grpc_response = self._response_for_exception(e, request, tr, context)
+            self.record_outcome(tr, grpc_response)
+        return self.stamp_elapsed(grpc_response, started, request)
 
-            tr.status_code = grpc_response.status_code
-            tr.size = len(grpc_response.content)
-            tr.error = grpc_response.error_message
+    @contextmanager
+    def track(self, request: "task_pb2.ReqTask", context: ServicerContext, *, stream: bool = False):
+        log.debug("Received request: {} for URL: {}", request.uuid, request.url)
+        with self._recorder.track_request(
+            _adapter_display_name(request.adapter),
+            METHOD_MAP.get(request.method, "GET"),
+            uuid=request.uuid,
+            url=request.url,
+            stream=stream,
+        ) as tr:
+            tr.node_id = self.node_id
+            tr.forwarded = is_forwarded(context)
+            yield tr
 
-        elapsed_ms = int((time.monotonic() - start_time) * 1000)
-        grpc_response.response_time_ms = elapsed_ms
+    def prepare(self, request: "task_pb2.ReqTask", context: ServicerContext, tr: RequestTrace) -> DownloaderAdapter:
+        adapter = self._get_cached_adapter(_adapter_display_name(request.adapter))
+        tr.adapter = adapter.adapter_name
+        validate_url(request.url, self.url_policy)
+        if not caller_still_waiting(context):
+            raise CallerGone
+        return adapter
 
+    def accept(self, request: "task_pb2.ReqTask", response: Response, tr: RequestTrace) -> "task_pb2.TaskResp":
+        tr.attempts = response.attempts
+        return self._build_grpc_response(request, response, tr)
+
+    @staticmethod
+    def record_outcome(tr: RequestTrace, grpc_response: "task_pb2.TaskResp") -> None:
+        tr.status_code = grpc_response.status_code
+        tr.size = len(grpc_response.content)
+        tr.error = grpc_response.error_message
+
+    @staticmethod
+    def stamp_elapsed(
+        grpc_response: "task_pb2.TaskResp", started: float, request: "task_pb2.ReqTask"
+    ) -> "task_pb2.TaskResp":
+        grpc_response.response_time_ms = int((time.monotonic() - started) * 1000)
         log.debug(
-            "Request {} completed in {}ms, status: {}, adapter: {}",
+            "Request {} completed in {}ms, status: {}",
             request.uuid,
-            elapsed_ms,
+            grpc_response.response_time_ms,
             grpc_response.status_code,
-            adapter_name,
         )
         return grpc_response
 
     def _response_for_exception(
         self, exc: Exception, request: "task_pb2.ReqTask", tr: RequestTrace, context: ServicerContext
     ) -> "task_pb2.TaskResp":
-        if isinstance(exc, CallerGone):
-            tr.status_code = -1
-            tr.error = "调用方已断开"
-            return self._build_error_response(request, "调用方已断开，请求未执行", tr)
-
-        if isinstance(exc, URLNotAllowedError):
-            log.warning(f"Request {request.uuid} rejected: {exc}")
-            self._recorder.record_rejected("url_not_allowed")
-            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-            context.set_details(str(exc))
-            return self._build_error_response(request, str(exc), tr)
-
-        if isinstance(exc, HostLimitTimeout):
-            log.warning(f"Request {request.uuid} throttled: {exc}")
-            self._recorder.record_rejected("host_limit")
-            context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
-            context.set_details(str(exc))
-            return self._build_error_response(request, str(exc), tr)
-
-        if isinstance(exc, AdapterError):
-            log.warning(f"Request {request.uuid} cannot be served: {exc}")
-            self._recorder.record_rejected("failed_precondition")
-            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            context.set_details(str(exc))
-            return self._build_error_response(request, str(exc), tr)
-
-        if isinstance(exc, ValueError):
-            log.warning(f"Request {request.uuid} invalid: {exc}")
-            self._recorder.record_rejected("invalid_argument")
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(exc))
-            return self._build_error_response(request, str(exc), tr)
-
-        log.exception(f"Request {request.uuid} failed unexpectedly: {exc}")
-        self._recorder.record_rejected("internal_error")
-        return self._build_error_response(request, f"内部错误: {type(exc).__name__}", tr)
+        failure = classify(exc)
+        report(failure, exc, request_uuid=request.uuid, recorder=self._recorder, context=context)
+        return self._build_error_response(request, failure.message, tr)
 
     @staticmethod
     def _decode_body(raw: str | bytes, field_name: str) -> Any:
@@ -358,60 +324,23 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @override
     def SendStream(self, request: "task_pb2.ReqTask", context: ServicerContext) -> Iterator["task_pb2.TaskRespChunk"]:
-        log.debug("Received stream request: {} for URL: {}", request.uuid, request.url)
-        start_time = time.monotonic()
+        started = time.monotonic()
         total_bytes = 0
         error_message = ""
 
-        try:
-            adapter_name = IPClickAdapter.from_pb(request.adapter).display_name
-        except ValueError:
-            adapter_name = "unknown"
-
-        with self._recorder.track_request(
-            adapter_name,
-            METHOD_MAP.get(request.method, "GET"),
-            uuid=request.uuid,
-            url=request.url,
-            stream=True,
-        ) as tr:
-            tr.node_id = self.node_id
-            tr.forwarded = is_forwarded(context)
+        with self.track(request, context, stream=True) as tr:
             try:
-                adapter = self._get_cached_adapter(adapter_name)
-                tr.adapter = adapter.adapter_name
-                validate_url(request.url, self.url_policy)
-
-                download_kwargs = self._build_download_kwargs(request)
-                download_kwargs.pop("max_retries", None)
-                download_kwargs.pop("retry_delay", None)
-
-                stream = self._limited_stream(
-                    request.url,
-                    adapter.download_stream(request.url, chunk_size=self._chunk_size, **download_kwargs),
-                )
-
+                adapter = self.prepare(request, context, tr)
                 header_sent = False
-                for event in stream:
+                for event in self._open_stream(adapter, request):
                     if context.is_active() is False:
                         log.info(f"Stream request {request.uuid} cancelled by client")
                         break
-
                     if isinstance(event, StreamHeader):
                         tr.status_code = event.status_code
                         error_message = event.error or ""
-                        yield task_pb2.TaskRespChunk(
-                            header=task_pb2.TaskRespHeader(
-                                request_uuid=request.uuid,
-                                adapter=request.adapter,
-                                effective_url=event.url,
-                                status_code=event.status_code,
-                                response_headers=event.headers or {},
-                                error_message=error_message,
-                                content_length=event.content_length,
-                            )
-                        )
                         header_sent = True
+                        yield self._stream_header(request, event)
                         if event.error:
                             break
                     else:
@@ -420,44 +349,12 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
                 if not header_sent:
                     error_message = "适配器未返回任何响应"
-                    yield task_pb2.TaskRespChunk(
-                        header=task_pb2.TaskRespHeader(
-                            request_uuid=request.uuid,
-                            adapter=request.adapter,
-                            effective_url=request.url,
-                            status_code=-1,
-                            error_message=error_message,
-                        )
-                    )
+                    yield self._stream_error_header(request, error_message)
 
-            except URLNotAllowedError as e:
-                error_message = str(e)
-                self._recorder.record_rejected("url_not_allowed")
-                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-                context.set_details(error_message)
-                yield self._stream_error_header(request, error_message)
-            except HostLimitTimeout as e:
-                error_message = str(e)
-                self._recorder.record_rejected("host_limit")
-                context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
-                context.set_details(error_message)
-                yield self._stream_error_header(request, error_message)
-            except AdapterError as e:
-                error_message = str(e)
-                self._recorder.record_rejected("failed_precondition")
-                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-                context.set_details(error_message)
-                yield self._stream_error_header(request, error_message)
-            except ValueError as e:
-                error_message = str(e)
-                self._recorder.record_rejected("invalid_argument")
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details(error_message)
-                yield self._stream_error_header(request, error_message)
             except Exception as e:
-                log.exception(f"Stream request {request.uuid} failed: {e}")
-                self._recorder.record_rejected("internal_error")
-                error_message = f"内部错误: {type(e).__name__}"
+                failure = classify(e)
+                report(failure, e, request_uuid=request.uuid, recorder=self._recorder, context=context)
+                error_message = failure.message
                 yield self._stream_error_header(request, error_message)
 
             tr.size = total_bytes
@@ -465,7 +362,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             if error_message and tr.status_code < 0:
                 tr.status_code = -1
 
-        elapsed_ms = int((time.monotonic() - start_time) * 1000)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
         yield task_pb2.TaskRespChunk(
             trailer=task_pb2.TaskRespTrailer(
                 response_time_ms=elapsed_ms,
@@ -474,6 +371,29 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             )
         )
         log.debug("Stream request {} finished in {}ms, {} bytes", request.uuid, elapsed_ms, total_bytes)
+
+    def _open_stream(self, adapter: DownloaderAdapter, request: "task_pb2.ReqTask") -> Iterator[StreamEvent]:
+        download_kwargs = self._build_download_kwargs(request)
+        for retry_key in ("max_retries", "retry_delay"):
+            _ = download_kwargs.pop(retry_key, None)
+        return self._limited_stream(
+            request.url,
+            adapter.download_stream(request.url, chunk_size=self._chunk_size, **download_kwargs),
+        )
+
+    @staticmethod
+    def _stream_header(request: "task_pb2.ReqTask", event: StreamHeader) -> "task_pb2.TaskRespChunk":
+        return task_pb2.TaskRespChunk(
+            header=task_pb2.TaskRespHeader(
+                request_uuid=request.uuid,
+                adapter=request.adapter,
+                effective_url=event.url,
+                status_code=event.status_code,
+                response_headers=event.headers or {},
+                error_message=event.error or "",
+                content_length=event.content_length,
+            )
+        )
 
     @staticmethod
     def _stream_error_header(request: task_pb2.ReqTask, message: str) -> "task_pb2.TaskRespChunk":
@@ -536,7 +456,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     def _handle_one(
         self, request: "task_pb2.ReqTask", metadata: tuple[tuple[str, str], ...] = ()
     ) -> "task_pb2.TaskResp":
-        return self.Send(request, cast(ServicerContext, cast(object, _IsolatedContext(metadata))))
+        return self.Send(request, DetachedContext(metadata).as_servicer_context())
 
     @override
     def Ping(self, request: "task_pb2.PingReq", context: ServicerContext) -> "task_pb2.PingResp":
@@ -554,98 +474,19 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @property
     def remote_install_allowed(self) -> bool:
-        return bool(dict(self.config.get("CLUSTER", {})).get("allow_remote_install", False))
+        return self.components.enabled
 
     @override
     def Component(self, request: "task_pb2.ComponentReq", context: ServicerContext) -> "task_pb2.ComponentResp":
-        if not self.remote_install_allowed:
-            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-            context.set_details(
-                "本节点未开启远程组件管理。要允许主控代装，请在这台机器的配置里设置 "
-                '[CLUSTER].allow_remote_install = true 并重启——它等于"能调本节点的人可以在本机跑 pip"，'
-                "所以默认是关的。"
-            )
-            return task_pb2.ComponentResp(ok=False, message="远程组件管理未开启", node_id=self.node_id)
-
-        op = (request.op or "").strip()
-        if request.from_node:
-            log.info(f"节点 {request.from_node} 请求在本机执行组件操作：{op} {request.extra}")
-
-        if op == "list":
-            return task_pb2.ComponentResp(
-                ok=True,
-                message="",
-                node_id=self.node_id,
-                components_json=self._components_json(),
-                job=self._component_job(),
-            )
-
-        manager = self._installer()
-        if op == "install":
-            ok, message = manager.install(request.extra)
-        elif op == "uninstall":
-            ok, message = manager.uninstall(request.extra)
-        elif op == "browser":
-            ok, message = manager.fetch_browser(request.extra, request.browser_kind or "chromium")
-        elif op == "status":
-            ok, message = True, ""
-        else:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(f"未知的组件操作 {op!r}（可选：list / status / install / uninstall / browser）")
-            return task_pb2.ComponentResp(ok=False, message=f"未知的组件操作 {op!r}", node_id=self.node_id)
-
-        return task_pb2.ComponentResp(
-            ok=ok,
-            message=message,
-            node_id=self.node_id,
-            components_json=self._components_json(),
-            job=self._component_job(),
-        )
-
-    def _installer(self) -> Any:
-        if self._install_manager is None:
-            from ipclick.web.installer import InstallManager
-
-            self._install_manager = InstallManager()
-            self._install_manager.on_finished = _refresh_registry_after_install
-        return self._install_manager
-
-    def _components_json(self) -> str:
-        import json as json_lib
-
-        from ipclick.adapters.browser_settings import BrowserSettings
-        from ipclick.components import snapshot
-
-        browser = BrowserSettings.from_config(dict(self.config.get("BROWSER", {})))
-        return json_lib.dumps(snapshot(browser), ensure_ascii=False, default=str)
-
-    def _component_job(self) -> "task_pb2.ComponentJob | None":
-        current = self._installer().current()
-        if not current:
-            return None
-        progress = dict(current.get("progress") or {})
-        percent = progress.get("percent")
-        return task_pb2.ComponentJob(
-            id=str(current.get("id", "")),
-            title=str(current.get("title", "")),
-            command=str(current.get("command", "")),
-            status=str(current.get("status", "")),
-            returncode=int(current.get("returncode") or 0),
-            elapsed_seconds=int(current.get("elapsed") or 0),
-            percent=float(percent) if percent is not None else -1.0,
-            done_bytes=int(progress.get("done_bytes") or 0),
-            speed_bytes=float(progress.get("speed") or 0.0),
-            phase=str(progress.get("phase") or ""),
-            output=list(current.get("output") or []),
-        )
+        return self.components.handle(request, context, node_id=self.node_id)
 
     @property
     def auth_required(self) -> bool:
         from ipclick.auth import load_tokens
         from ipclick.cluster.tokens import cluster_secret
 
-        section = dict(self.config.get("SECURITY", {}))
-        return bool(load_tokens(section)) or bool(cluster_secret(dict(self.config.get("CLUSTER", {}))))
+        security = section(self.config, "SECURITY")
+        return bool(load_tokens(security)) or bool(cluster_secret(section(self.config, "CLUSTER")))
 
     @property
     def forward_enabled(self) -> bool:
@@ -653,21 +494,36 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     def cleanup(self) -> None:
         log.info("Cleaning up TaskService resources...")
+        self._shutdown_batch_pool()
+        for name, adapter in self._drain_adapters():
+            try:
+                adapter.close()
+                log.debug(f"Closed adapter: {name}")
+            except Exception as e:
+                log.warning(f"Error closing adapter {name}: {e}")
+        log.info("TaskService cleanup completed")
 
+    async def acleanup(self) -> None:
+        log.info("Cleaning up TaskService resources...")
+        self._shutdown_batch_pool()
+        for name, adapter in self._drain_adapters():
+            try:
+                await adapter.aclose()
+                log.debug(f"Closed adapter: {name}")
+            except Exception as e:
+                log.warning(f"Error closing adapter {name}: {e}")
+        log.info("TaskService cleanup completed")
+
+    def _shutdown_batch_pool(self) -> None:
         pool, self._batch_executor = self._batch_executor, None
         if pool is not None:
             pool.shutdown(wait=False)
 
+    def _drain_adapters(self) -> list[tuple[str, DownloaderAdapter]]:
         with self._cache_lock:
-            for name, adapter in self._adapter_cache.items():
-                try:
-                    adapter.close()
-                    log.debug(f"Closed adapter: {name}")
-                except Exception as e:
-                    log.warning(f"Error closing adapter {name}: {e}")
+            adapters = list(self._adapter_cache.items())
             self._adapter_cache.clear()
-
-        log.info("TaskService cleanup completed")
+        return adapters
 
 
 def _refresh_registry_after_install(job: Any) -> None:

@@ -14,6 +14,7 @@ import threading
 import time
 from typing import Any, final
 
+from ipclick.utils.coerce import as_bool, as_int, as_text
 from ipclick.utils.log_util import log
 
 
@@ -140,21 +141,23 @@ class TraceSettings:
         defaults = cls()
 
         def _int(key: str, default: int, minimum: int) -> int:
-            try:
-                return max(minimum, int(section.get(key, default)))
-            except (TypeError, ValueError):
-                log.warning(f"[TRACE].{key} 不是整数，改用默认值 {default}")
+            if key not in section:
                 return default
+            raw = section[key]
+            value = as_int(raw, default, minimum=minimum)
+            if value == default and raw != default:
+                log.warning(f"[TRACE].{key} 不是 >= {minimum} 的整数，改用默认值 {default}")
+            return value
 
         return cls(
             memory_size=_int("memory_size", defaults.memory_size, 0),
-            sqlite_enabled=bool(section.get("sqlite_enabled", defaults.sqlite_enabled)),
-            sqlite_path=str(section.get("sqlite_path", defaults.sqlite_path) or defaults.sqlite_path),
+            sqlite_enabled=as_bool(section.get("sqlite_enabled"), defaults.sqlite_enabled),
+            sqlite_path=as_text(section.get("sqlite_path"), defaults.sqlite_path),
             retention_days=_int("retention_days", defaults.retention_days, 0),
-            only_errors=bool(section.get("only_errors", defaults.only_errors)),
+            only_errors=as_bool(section.get("only_errors"), defaults.only_errors),
             queue_size=_int("queue_size", defaults.queue_size, 100),
-            record_url=bool(section.get("record_url", defaults.record_url)),
-            node_id=node_id or str(section.get("node_id", "") or ""),
+            record_url=as_bool(section.get("record_url"), defaults.record_url),
+            node_id=node_id or as_text(section.get("node_id")),
         )
 
 

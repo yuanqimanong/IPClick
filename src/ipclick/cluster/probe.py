@@ -11,8 +11,8 @@ from ipclick.cluster.node import Node
 from ipclick.cluster.tokens import token_for
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
 from ipclick.health import check_health
-from ipclick.sdk import CHANNEL_OPTIONS
-from ipclick.tls import TLSSettings, channel_credentials, channel_options
+from ipclick.rpc import open_channel_for
+from ipclick.tls import TLSSettings
 from ipclick.utils.log_util import log
 
 
@@ -100,12 +100,7 @@ def _ping(
     from_node: str,
 ) -> ProbeResult:
     target = node.address
-    options = [*CHANNEL_OPTIONS, *channel_options(tls)]
-    channel = (
-        grpc.secure_channel(target, channel_credentials(tls), options=options)
-        if tls.enabled
-        else grpc.insecure_channel(target, options=options)
-    )
+    channel = open_channel_for(target, tls)
     try:
         stub = task_pb2_grpc.TaskServiceStub(channel)
         response = stub.Ping(

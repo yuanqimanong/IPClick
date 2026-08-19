@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, quote
 from typing_extensions import override
 
 from ipclick.ports import DEFAULT_WEB_PORT
+from ipclick.utils.coerce import as_bool, as_int, as_text
 from ipclick.utils.log_util import log
 from ipclick.web.assets import csp
 from ipclick.web.auth import SessionStore, WebCredentials
@@ -21,6 +22,8 @@ from ipclick.web.templates import dashboard_live, render_dashboard, render_login
 COOKIE_NAME = "ipclick_session"
 
 MAX_BODY_BYTES = 256 * 1024
+
+MAX_PORT = 65535
 
 _CSP = csp()
 
@@ -55,23 +58,15 @@ def is_public_host(host: str) -> bool:
 class WebConfig:
     def __init__(self, config: dict[str, Any] | None = None):
         data = dict(config or {})
-        self.enabled: bool = bool(data.get("enabled", False))
-        self.port: int = _as_int(data.get("port"), DEFAULT_WEB_PORT)
-        self.host: str = str(data.get("host") or "127.0.0.1").strip() or "127.0.0.1"
-        self.username: str = str(data.get("username") or "").strip()
+        self.enabled: bool = as_bool(data.get("enabled"))
+        self.port: int = as_int(data.get("port"), DEFAULT_WEB_PORT, minimum=1, maximum=MAX_PORT)
+        self.host: str = as_text(data.get("host"), "127.0.0.1")
+        self.username: str = as_text(data.get("username"))
         self.password: str = str(data.get("password") or "")
         self.theme: str = normalize_theme(data.get("theme"))
 
     def as_credentials_config(self) -> dict[str, Any]:
         return {"username": self.username, "password": self.password}
-
-
-def _as_int(value: Any, default: int) -> int:
-    try:
-        result = int(value)
-    except (TypeError, ValueError):
-        return default
-    return result if 0 < result < 65536 else default
 
 
 class WebServer:

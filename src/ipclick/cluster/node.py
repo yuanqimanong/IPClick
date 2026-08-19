@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from ipclick.exceptions import ConfigError
+from ipclick.utils.coerce import as_float, as_int, as_positive_float, as_text, as_text_tuple
 
 
 class NodeStatus(StrEnum):
@@ -44,24 +45,15 @@ class Node:
         except ValueError as e:
             raise ConfigError(f"集群节点 {address!r} 的端口不是数字") from e
 
-        weight = entry.get("weight", 100)
-        try:
-            weight = max(1, int(weight))
-        except (TypeError, ValueError):
-            weight = 100
-
-        raw_tags = entry.get("tags") or ()
-        tags = tuple(str(t) for t in raw_tags) if isinstance(raw_tags, (list, tuple, set)) else ()
-
         return cls(
-            id=str(entry.get("id") or address),
+            id=as_text(entry.get("id"), address),
             host=host.strip("[]"),
             port=port,
-            weight=weight,
-            region=str(entry.get("region", "")),
-            zone=str(entry.get("zone", "")),
-            tags=tags,
-            token=str(entry.get("token", "") or ""),
+            weight=as_int(entry.get("weight"), 100, minimum=1),
+            region=as_text(entry.get("region")),
+            zone=as_text(entry.get("zone")),
+            tags=as_text_tuple(entry.get("tags")),
+            token=as_text(entry.get("token")),
         )
 
 
@@ -182,21 +174,7 @@ class ClusterConfig:
 
         defaults = cls()
 
-        def _num(key: str, fallback: float) -> float:
-            try:
-                value = float(config.get(key, fallback))
-            except (TypeError, ValueError):
-                return fallback
-            return value if value > 0 else fallback
-
-        def _count(key: str, fallback: int) -> int:
-            try:
-                value = int(config.get(key, fallback))
-            except (TypeError, ValueError):
-                return fallback
-            return value if value >= 1 else fallback
-
-        forward = str(config.get("forward", defaults.forward) or defaults.forward).strip().lower()
+        forward = as_text(config.get("forward"), defaults.forward).lower()
         if forward in ("true", "yes", "1"):
             forward = "on"
         elif forward in ("false", "no", "0"):
@@ -206,25 +184,18 @@ class ClusterConfig:
 
         return cls(
             nodes=tuple(nodes),
-            strategy=str(config.get("load_balancer", defaults.strategy) or defaults.strategy).lower(),
-            failure_threshold=_count("failure_threshold", defaults.failure_threshold),
-            recovery_threshold=_count("recovery_threshold", defaults.recovery_threshold),
-            probe_interval=_num("probe_interval", defaults.probe_interval),
-            probe_timeout=_num("probe_timeout", defaults.probe_timeout),
-            max_failover=_count("max_failover", defaults.max_failover),
+            strategy=as_text(config.get("load_balancer"), defaults.strategy).lower(),
+            failure_threshold=as_int(config.get("failure_threshold"), defaults.failure_threshold, minimum=1),
+            recovery_threshold=as_int(config.get("recovery_threshold"), defaults.recovery_threshold, minimum=1),
+            probe_interval=as_positive_float(config.get("probe_interval"), defaults.probe_interval),
+            probe_timeout=as_positive_float(config.get("probe_timeout"), defaults.probe_timeout),
+            max_failover=as_int(config.get("max_failover"), defaults.max_failover, minimum=0),
             forward=forward,
-            self_id=str(config.get("self_id", "") or ""),
-            forward_timeout=max(0.0, _as_float(config.get("forward_timeout"), defaults.forward_timeout)),
-            secret=str(config.get("secret", "") or ""),
+            self_id=as_text(config.get("self_id")),
+            forward_timeout=as_float(config.get("forward_timeout"), defaults.forward_timeout, minimum=0.0),
+            secret=as_text(config.get("secret")),
             extra={k: v for k, v in config.items() if k not in _KNOWN_KEYS},
         )
-
-
-def _as_float(value: Any, fallback: float) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return fallback
 
 
 FORWARD_MODES = frozenset({"off", "on"})

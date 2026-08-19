@@ -7,6 +7,7 @@ from typing import Any, Protocol
 from ipclick.cluster.node import Node
 from ipclick.exceptions import ConfigError
 from ipclick.ports import DEFAULT_GRPC_PORT
+from ipclick.utils.coerce import as_float, as_int, as_text
 from ipclick.utils.log_util import log
 
 
@@ -31,29 +32,19 @@ class DiscoveryConfig:
         config = dict((cluster_config or {}).get("discovery") or {})
         defaults = cls()
 
-        mode = str(config.get("mode") or defaults.mode).strip().lower()
+        mode = as_text(config.get("mode"), defaults.mode).lower()
         if mode not in DISCOVERY_MODES:
             raise ConfigError(f"未知的节点发现方式 {mode!r}，可选：{'、'.join(sorted(DISCOVERY_MODES))}")
 
-        def _num(key: str, fallback: float) -> float:
-            raw = config.get(key)
-            if raw is None:
-                return fallback
-            try:
-                value = float(raw)
-            except (TypeError, ValueError):
-                return fallback
-            return value if value >= 0 else fallback
-
-        dns_name = str(config.get("dns_name") or "").strip()
+        dns_name = as_text(config.get("dns_name"))
         if mode == "dns" and not dns_name:
             raise ConfigError('[CLUSTER.discovery].mode = "dns" 时必须配置 dns_name')
 
         return cls(
             mode=mode,
             dns_name=dns_name,
-            port=int(_num("port", defaults.port)) or defaults.port,
-            refresh_interval=_num("refresh_interval", defaults.refresh_interval),
+            port=as_int(config.get("port"), defaults.port, minimum=1),
+            refresh_interval=as_float(config.get("refresh_interval"), defaults.refresh_interval, minimum=0.0),
         )
 
 

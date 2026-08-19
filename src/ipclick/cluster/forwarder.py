@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 import threading
-from typing import Any, cast, final
+from typing import Any
 
 import grpc
 from grpc import ServicerContext
@@ -17,10 +17,11 @@ from ipclick.compression import CompressionPolicy
 from ipclick.dto.models import METHOD_MAP, IPClickAdapter
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
 from ipclick.exceptions import ConfigError, TransportError
-from ipclick.sdk import CHANNEL_OPTIONS
+from ipclick.rpc import open_channel_for
+from ipclick.services.detached import DetachedContext
 from ipclick.services.task_service import FORWARD_HEADER, TaskService, is_forwarded
-from ipclick.tls import TLSSettings, channel_credentials, channel_options
-from ipclick.utils.config_util import Settings
+from ipclick.tls import TLSSettings
+from ipclick.utils.config_util import Settings, section
 from ipclick.utils.log_util import log
 
 
@@ -44,19 +45,6 @@ _NODE_FAULT_CODES = frozenset(
 )
 
 
-@final
-class _DirectContext:
-    def set_code(self, _code: object) -> None: ...
-
-    def set_details(self, _details: str) -> None: ...
-
-    def is_active(self) -> bool:
-        return True
-
-    def invocation_metadata(self) -> tuple[tuple[str, str], ...]:
-        return ()
-
-
 class ForwardingTaskService(TaskService):
     def __init__(
         self,
@@ -69,9 +57,9 @@ class ForwardingTaskService(TaskService):
         server_port: int = 0,
     ):
         super().__init__(config)
-        self.cluster: ClusterConfig = cluster or ClusterConfig.from_config(dict(config.get("CLUSTER", {})))
+        self.cluster: ClusterConfig = cluster or ClusterConfig.from_config(section(config, "CLUSTER"))
         self._tls: TLSSettings = tls or TLSSettings()
-        self._secret: str = cluster_secret(dict(config.get("CLUSTER", {})))
+        self._secret: str = cluster_secret(section(config, "CLUSTER"))
 
         self.self_id: str = resolve_self_id(self.cluster, server_host, server_port)
         if self.self_id:
@@ -80,7 +68,7 @@ class ForwardingTaskService(TaskService):
         self._pool: NodePool = pool or NodePool(self.cluster, tls=self._tls)
         self._channels: dict[str, grpc.Channel] = {}
         self._channels_lock: threading.Lock = threading.Lock()
-        self._compression: CompressionPolicy = CompressionPolicy(dict(config.get("CLIENT", {})))
+        self._compression: CompressionPolicy = CompressionPolicy(section(config, "CLIENT"))
         self._forwarded_count: int = 0
         self._local_count: int = 0
         self._server_host: str = server_host
@@ -152,7 +140,7 @@ class ForwardingTaskService(TaskService):
 
         if node_id == self.self_id:
             self._local_count += 1
-            return super().Send(request, cast(ServicerContext, cast(object, _DirectContext())))
+            return super().Send(request, DetachedContext().as_servicer_context())
 
         state = self._pool.state_for(node_id) or NodeState(node)
         try:
@@ -165,17 +153,17 @@ class ForwardingTaskService(TaskService):
         return response
 
     def reload_cluster(self, config: Settings) -> tuple[bool, str]:
-        section = dict(config.get("CLUSTER", {}))
+        cluster_section = section(config, "CLUSTER")
         with self._reload_lock:
             try:
-                updated = ClusterConfig.from_config(section)
+                updated = ClusterConfig.from_config(cluster_section)
             except ConfigError as e:
                 return False, f"新的集群配置不合法，已保持原样：{e}"
 
             previous = {n.id: n for n in self.cluster.nodes}
             self.config: Settings = config
             self.cluster = updated
-            self._secret = cluster_secret(section)
+            self._secret = cluster_secret(cluster_section)
 
             added, removed = self._pool.replace(updated)
 
@@ -279,13 +267,7 @@ class ForwardingTaskService(TaskService):
         with self._channels_lock:
             if node_id not in self._channels:
                 target = f"{host}:{port}"
-                options = [*CHANNEL_OPTIONS, *channel_options(self._tls)]
-                if self._tls.enabled:
-                    self._channels[node_id] = grpc.secure_channel(
-                        target, channel_credentials(self._tls), options=options
-                    )
-                else:
-                    self._channels[node_id] = grpc.insecure_channel(target, options=options)
+                self._channels[node_id] = open_channel_for(target, self._tls)
                 log.debug(f"已建立到节点 {node_id} ({target}) 的转发连接")
             return self._channels[node_id]
 

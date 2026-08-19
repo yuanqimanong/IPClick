@@ -30,7 +30,7 @@ class Field:
     def name(self) -> str:
         return f"{self.section}.{self.key}"
 
-    def parse(self, raw: str) -> Any:
+    def parse(self, raw: str) -> str | int | float | bool:
         text = (raw or "").strip()
         if self.kind == "bool":
             return text.lower() in ("1", "true", "on", "yes")
@@ -336,6 +336,16 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
             Field("BROWSER.timeout", "page_load", "页面加载超时（秒）", "float", minimum=1, maximum=600, default=30),
             Field("BROWSER.timeout", "script_exec", "脚本执行超时（秒）", "float", minimum=1, maximum=600, default=60),
             Field(
+                "BROWSER.timeout",
+                "settle",
+                "等网络空闲的上限（秒）",
+                "float",
+                minimum=0,
+                maximum=120,
+                default=5,
+                hint="仅 wait_until = networkidle 时生效；等不到不算失败，按 load 时的内容返回",
+            ),
+            Field(
                 "BROWSER",
                 "browser",
                 "浏览器内核",
@@ -349,8 +359,8 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
                 "页面等到什么时候算加载完",
                 "choice",
                 choices=tuple(sorted(WAIT_UNTIL_CHOICES)),
-                default="load",
-                hint="浏览器渲染里对耗时影响最大的一项，load 和 networkidle 常常差几倍",
+                default="networkidle",
+                hint="对耗时影响最大的一项；load 更快但会静默丢掉 load 之后才出现的内容",
             ),
             Field("BROWSER.viewport", "width", "视口宽度", "int", minimum=100, maximum=10000, default=1920),
             Field("BROWSER.viewport", "height", "视口高度", "int", minimum=100, maximum=10000, default=1080),

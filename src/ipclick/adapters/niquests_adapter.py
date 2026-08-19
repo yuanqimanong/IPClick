@@ -1,19 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-import threading
 from typing import Any
 
 from typing_extensions import override
 
-from ipclick.adapters.base import (
-    DEFAULT_CHUNK_SIZE,
-    DownloaderAdapter,
-    StreamEvent,
-    StreamHeader,
-    aretry,
-    retry,
-)
+from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader
+from ipclick.adapters.retry import aretry, retry
+from ipclick.adapters.sessions import AsyncSessionCache, SessionCache
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError
@@ -55,6 +49,8 @@ _SUPPORTED_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD",
 
 _PASSTHROUGH_KWARGS = frozenset({"auth", "cert", "hooks"})
 
+SessionKey = tuple[str | None, bool]
+
 
 class NiquestsAdapter(DownloaderAdapter):
     adapter_name: str = "niquests"
@@ -65,34 +61,41 @@ class NiquestsAdapter(DownloaderAdapter):
             raise AdapterError('niquests is not installed. Install it with: pip install "ipclick[niquests]"')
 
         super().__init__(settings)
-        self._sessions: dict[tuple[str | None, bool], Any] = {}
-        self._sessions_lock: threading.Lock = threading.Lock()
-        self._async_sessions: dict[tuple[int, str | None, bool], Any] = {}
+        self._sessions: SessionCache[SessionKey] = SessionCache(self.adapter_name, self._new_session)
+        self._async_sessions: AsyncSessionCache[SessionKey] = AsyncSessionCache(
+            self.adapter_name, self._new_async_session
+        )
         user_agent = _load_user_agent()
         self.ua_generator: Any = user_agent(platforms="desktop") if user_agent is not None else None
 
-    def _get_session(self, proxy: str | None, verify: bool) -> Any:
-        key = (proxy, verify)
-        session = self._sessions.get(key)
-        if session is not None:
-            return session
+    def _apply_common(self, session: Any, key: SessionKey) -> Any:
+        proxy, verify = key
+        session.verify = verify
+        session.trust_env = bool(self.trust_env)
+        if proxy:
+            session.proxies = {"http": proxy, "https": proxy}
+        return session
 
-        with self._sessions_lock:
-            if key not in self._sessions:
-                session = _load_niquests().Session()
-                session.verify = verify
-                session.trust_env = bool(self.trust_env)
-                if proxy:
-                    session.proxies = {"http": proxy, "https": proxy}
-                adapter = _load_niquests().adapters.HTTPAdapter(
-                    pool_connections=self.settings.max_keepalive_connections,
-                    pool_maxsize=self.settings.max_connections,
-                    max_retries=0,
-                )
-                session.mount("http://", adapter)
-                session.mount("https://", adapter)
-                self._sessions[key] = session
-            return self._sessions[key]
+    def _new_session(self, key: SessionKey) -> Any:
+        session = self._apply_common(_load_niquests().Session(), key)
+        adapter = _load_niquests().adapters.HTTPAdapter(
+            pool_connections=self.settings.max_keepalive_connections,
+            pool_maxsize=self.settings.max_connections,
+            max_retries=0,
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
+
+    def _new_async_session(self, key: SessionKey) -> Any:
+        return self._apply_common(
+            _load_niquests().AsyncSession(
+                pool_connections=self.settings.max_keepalive_connections,
+                pool_maxsize=self.settings.max_connections,
+                retries=0,
+            ),
+            key,
+        )
 
     def _request_kwargs(self, kwargs: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
         headers = kwargs.get("headers")
@@ -148,7 +151,7 @@ class NiquestsAdapter(DownloaderAdapter):
             raise ValidationError(f"Unsupported HTTP method: {method}")
 
         extra = self.parse_extra_kwargs(kwargs)
-        session = self._get_session(proxy, verify)
+        session = self._sessions.get((proxy, verify))
         request_kwargs = self._request_kwargs(
             {
                 "headers": headers,
@@ -177,25 +180,6 @@ class NiquestsAdapter(DownloaderAdapter):
             log.warning(f"niquests request failed for {url}: {e}")
             raise
 
-    def _get_async_session(self, proxy: str | None, verify: bool) -> Any:
-        import asyncio
-
-        key = (id(asyncio.get_running_loop()), proxy, verify)
-        session = self._async_sessions.get(key)
-        if session is not None:
-            return session
-        session = _load_niquests().AsyncSession(
-            pool_connections=self.settings.max_keepalive_connections,
-            pool_maxsize=self.settings.max_connections,
-            retries=0,
-        )
-        session.verify = verify
-        session.trust_env = bool(self.trust_env)
-        if proxy:
-            session.proxies = {"http": proxy, "https": proxy}
-        self._async_sessions[key] = session
-        return session
-
     @override
     @aretry()
     async def adownload(self, url: str, **kwargs: Any) -> Response:
@@ -205,7 +189,7 @@ class NiquestsAdapter(DownloaderAdapter):
             raise ValidationError(f"Unsupported HTTP method: {method}")
 
         request_kwargs = self._request_kwargs(kwargs, self.parse_extra_kwargs(kwargs.get("kwargs")))
-        session = self._get_async_session(kwargs.get("proxy"), bool(kwargs.get("verify", True)))
+        session = self._async_sessions.get((kwargs.get("proxy"), bool(kwargs.get("verify", True))))
         try:
             resp = await session.request(method, url, **request_kwargs)
             return Response(
@@ -233,7 +217,7 @@ class NiquestsAdapter(DownloaderAdapter):
             yield StreamHeader(url=url, status_code=-1, error=f"Unsupported HTTP method: {method}")
             return
 
-        session = self._get_session(kwargs.get("proxy"), bool(kwargs.get("verify", True)))
+        session = self._sessions.get((kwargs.get("proxy"), bool(kwargs.get("verify", True))))
         request_kwargs = self._request_kwargs(kwargs, self.parse_extra_kwargs(kwargs.get("kwargs")))
 
         try:
@@ -256,13 +240,13 @@ class NiquestsAdapter(DownloaderAdapter):
 
     @override
     def close(self) -> None:
-        with self._sessions_lock:
-            for session in self._sessions.values():
-                try:
-                    session.close()
-                except Exception as e:
-                    log.debug(f"关闭 niquests session 失败: {e}")
-            self._sessions.clear()
+        self._sessions.close()
+        self._async_sessions.close()
+
+    @override
+    async def aclose(self) -> None:
+        self._sessions.close()
+        await self._async_sessions.aclose()
 
 
 def is_available() -> bool:

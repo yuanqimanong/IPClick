@@ -8,39 +8,16 @@ from typing import Any, final
 from urllib.parse import urlsplit
 
 from ipclick.exceptions import ConfigError, IPClickError
+from ipclick.utils.coerce import require_float, require_int
+from ipclick.utils.config_util import section
 from ipclick.utils.log_util import log
+
+
+_SECTION = "[DOWNLOADER]"
 
 
 class HostLimitTimeout(IPClickError):
     pass
-
-
-def _as_float(value: Any, field: str, default: float, *, minimum: float = 0.0) -> float:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        raise ConfigError(f"[DOWNLOADER] {field} 期望数字，得到布尔值 {value!r}")
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        raise ConfigError(f"[DOWNLOADER] {field} 期望数字，得到 {value!r}") from None
-    if result < minimum:
-        raise ConfigError(f"[DOWNLOADER] {field} 不能小于 {minimum:g}，得到 {result:g}")
-    return result
-
-
-def _as_int(value: Any, field: str, default: int, *, minimum: int = 0) -> int:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        raise ConfigError(f"[DOWNLOADER] {field} 期望整数，得到布尔值 {value!r}")
-    try:
-        result = int(value)
-    except (TypeError, ValueError):
-        raise ConfigError(f"[DOWNLOADER] {field} 期望整数，得到 {value!r}") from None
-    if result < minimum:
-        raise ConfigError(f"[DOWNLOADER] {field} 不能小于 {minimum}，得到 {result}")
-    return result
 
 
 @dataclass(frozen=True)
@@ -65,32 +42,35 @@ class LimiterSettings:
     @classmethod
     def from_config(cls, downloader_config: dict[str, Any] | None) -> "LimiterSettings":
         config = dict(downloader_config or {})
-        concurrency = dict(config.get("concurrency") or {})
-        rate = dict(config.get("rate_limit") or {})
+        concurrency = section(config, "concurrency")
+        rate = section(config, "rate_limit")
         defaults = cls()
         return cls(
-            per_host_max_concurrent=_as_int(
+            per_host_max_concurrent=require_int(
                 concurrency.get("per_host_max_concurrent"),
-                "concurrency.per_host_max_concurrent",
+                f"{_SECTION} concurrency.per_host_max_concurrent",
                 defaults.per_host_max_concurrent,
             ),
-            per_host_qps=_as_float(rate.get("per_host_qps"), "rate_limit.per_host_qps", defaults.per_host_qps),
-            per_host_burst=_as_int(rate.get("per_host_burst"), "rate_limit.per_host_burst", defaults.per_host_burst),
-            wait_timeout=_as_float(
-                concurrency.get("per_host_wait_timeout"),
-                "concurrency.per_host_wait_timeout",
-                defaults.wait_timeout,
-                minimum=0.0,
+            per_host_qps=require_float(
+                rate.get("per_host_qps"), f"{_SECTION} rate_limit.per_host_qps", defaults.per_host_qps
             ),
-            idle_ttl=_as_float(
+            per_host_burst=require_int(
+                rate.get("per_host_burst"), f"{_SECTION} rate_limit.per_host_burst", defaults.per_host_burst
+            ),
+            wait_timeout=require_float(
+                concurrency.get("per_host_wait_timeout"),
+                f"{_SECTION} concurrency.per_host_wait_timeout",
+                defaults.wait_timeout,
+            ),
+            idle_ttl=require_float(
                 concurrency.get("per_host_idle_ttl"),
-                "concurrency.per_host_idle_ttl",
+                f"{_SECTION} concurrency.per_host_idle_ttl",
                 defaults.idle_ttl,
                 minimum=1.0,
             ),
-            max_tracked_hosts=_as_int(
+            max_tracked_hosts=require_int(
                 concurrency.get("max_tracked_hosts"),
-                "concurrency.max_tracked_hosts",
+                f"{_SECTION} concurrency.max_tracked_hosts",
                 defaults.max_tracked_hosts,
                 minimum=16,
             ),
@@ -237,8 +217,8 @@ class HostLimiter:
             return
 
         self._last_sweep = now
-        ttl = 0.0 if over_limit else self.settings.idle_ttl
-        stale = [h for h, s in self._slots.items() if s.idle and now - s.last_used > ttl]
+        ttl = self.settings.idle_ttl
+        stale = [h for h, s in self._slots.items() if s.idle and (over_limit or now - s.last_used > ttl)]
         for host in stale:
             del self._slots[host]
 
@@ -263,7 +243,7 @@ class HostLimiter:
 
 def build_limiter(downloader_config: dict[str, Any] | None) -> HostLimiter:
     config = dict(downloader_config or {})
-    rate = dict(config.get("rate_limit") or {})
+    rate = section(config, "rate_limit")
     backend = str(rate.get("backend") or "memory").strip().lower()
     if backend not in ("", "memory", "local"):
         raise ConfigError(

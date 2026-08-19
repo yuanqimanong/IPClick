@@ -1,18 +1,16 @@
 from abc import ABC, abstractmethod
 import asyncio
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 import functools
-from random import randrange, uniform
+from random import randrange
 import re
 import threading
-import time
 from typing import Any, cast
 
-from ipclick.adapters.settings import DEFAULT_RETRY_STATUS_CODES, AdapterSettings
+from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
-from ipclick.exceptions import AdapterError, ValidationError
-from ipclick.trace import get_recorder
+from ipclick.exceptions import ValidationError
 from ipclick.utils.log_util import log
 
 
@@ -31,194 +29,6 @@ class StreamHeader:
 
 
 StreamEvent = StreamHeader | bytes
-
-
-MAX_RETRY_DELAY = AdapterSettings().max_backoff
-
-
-def _coerce_delay(value: Any, default: float) -> float:
-    if value is None:
-        return default
-    try:
-        if isinstance(value, (tuple, list)):
-            if len(value) != 2:
-                return default
-            low, high = float(value[0]), float(value[1])
-            return uniform(low, high)
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def retry(
-    max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_delay"
-) -> Callable[[Callable[..., Response]], Callable[..., Response]]:
-
-    def decorator(func: Callable[..., Response]) -> Callable[..., Response]:
-        @functools.wraps(func)
-        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Response:
-            requested_retries = kwargs.get("max_retries")
-            max_retries = (
-                int(requested_retries) if requested_retries is not None else getattr(self, max_retries_attr, 3)
-            )
-            max_retries = max(0, int(max_retries))
-
-            requested_delay = kwargs.get("retry_delay")
-            base_delay = _coerce_delay(
-                requested_delay if requested_delay is not None else getattr(self, retry_delay_attr, 1.0),
-                default=1.0,
-            )
-
-            url = args[0] if args else kwargs.get("url", "unknown")
-            allowed = kwargs.get("allowed_status_codes") or None
-
-            settings: AdapterSettings | None = getattr(self, "settings", None)
-            retry_codes = settings.retry_codes if settings else DEFAULT_RETRY_STATUS_CODES
-            exponent = settings.backoff_exponent if settings else 2.0
-            max_backoff = settings.max_backoff if settings else MAX_RETRY_DELAY
-
-            last_exception: Exception | None = None
-
-            for attempt in range(max_retries + 1):
-                start_time = time.monotonic()
-                try:
-                    result = func(self, *args, **kwargs)
-
-                    if hasattr(result, "elapsed_ms") and result.elapsed_ms == 0:
-                        result.elapsed_ms = int((time.monotonic() - start_time) * 1000)
-
-                    if hasattr(result, "attempts"):
-                        result.attempts = attempt + 1
-
-                    status = getattr(result, "status_code", None)
-                    if (
-                        attempt < max_retries
-                        and isinstance(status, int)
-                        and status in retry_codes
-                        and not (allowed and status in allowed)
-                    ):
-                        sleep_time = _backoff(attempt, base_delay, exponent, max_backoff)
-                        get_recorder().record_retry(getattr(self, "adapter_name", "unknown"), "status_code")
-                        log.warning(
-                            f"Download {url} returned {status}, "
-                            f"retrying {attempt + 1}/{max_retries} in {sleep_time:.1f}s..."
-                        )
-                        time.sleep(sleep_time)
-                        continue
-
-                    return result
-
-                except ValidationError:
-                    raise
-
-                except AdapterError:
-                    raise
-
-                except Exception as e:
-                    last_exception = e
-
-                    if attempt >= max_retries:
-                        return Response.error_response(url, e, attempts=attempt + 1)
-
-                    sleep_time = _backoff(attempt, base_delay, exponent, max_backoff)
-                    get_recorder().record_retry(getattr(self, "adapter_name", "unknown"), "exception")
-                    log.warning(
-                        f"Download {url} failed, retrying {attempt + 1}/{max_retries} "
-                        f"in {sleep_time:.1f}s... Error: {e}"
-                    )
-                    time.sleep(sleep_time)
-
-            return Response.error_response(
-                url, last_exception or Exception("Max retries exceeded"), attempts=max_retries + 1
-            )
-
-        return wrapper
-
-    return decorator
-
-
-def aretry(
-    max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_delay"
-) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-
-    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        @functools.wraps(func)
-        async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Response:
-            requested_retries = kwargs.get("max_retries")
-            max_retries = max(
-                0, int(requested_retries) if requested_retries is not None else getattr(self, max_retries_attr, 3)
-            )
-            requested_delay = kwargs.get("retry_delay")
-            base_delay = _coerce_delay(
-                requested_delay if requested_delay is not None else getattr(self, retry_delay_attr, 1.0),
-                default=1.0,
-            )
-            url = args[0] if args else kwargs.get("url", "unknown")
-            allowed = kwargs.get("allowed_status_codes") or None
-
-            settings: AdapterSettings | None = getattr(self, "settings", None)
-            retry_codes = settings.retry_codes if settings else DEFAULT_RETRY_STATUS_CODES
-            exponent = settings.backoff_exponent if settings else 2.0
-            max_backoff = settings.max_backoff if settings else MAX_RETRY_DELAY
-
-            last_exception: Exception | None = None
-            for attempt in range(max_retries + 1):
-                start_time = time.monotonic()
-                try:
-                    result = await func(self, *args, **kwargs)
-                    if hasattr(result, "elapsed_ms") and result.elapsed_ms == 0:
-                        result.elapsed_ms = int((time.monotonic() - start_time) * 1000)
-                    if hasattr(result, "attempts"):
-                        result.attempts = attempt + 1
-
-                    status = getattr(result, "status_code", None)
-                    if (
-                        attempt < max_retries
-                        and isinstance(status, int)
-                        and status in retry_codes
-                        and not (allowed and status in allowed)
-                    ):
-                        sleep_time = _backoff(attempt, base_delay, exponent, max_backoff)
-                        get_recorder().record_retry(getattr(self, "adapter_name", "unknown"), "status_code")
-                        log.warning(
-                            f"Download {url} returned {status}, retrying {attempt + 1}/{max_retries} "
-                            f"in {sleep_time:.1f}s..."
-                        )
-                        await asyncio.sleep(sleep_time)
-                        continue
-                    return result
-
-                except (ValidationError, AdapterError):
-                    raise
-                except Exception as e:
-                    last_exception = e
-                    if attempt >= max_retries:
-                        return Response.error_response(url, e, attempts=attempt + 1)
-                    sleep_time = _backoff(attempt, base_delay, exponent, max_backoff)
-                    get_recorder().record_retry(getattr(self, "adapter_name", "unknown"), "exception")
-                    log.warning(
-                        f"Download {url} failed, retrying {attempt + 1}/{max_retries} "
-                        f"in {sleep_time:.1f}s... Error: {e}"
-                    )
-                    await asyncio.sleep(sleep_time)
-
-            return Response.error_response(
-                url, last_exception or Exception("Max retries exceeded"), attempts=max_retries + 1
-            )
-
-        return wrapper
-
-    return decorator
-
-
-def _backoff(
-    attempt: int,
-    base_delay: float,
-    exponent: float = 2.0,
-    max_backoff: float = MAX_RETRY_DELAY,
-) -> float:
-    delay = min(base_delay * (exponent**attempt), max_backoff)
-    return delay * uniform(0.8, 1.2)
 
 
 _JS_AUTHOR_ERRORS = ("SyntaxError", "ReferenceError", "TypeError: ")
@@ -412,6 +222,9 @@ class DownloaderAdapter(ABC):
 
     def close(self) -> None:
         return None
+
+    async def aclose(self) -> None:
+        self.close()
 
     def __enter__(self) -> "DownloaderAdapter":
         return self

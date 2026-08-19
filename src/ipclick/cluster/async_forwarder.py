@@ -14,9 +14,6 @@ from ipclick.utils.log_util import log
 
 @final
 class AsyncForwardingTaskService(AsyncTaskService, ForwardingTaskService):
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        ForwardingTaskService.__init__(self, *args, **kwargs)
-
     @override
     async def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
         if is_forwarded(context):
