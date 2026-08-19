@@ -534,6 +534,16 @@ def _as_strict_bool(raw: object, field: str, default: bool = False) -> bool:
     raise ConfigError(f"SERVER.{field} 期望布尔值（true/false），得到 {raw!r}")
 
 
+def _fork_supported() -> bool:
+    return sys.platform != "win32" and hasattr(os, "fork")
+
+
+def _fork() -> int:
+    if sys.platform == "win32":
+        raise ConfigError("多进程模式（[SERVER].processes > 1）依赖 os.fork，Windows 不支持；请把 processes 设为 1")
+    return os.fork()
+
+
 def _resolve_processes(config_path: str | None, port: int | None) -> int:
     try:
         config = load_config(config_path, port)
@@ -548,9 +558,14 @@ def _resolve_processes(config_path: str | None, port: int | None) -> int:
         return 1
     if processes < 0:
         return 1
-    if processes == 0:
-        return max(1, min(8, os.cpu_count() or 1))
-    return processes
+    resolved = max(1, min(8, os.cpu_count() or 1)) if processes == 0 else processes
+    if resolved > 1 and not _fork_supported():
+        log.warning(
+            f"[SERVER].processes 解析为 {resolved}，但多进程模式依赖 os.fork，"
+            f"当前平台（{sys.platform}）不支持，已降级为单进程运行"
+        )
+        return 1
+    return resolved
 
 
 def _probe_port(host: str, port: int) -> None:
@@ -588,7 +603,7 @@ def _serve_multiprocess(
     children: list[int] = []
 
     def spawn(index: int) -> int:
-        pid = os.fork()
+        pid = _fork()
         if pid == 0:
             try:
                 server = IPClickServer(
