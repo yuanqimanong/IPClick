@@ -237,3 +237,69 @@ class TestSQLiteAdapter:
             assert any("persisted-message" in r[0] for r in rows)
         finally:
             adapter.close()
+
+
+class TestCallSiteAttribution:
+    """日志里的文件 / 行号必须指向调用方，而不是 LogUtil 这层封装。
+
+    这一条看起来很琐碎，但它是**没有测试就一定会坏**的那类东西：
+    `_depth` 与调用链的层数强耦合，链上少一层（比如把某个装饰器去掉）而
+    `_depth` 没跟着改，每条日志就会指到"调用方的调用方"——而日志本身
+    看着完全正常，靠读输出永远发现不了。
+
+    0.6.0 优化 LogUtil 热路径时就真的踩过：去掉 @ensure_configured 之后
+    栈少了一层，所有日志的行号集体偏移。
+    """
+
+    def test_points_at_the_real_caller(self, tmp_path):
+        from ipclick.utils.log_util import LogUtil
+
+        log_file = tmp_path / "attribution.log"
+        LogUtil.init(level="DEBUG", log_file=str(log_file), format="{file}:{function}:{line} {message}")
+        try:
+
+            def emitting_function() -> None:
+                LogUtil.info("标记")
+
+            emitting_function()
+        finally:
+            LogUtil.remove_logger("default")
+
+        content = log_file.read_text(encoding="utf-8").strip()
+        # 精确匹配 文件:函数:行号 三段，而不是子串包含——"log_util.py" 恰好是
+        # "test_log_util.py" 的子串，用 not in 判断会永远为假。
+        assert content.startswith("test_log_util.py:emitting_function:"), f"日志没有指向真正的调用点：{content!r}"
+
+    def test_module_level_caller(self, tmp_path):
+        """模块级调用同样要指对，不能只在函数里成立。"""
+        from ipclick.utils.log_util import LogUtil
+
+        log_file = tmp_path / "attribution2.log"
+        LogUtil.init(level="DEBUG", log_file=str(log_file), format="{file}:{function}:{line} {message}")
+        try:
+            LogUtil.warning("直接从测试方法里打")
+        finally:
+            LogUtil.remove_logger("default")
+
+        content = log_file.read_text(encoding="utf-8").strip()
+        assert content.startswith("test_log_util.py:test_module_level_caller:"), f"应指向本测试方法：{content!r}"
+
+    def test_emitter_is_reused(self):
+        """缓存要真的生效——这是那 2.4 倍提速的全部来源。"""
+        from ipclick.utils.log_util import LogUtil
+
+        LogUtil.init(level="INFO")
+        LogUtil.info("预热")
+        first = LogUtil._emitter
+        LogUtil.info("再来一条")
+        assert LogUtil._emitter is first is not None
+
+    def test_reconfiguring_invalidates_the_cache(self):
+        """重新 init 之后必须重建，否则改了 _depth 或 handler 也不生效。"""
+        from ipclick.utils.log_util import LogUtil
+
+        LogUtil.init(level="INFO")
+        LogUtil.info("预热")
+        assert LogUtil._emitter is not None
+        LogUtil.init(level="DEBUG")
+        assert LogUtil._emitter is None
