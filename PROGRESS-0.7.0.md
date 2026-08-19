@@ -27,8 +27,13 @@
 - 新增 `async adownload()` —— 默认把同步 `download()` 丢 executor
 - 新增 `async adownload_stream()` —— 逐个搬分片，不 list() 化（否则丢掉流式的意义）
 
-### ⬜ 阶段 1b：curl_cffi / niquests 的真异步实现
-- [ ] `CurlCffiAdapter`：`curl_cffi.requests.AsyncSession`，`supports_async = True`
+### 🔄 阶段 1b：curl_cffi / niquests 的真异步实现
+- [x] `CurlCffiAdapter`：`AsyncSession`，`supports_async = True`
+      - AsyncSession 按 **(事件循环, proxy, verify, impersonate)** 缓存 —— 必须带循环，
+        AsyncCurl 绑定在创建它的循环上，跨循环复用会挂 "attached to a different loop"
+      - 抽出 `_build_request_kwargs()` 给同步/异步共用（各写一份会失步，
+        症状是"同一个请求同步能过异步过不了"，从表象看不出是参数差异）
+      - **实测：异步 1351 QPS vs 同步 50 线程 500 QPS ＝ 2.7×**（单进程，600 次请求）
 - [ ] `NiquestsAdapter`：niquests 的 async API
 - [ ] 异步版 retry 装饰器（现在的 `retry()` 里是 `time.sleep`）
 - [ ] 测试
