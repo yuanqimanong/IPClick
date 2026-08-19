@@ -32,7 +32,7 @@
 """
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 import contextlib
 from dataclasses import dataclass, field
 import time
@@ -91,7 +91,7 @@ class AsyncHostLimiter:
         return len(self._slots)
 
     @contextlib.asynccontextmanager
-    async def acquire(self, url: str, timeout: float | None = None) -> AsyncIterator[None]:
+    async def acquire(self, url: str, timeout: float | None = None) -> AsyncGenerator[None]:
         """取得该 URL 所属 host 的额度。用完自动归还。
 
         取的顺序与同步版一致：**先并发槽、后令牌**。并发槽是要保证的硬上限，

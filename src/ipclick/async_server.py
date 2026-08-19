@@ -23,6 +23,7 @@ from typing import Any
 
 import grpc
 from grpc import aio
+from typing_extensions import override
 
 from ipclick.auth import TokenAuthInterceptor, extract_token, is_exempt, token_matches
 from ipclick.dto.proto import task_pb2_grpc
@@ -53,6 +54,7 @@ class _AsyncAuthInterceptor(aio.ServerInterceptor):
     def enabled(self) -> bool:
         return self._delegate.enabled
 
+    @override
     async def intercept_service(self, continuation: Any, handler_call_details: Any) -> Any:
         if not self._delegate.enabled:
             return await continuation(handler_call_details)

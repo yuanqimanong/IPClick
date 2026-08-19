@@ -21,18 +21,20 @@
 """
 
 import asyncio
-from typing import Any
+from typing import Any, final
 
 from grpc import ServicerContext
 from typing_extensions import override
 
-from ipclick.cluster.forwarder import ForwardingTaskService, is_forwarded
+from ipclick.cluster.forwarder import ForwardingTaskService
 from ipclick.dto.proto import task_pb2
 from ipclick.exceptions import TransportError
 from ipclick.services.async_task_service import AsyncTaskService
+from ipclick.services.task_service import is_forwarded
 from ipclick.utils.log_util import log
 
 
+@final
 class AsyncForwardingTaskService(  # pyright: ignore[reportUnsafeMultipleInheritance, reportIncompatibleMethodOverride]
     AsyncTaskService, ForwardingTaskService
 ):
@@ -95,7 +97,7 @@ class AsyncForwardingTaskService(  # pyright: ignore[reportUnsafeMultipleInherit
         return await AsyncTaskService.Send(self, request, context)
 
     @override
-    def snapshot(self) -> dict[str, Any]:  # pyright: ignore[reportIncompatibleMethodOverride]
+    def snapshot(self) -> dict[str, Any]:
         return ForwardingTaskService.snapshot(self)
 
 

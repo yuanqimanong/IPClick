@@ -39,11 +39,17 @@ _DEFAULT_ALLOW_REDIRECTS = True
 _DEFAULT_STREAM = False
 
 
-class _CallerGone(Exception):
-    """调用方在我们开工前就断开了。内部信号，不外泄。"""
+class CallerGone(Exception):
+    """调用方在我们开工前就断开了。
+
+    包内信号，不会出现在 gRPC 响应里——:meth:`TaskService._response_for_exception`
+    把它翻译成 CANCELLED。异步那条路（AsyncTaskService）要做同样的判断，所以
+    这个名字和 :func:`caller_still_waiting` 都不带下划线：它们是**包内跨模块的
+    约定**，不是模块私有。带下划线又跨模块引用，等于骗自己。
+    """
 
 
-def _caller_still_waiting(context: object) -> bool:
+def caller_still_waiting(context: object) -> bool:
     """调用方还在等吗。
 
     探测不出来时按"还在等"处理：批量路径和测试里传的都是假 context，
@@ -281,9 +287,9 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 # 调用方已经走了就别开工了。浏览器渲染一次能占几十秒和一个页面
                 # 额度，用户关掉标签页之后还接着跑纯属浪费——尤其在小内存机器上，
                 # 反复点几次「试一试」就能把浏览器额度和内存全占死。
-                if not _caller_still_waiting(context):
+                if not caller_still_waiting(context):
                     log.info(f"Request {request.uuid} 在开工前发现调用方已断开，放弃")
-                    raise _CallerGone
+                    raise CallerGone
 
                 response = self._execute_download(adapter, request, tr)
                 tr.attempts = response.attempts
@@ -319,7 +325,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         部署而不是自己的参数。两份拷贝迟早失步，而失步的表现是"同一个错误在
         异步模式下把人指向了另一个方向"，比少一个分支更糟。
         """
-        if isinstance(exc, _CallerGone):
+        if isinstance(exc, CallerGone):
             tr.status_code = -1
             tr.error = "调用方已断开"
             return self._build_error_response(request, "调用方已断开，请求未执行", tr)

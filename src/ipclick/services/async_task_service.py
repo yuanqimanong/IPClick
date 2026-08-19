@@ -29,7 +29,7 @@ from ipclick.async_limiter import AsyncHostLimiter, build_async_limiter
 from ipclick.dto.models import METHOD_MAP, IPClickAdapter
 from ipclick.dto.proto import task_pb2
 from ipclick.dto.response import Response
-from ipclick.services.task_service import TaskService, _caller_still_waiting, _CallerGone, is_forwarded
+from ipclick.services.task_service import CallerGone, TaskService, caller_still_waiting, is_forwarded
 from ipclick.trace import RequestTrace
 from ipclick.utils.log_util import log
 from ipclick.utils.url_util import validate_url
@@ -65,7 +65,14 @@ class AsyncTaskService(TaskService):
         if loop is None or loop.is_closed():
             raise RuntimeError("异步服务端尚未就绪（事件循环未绑定），请稍后再试")
         future = asyncio.run_coroutine_threadsafe(self.Send(request, context), loop)
-        return future.result(timeout=timeout)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            # 页面已经不等了，这次下载就不该继续跑完：它还占着限流额度、
+            # 一条连接和目标站点的一次配额，而结果没有任何人要。
+            # cancel() 会沿 _chain_future 传到循环里那个 Task 上。
+            future.cancel()
+            raise
 
     # ------------------------------------------------------------------ #
     # RPC 入口
@@ -106,9 +113,9 @@ class AsyncTaskService(TaskService):
                 tr.adapter = adapter.adapter_name
 
                 validate_url(request.url, self.url_policy)
-                if not _caller_still_waiting(context):
+                if not caller_still_waiting(context):
                     log.debug("Request {} 在开工前发现调用方已断开，放弃", request.uuid)
-                    raise _CallerGone
+                    raise CallerGone
 
                 response = await self._aexecute_download(adapter, request, tr)
                 tr.attempts = response.attempts

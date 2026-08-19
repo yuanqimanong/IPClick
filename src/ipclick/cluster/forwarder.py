@@ -133,7 +133,7 @@ class ForwardingTaskService(TaskService):
         # 链路记录里的"谁执行的"必须和节点列表里的 id 是同一套标识，
         # 否则两边对不上就查不下去。
         if self.self_id:
-            self.node_id = self.self_id
+            self.node_id: str = self.self_id
 
         self._pool: NodePool = pool or NodePool(self.cluster, tls=self._tls)
         self._channels: dict[str, grpc.Channel] = {}
@@ -280,7 +280,7 @@ class ForwardingTaskService(TaskService):
                 return False, f"新的集群配置不合法，已保持原样：{e}"
 
             previous = {n.id: n for n in self.cluster.nodes}
-            self.config = config
+            self.config: Settings = config
             self.cluster = updated
             self._secret = cluster_secret(section)
 

@@ -8,6 +8,7 @@
 
 import asyncio
 import threading
+import time
 from typing import Any
 
 import pytest
@@ -96,11 +97,22 @@ class TestSendFromThread:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             service.bind_loop(loop)
+            # 循环**要真的转起来**，只是被一个同步 sleep 从内部堵死。
+            # 早先这里干脆不跑循环（线程里直接 sleep），超时断言照样通过，但投递
+            # 进去的协程从没被包成 Task，回收时冒一句 "coroutine was never
+            # awaited" —— 而那正是这个模块要防的故障信号。测试自己制造它，
+            # 等于把警报器摘了。
+            loop.call_soon(time.sleep, 0.8)
+            loop.call_later(1.2, loop.stop)
             ready.set()
-            # 用一个同步 sleep 把循环真正堵死，模拟"循环卡住"
-            import time as _t
+            loop.run_forever()
 
-            _t.sleep(3)
+            # 收尾：超时时被取消的那个 Task 得跑完。带着 pending 状态被回收
+            # 会冒 "Task was destroyed but it is pending"，同样是噪音掩盖真信号。
+            leftover = asyncio.all_tasks(loop)
+            if leftover:
+                loop.run_until_complete(asyncio.gather(*leftover, return_exceptions=True))
+            loop.close()
 
         thread = threading.Thread(target=run_loop, daemon=True)
         thread.start()
@@ -110,6 +122,62 @@ class TestSendFromThread:
             service.send_from_thread(request, _Ctx(), timeout=0.3)
         assert "timeout" in type(excinfo.value).__name__.lower() or "Timeout" in str(excinfo.value)
         thread.join(timeout=5)
+        assert not thread.is_alive(), "循环线程没退干净"
+
+    def test_timeout_cancels_the_in_flight_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """超时不只是"这边不等了"，在飞的那次下载必须真的停掉。
+
+        否则页面早就放弃，下载还在跑：占着 host 限流额度、一条连接、以及目标
+        站点的一次配额，而结果没有任何人要。单次无所谓，管理端被人反复点
+        「试一试」时这些没人要的在飞请求会累积——而且它们在任何页面上都看不见。
+        """
+        cancelled = threading.Event()
+
+        class Hanging:
+            adapter_name = "curl_cffi"
+            supports_async = True
+
+            async def adownload(self, url: str, **kwargs: Any) -> Response:
+                try:
+                    await asyncio.sleep(30)
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+                return Response(url=url, status_code=200, content=b"ok")
+
+        adapter = Hanging()
+        monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
+        monkeypatch.setattr(
+            "ipclick.services.task_service.get_adapter",
+            lambda name, settings=None, browser_settings=None: adapter,
+        )
+        service = AsyncTaskService(Settings({}))
+        ready = threading.Event()
+        loops: list[asyncio.AbstractEventLoop] = []
+
+        def run_loop() -> None:
+            loop = asyncio.new_event_loop()
+            loops.append(loop)
+            asyncio.set_event_loop(loop)
+            service.bind_loop(loop)
+            ready.set()
+            loop.run_forever()
+            leftover = asyncio.all_tasks(loop)
+            if leftover:
+                loop.run_until_complete(asyncio.gather(*leftover, return_exceptions=True))
+            loop.close()
+
+        thread = threading.Thread(target=run_loop, daemon=True)
+        thread.start()
+        ready.wait(timeout=5)
+        try:
+            request = task_pb2.ReqTask(uuid="u4", url="http://example.com/x")
+            with pytest.raises(TimeoutError):
+                service.send_from_thread(request, _Ctx(), timeout=0.3)
+            assert cancelled.wait(timeout=5), "超时后在飞的下载没被取消，它会一路跑到底"
+        finally:
+            loops[0].call_soon_threadsafe(loops[0].stop)
+            thread.join(timeout=5)
 
 
 class TestWebPageDispatch:
