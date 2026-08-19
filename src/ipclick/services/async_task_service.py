@@ -18,7 +18,6 @@
 
 import asyncio
 from collections.abc import AsyncIterator
-import contextlib
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -26,6 +25,7 @@ from grpc import ServicerContext
 from typing_extensions import override
 
 from ipclick.adapters.base import DownloaderAdapter
+from ipclick.async_limiter import AsyncHostLimiter, build_async_limiter
 from ipclick.dto.models import METHOD_MAP, IPClickAdapter
 from ipclick.dto.proto import task_pb2
 from ipclick.dto.response import Response
@@ -95,34 +95,19 @@ class AsyncTaskService(TaskService):
         协程的好处，但**语义完全一致**，第三方适配器不用改一行就能在异步模式下跑。
         """
         waiting_since = time.monotonic()
-        async with self._alimited(request.url):
+        async with self._async_limiter.acquire(request.url):
             if tr is not None:
                 tr.queued_ms = int((time.monotonic() - waiting_since) * 1000)
             return await adapter.adownload(request.url, **self._build_download_kwargs(request))
 
-    @contextlib.asynccontextmanager
-    async def _alimited(self, url: str) -> AsyncIterator[None]:
-        """按 host 限流的异步包装。
-
-        ⚠️ 当前实现把同步限流器的获取/释放丢进线程池。它**不阻塞事件循环**，
-        但每个等待中的请求仍然占着一个线程——也就是说协程省下来的那部分，
-        在开了限流的场景下会被这里吃回去一些。
-
-        真正的异步令牌桶（带 FIFO 等待队列，避免上千协程同时醒来的惊群、
-        让实际 QPS 精确等于配置值）在阶段 4 做。在那之前，限流未开启时
-        这里是**零开销**（下面第一行直接短路），开启时正确但不够快。
-        """
-        if not self.host_limiter.settings.enabled:
-            yield
-            return
-
-        loop = asyncio.get_running_loop()
-        ctx = self.host_limiter.acquire(url)
-        await loop.run_in_executor(None, ctx.__enter__)
-        try:
-            yield
-        finally:
-            await loop.run_in_executor(None, lambda: ctx.__exit__(None, None, None))
+    @property
+    def _async_limiter(self) -> "AsyncHostLimiter":
+        """按 host 的异步限流闸门。惰性建：它内部的 asyncio 原语要在事件循环里造。"""
+        limiter = self.__dict__.get("_async_limiter_cache")
+        if limiter is None:
+            limiter = build_async_limiter(dict(self.config.get("DOWNLOADER", {})))
+            self.__dict__["_async_limiter_cache"] = limiter
+        return limiter
 
     @override
     async def SendStream(

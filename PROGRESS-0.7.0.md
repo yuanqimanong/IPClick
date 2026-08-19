@@ -88,9 +88,23 @@
 - [ ] `grpc.aio.server()` 分支，与多进程（`processes`）叠加
 - [ ] 实测对比：同步 vs 异步 × 单进程 vs 多进程
 
-### 🔄 阶段 4（下一步）：limiter / forwarder / Web 桥接
-- [ ] limiter：`asyncio.Semaphore` + **带 FIFO 等待队列的异步令牌桶**
-      （现在是 `time.sleep` 轮询，1000 协程一起醒会惊群、实际 QPS 超限）
+### 🔄 阶段 4：limiter / forwarder / Web 桥接
+- [x] **异步限流器** `src/ipclick/async_limiter.py` —— `asyncio.Semaphore` +
+      预约式令牌桶（原子占住未来时刻再精确睡到那一刻，不轮询、先到先服务）
+- [x] 接进 `AsyncTaskService`，替掉原先"丢线程池"的临时实现
+- [x] 8 个测试，重点守"等待期间不阻塞事件循环"
+
+      ⚠️ **一处我写错又改回来的**：最初注释里写"同步版会惊群、实际 QPS 超发"。
+      实测否掉了 —— 同步版算的是 `wait = (1 - tokens) / qps`，是精确等待不是
+      粗轮询。600 并发配 200 QPS 实测：
+
+      | | 实际 | 误差 |
+      |---|---:|---:|
+      | 同步 600 线程 | 192.1 QPS | **-4.0%**（欠发，线程调度抖动） |
+      | 异步 600 协程 | 200.5 QPS | **+0.2%** |
+
+      方向是**欠发**不是超发。精度提升有限（4% → 0.2%），异步版真正的收益是
+      **不占线程、不阻塞事件循环**。注释已按实测改正。
 - [ ] forwarder：出站 gRPC 换 aio channel
 - [ ] Web 端：`pages.py:364` 的同步 `task_service.Send()` 跨线程投递到事件循环
 
