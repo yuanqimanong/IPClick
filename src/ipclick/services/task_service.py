@@ -280,45 +280,8 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 tr.attempts = response.attempts
                 grpc_response = self._build_grpc_response(request, response, tr)
 
-            except _CallerGone:
-                tr.status_code = -1
-                tr.error = "调用方已断开"
-                grpc_response = self._build_error_response(request, "调用方已断开，请求未执行", tr)
-            except URLNotAllowedError as e:
-                log.warning(f"Request {request.uuid} rejected: {e}")
-                self._recorder.record_rejected("url_not_allowed")
-                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-                context.set_details(str(e))
-                grpc_response = self._build_error_response(request, str(e), tr)
-            except HostLimitTimeout as e:
-                # 本机限流策略生效，不是目标站点或网络的问题。RESOURCE_EXHAUSTED
-                # 是 gRPC 里表达"被限流了，稍后再来"的标准状态码。
-                log.warning(f"Request {request.uuid} throttled: {e}")
-                self._recorder.record_rejected("host_limit")
-                context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
-                context.set_details(str(e))
-                grpc_response = self._build_error_response(request, str(e), tr)
-            except AdapterError as e:
-                # 与 ValueError 分开：这是"本服务端做不到"（适配器不存在、依赖没装、
-                # 浏览器渲染被关掉），不是调用方参数写错。混成 INVALID_ARGUMENT
-                # 会让调用方去改自己的参数，而实际要改的是服务端部署。
-                log.warning(f"Request {request.uuid} cannot be served: {e}")
-                self._recorder.record_rejected("failed_precondition")
-                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-                context.set_details(str(e))
-                grpc_response = self._build_error_response(request, str(e), tr)
-            except ValueError as e:
-                log.warning(f"Request {request.uuid} invalid: {e}")
-                self._recorder.record_rejected("invalid_argument")
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details(str(e))
-                grpc_response = self._build_error_response(request, str(e), tr)
             except Exception as e:
-                # 任何未预期的异常都不应该让 RPC 以 UNKNOWN + 堆栈的形式返回，
-                # 调用方拿不到结构化信息，服务端也可能泄漏内部路径。
-                log.exception(f"Request {request.uuid} failed unexpectedly: {e}")
-                self._recorder.record_rejected("internal_error")
-                grpc_response = self._build_error_response(request, f"内部错误: {type(e).__name__}", tr)
+                grpc_response = self._response_for_exception(e, request, tr, context)
 
             tr.status_code = grpc_response.status_code
             tr.size = len(grpc_response.content)
@@ -335,6 +298,61 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             adapter_name,
         )
         return grpc_response
+
+    def _response_for_exception(
+        self, exc: Exception, request: "task_pb2.ReqTask", tr: RequestTrace, context: ServicerContext
+    ) -> "task_pb2.TaskResp":
+        """把处理过程中的异常映射成响应 + gRPC 状态码。
+
+        同步与异步两条路共用这一份。抽出来的理由不是省行数，而是这里的每一条
+        分支都携带**排障方向**：PERMISSION_DENIED 让人去看 SSRF 策略、
+        RESOURCE_EXHAUSTED 让人去调限流、FAILED_PRECONDITION 让人去看服务端
+        部署而不是自己的参数。两份拷贝迟早失步，而失步的表现是"同一个错误在
+        异步模式下把人指向了另一个方向"，比少一个分支更糟。
+        """
+        if isinstance(exc, _CallerGone):
+            tr.status_code = -1
+            tr.error = "调用方已断开"
+            return self._build_error_response(request, "调用方已断开，请求未执行", tr)
+
+        if isinstance(exc, URLNotAllowedError):
+            log.warning(f"Request {request.uuid} rejected: {exc}")
+            self._recorder.record_rejected("url_not_allowed")
+            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+            context.set_details(str(exc))
+            return self._build_error_response(request, str(exc), tr)
+
+        if isinstance(exc, HostLimitTimeout):
+            # 本机限流策略生效，不是目标站点或网络的问题。RESOURCE_EXHAUSTED
+            # 是 gRPC 里表达"被限流了，稍后再来"的标准状态码。
+            log.warning(f"Request {request.uuid} throttled: {exc}")
+            self._recorder.record_rejected("host_limit")
+            context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
+            context.set_details(str(exc))
+            return self._build_error_response(request, str(exc), tr)
+
+        if isinstance(exc, AdapterError):
+            # 与 ValueError 分开：这是"本服务端做不到"（适配器不存在、依赖没装、
+            # 浏览器渲染被关掉），不是调用方参数写错。混成 INVALID_ARGUMENT
+            # 会让调用方去改自己的参数，而实际要改的是服务端部署。
+            log.warning(f"Request {request.uuid} cannot be served: {exc}")
+            self._recorder.record_rejected("failed_precondition")
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(str(exc))
+            return self._build_error_response(request, str(exc), tr)
+
+        if isinstance(exc, ValueError):
+            log.warning(f"Request {request.uuid} invalid: {exc}")
+            self._recorder.record_rejected("invalid_argument")
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return self._build_error_response(request, str(exc), tr)
+
+        # 任何未预期的异常都不应该让 RPC 以 UNKNOWN + 堆栈的形式返回，
+        # 调用方拿不到结构化信息，服务端也可能泄漏内部路径。
+        log.exception(f"Request {request.uuid} failed unexpectedly: {exc}")
+        self._recorder.record_rejected("internal_error")
+        return self._build_error_response(request, f"内部错误: {type(exc).__name__}", tr)
 
     # ------------------------------------------------------------------ #
     # 下载

@@ -448,6 +448,20 @@ class IPClickServer:
         # 仍然照常生效，[SECURITY].allow_secrets_in_config = true 可关掉提示。
         warn_secrets_in_config(self.config)
 
+        # [SERVER].async_mode：换成 grpc.aio 服务端。默认关，见 async_server 的模块注释。
+        if bool(server_config.get("async_mode", False)):
+            self._start_async(
+                server_host=server_host,
+                server_port=server_port,
+                max_workers=max_workers,
+                max_concurrent_rpcs=max_concurrent_rpcs,
+                max_concurrent_streams=max_concurrent_streams,
+                auth_interceptor=auth_interceptor,
+                tls_settings=tls_settings,
+                server_config=server_config,
+            )
+            return
+
         # 创建gRPC服务器
         self.server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ipclick-worker"),
@@ -547,6 +561,71 @@ class IPClickServer:
             log.exception(f"Failed to start server: {e}")
             self.stop()
             raise
+
+    def _start_async(
+        self,
+        *,
+        server_host: str,
+        server_port: int,
+        max_workers: int,
+        max_concurrent_rpcs: int,
+        max_concurrent_streams: int,
+        auth_interceptor: TokenAuthInterceptor,
+        tls_settings: TLSSettings,
+        server_config: Any,
+    ) -> None:
+        """异步模式的启动路径。
+
+        刻意不复用同步那一大段：aio 的 server 生命周期是协程（start / stop /
+        wait_for_termination 都要 await），硬塞进同步流程只会让两边都别扭。
+        共用的是**参数解析**——上面算出来的 max_workers、准入上限、压缩、
+        鉴权、TLS 全部原样传进去，所以两种模式对同一份配置的理解完全一致。
+        """
+        import asyncio as _asyncio
+
+        from ipclick.async_server import serve_async
+        from ipclick.services.async_task_service import AsyncTaskService
+
+        if self.cluster_config.forwarding_enabled:
+            raise ConfigError(
+                '[SERVER].async_mode 目前不支持与 [CLUSTER].forward = "on" 同时开启：'
+                "转发器的出站调用还是同步 gRPC stub，在事件循环里会把循环阻塞住。"
+                "两者择一，或等后续版本"
+            )
+
+        self.task_service = AsyncTaskService(self.config)
+        listen_addr = f"{server_host}:{server_port}"
+        self._listen_addr = listen_addr
+
+        # Web 管理端在异步模式下暂不启动：它的「试一试」直接同步调用
+        # task_service.Send()，而那现在是个协程。跨线程投递那条路径还没写，
+        # 与其让人点了没反应，不如明确说不支持。
+        if self.web_config.enabled:
+            log.warning(
+                "[SERVER].async_mode 下暂不启动 Web 管理端："
+                "「试一试」走的是同步调用，异步服务端上需要跨线程投递到事件循环，"
+                "这条路径尚未实现。需要 Web 端请暂时关掉 async_mode"
+            )
+
+        log.info(f"IPClick server starting on {listen_addr}（async_mode，实验性）")
+        warn_if_insecure(tls_settings, server_host)
+        try:
+            _asyncio.run(
+                serve_async(
+                    self.task_service,
+                    listen_addr,
+                    credentials=server_credentials(tls_settings) if tls_settings.enabled else None,
+                    health_enabled=bool(self._monitor_config.get("health_check", True)),
+                    max_workers=max_workers,
+                    max_concurrent_rpcs=max_concurrent_rpcs,
+                    max_concurrent_streams=max_concurrent_streams,
+                    compression=self._compression(server_config),
+                    auth=auth_interceptor,
+                    reuseport=self._reuseport,
+                )
+            )
+        except KeyboardInterrupt:
+            log.info("Received KeyboardInterrupt, shutting down...")
 
     def _setup_signal_handlers(self):
         """设置信号处理器"""

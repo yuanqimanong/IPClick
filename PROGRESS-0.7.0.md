@@ -50,17 +50,45 @@
 | curl_cffi | 524 QPS | **1361 QPS** | **2.6×** |
 | niquests | 660 QPS | **913 QPS** | 1.4× |
 
-### 🔄 阶段 2：TaskService 异步化（下一步）
-- [ ] `Send` / `SendStream` / `SendBatch` / `Ping` → `async def`
-- [ ] 按 `supports_async` 分派：真异步 or executor 回退
-- [ ] 保留同步类供 async_mode=off 使用（两套并存，别删同步路径）
+### ✅ 阶段 2：TaskService 异步化
+`src/ipclick/services/async_task_service.py`（新文件）
+- [x] `AsyncTaskService(TaskService)` —— **只覆写四个 RPC 入口**，其余全部继承
+- [x] 先把异常→gRPC 状态码的映射抽成 `_response_for_exception()` 给两条路共用。
+      抽出来不是为省行数：那里每条分支携带**排障方向**（PERMISSION_DENIED 指向
+      SSRF 策略、RESOURCE_EXHAUSTED 指向限流、FAILED_PRECONDITION 指向服务端部署），
+      两份拷贝失步的表现是"同一个错误在异步模式下把人指向另一个方向"
+- [x] `SendBatch` 用 `asyncio.as_completed`（批量本就是协程最划算的场景）
+- [x] `_alimited()` 限流包装 —— 未开限流时零开销；**开了的话仍占线程**，
+      真正的异步令牌桶留到阶段 4，注释里写明了
+
+### ✅ 阶段 3：grpc.aio 服务端
+`src/ipclick/async_server.py`（新文件）+ `[SERVER].async_mode`（默认 `false`）
+- [x] `_AsyncAuthInterceptor` 复用同步拦截器的判定逻辑（鉴权规则两条路必须一致）
+- [x] 健康检查用 **aio 版** HealthServicer —— 同步版的 `set()` 不是协程，
+      `await` 它会把服务端带崩，而症状是"客户端连不上"，极易误判成端口/防火墙
+- [x] 与 `[CLUSTER].forward = "on"` **显式互斥**（转发器出站还是同步 stub，
+      在事件循环里会把循环阻塞住）—— 直接报错而不是静默降级
+- [x] 异步模式下 Web 端暂不启动，启动时打 warning 说明原因
+- [x] TLS 正面测试 `TestAsyncServerTls` —— 这是被
+      `test_no_plaintext_fallback_anywhere` 护栏逼出来的：新的连接点想进白名单，
+      得先有证据证明"开了 TLS 就真走 TLS"，只加白名单等于拆护栏
+
+**阶段 2+3 端到端实测**（⚠️ 本机已从 16 核降到 4 核，客户端只给 2 核且已接近饱和，
+只有**比值**有意义）：
+
+| 并发 | sync | async | 提升 |
+|---|---:|---:|---:|
+| 50 | 58.5 QPS | **108.6** | 1.86× |
+| 200 | 119.6 QPS | **208.9** | 1.75× |
+
+两种模式都 100% 成功。
 
 ### ⬜ 阶段 3：grpc.aio 服务端
 - [ ] `[SERVER].async_mode`（默认 `false`）
 - [ ] `grpc.aio.server()` 分支，与多进程（`processes`）叠加
 - [ ] 实测对比：同步 vs 异步 × 单进程 vs 多进程
 
-### ⬜ 阶段 4：limiter / forwarder / Web 桥接
+### 🔄 阶段 4（下一步）：limiter / forwarder / Web 桥接
 - [ ] limiter：`asyncio.Semaphore` + **带 FIFO 等待队列的异步令牌桶**
       （现在是 `time.sleep` 轮询，1000 协程一起醒会惊群、实际 QPS 超限）
 - [ ] forwarder：出站 gRPC 换 aio channel

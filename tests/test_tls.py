@@ -7,14 +7,17 @@
 
 from collections.abc import Iterator
 from concurrent import futures
+import contextlib
 import datetime
 import ipaddress
 from pathlib import Path
+import time
 from typing import Any
 
 import grpc
 import pytest
 
+from ipclick.auth import TokenAuthInterceptor
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
 from ipclick.exceptions import ConfigError, TransportError
 from ipclick.health import check_health
@@ -501,7 +504,17 @@ def test_no_plaintext_fallback_anywhere():
     """
     src = Path(__file__).resolve().parent.parent / "src" / "ipclick"
     offenders: list[str] = []
-    allowed = {"sdk.py", "aio.py", "server.py", "health.py", "tls.py", "forwarder.py", "probe.py", "pages.py"}
+    allowed = {
+        "sdk.py",
+        "aio.py",
+        "server.py",
+        "async_server.py",  # 正面证据：TestAsyncServerTls
+        "health.py",
+        "tls.py",
+        "forwarder.py",
+        "probe.py",
+        "pages.py",
+    }
     for file in src.rglob("*.py"):
         if "_pb2" in file.name or file.name in allowed:
             continue
@@ -616,3 +629,87 @@ class _FakeContext:
 
     def invocation_metadata(self) -> tuple[tuple[str, str], ...]:
         return ()
+
+
+class TestAsyncServerTls:
+    """异步服务端（``[SERVER].async_mode``）同样必须走 TLS。
+
+    这一组的存在本身是 ``test_no_plaintext_fallback_anywhere`` 逼出来的：
+    ``async_server.py`` 里有 ``add_insecure_port``，护栏要求任何新的连接点
+    都得有正面证据证明"开了 TLS 就真的走 TLS"，而不是加进白名单了事。
+    同步服务端有 TestServerAuthOnly 守着，异步这条路以前是空的。
+    """
+
+    @staticmethod
+    def _serve_async(tls: TLSSettings, monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
+        """在后台线程里跑一个 aio 服务端，返回端口。"""
+        import asyncio
+        import threading
+
+        from ipclick.async_server import serve_async
+        from ipclick.services.async_task_service import AsyncTaskService
+
+        adapter = EchoAdapter()
+        monkeypatch.setattr("ipclick.services.task_service.get_default_adapter", lambda settings=None: adapter)
+        monkeypatch.setattr(
+            "ipclick.services.task_service.get_adapter",
+            lambda name, settings=None, browser_settings=None: adapter,
+        )
+
+        port = _free_port()
+        ready = threading.Event()
+        loop_box: dict[str, Any] = {}
+
+        def run() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop_box["loop"] = loop
+            service = AsyncTaskService(Settings({}))
+
+            async def main() -> None:
+                ready.set()
+                await serve_async(
+                    service,
+                    f"127.0.0.1:{port}",
+                    credentials=server_credentials(tls) if tls.enabled else None,
+                    health_enabled=False,
+                    max_workers=4,
+                    max_concurrent_rpcs=64,
+                    max_concurrent_streams=64,
+                    compression=grpc.Compression.NoCompression,
+                    auth=TokenAuthInterceptor(()),
+                    reuseport=False,
+                )
+
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                loop.run_until_complete(main())
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        ready.wait(timeout=10)
+        time.sleep(0.4)  # 等 server.start() 真正把端口绑上
+        try:
+            yield port
+        finally:
+            loop = loop_box.get("loop")
+            if loop is not None:
+                loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=5)
+
+    def test_round_trip_over_tls(self, pki: dict[str, str], monkeypatch: pytest.MonkeyPatch):
+        server_tls = TLSSettings(enabled=True, cert_file=pki["server_cert"], key_file=pki["server_key"])
+        client_tls = TLSSettings(enabled=True, ca_file=pki["ca"])
+        for port in self._serve_async(server_tls, monkeypatch):
+            with Downloader(host="127.0.0.1", port=port, tls=client_tls) as d:
+                resp = d.get("http://example.com/x", timeout=5, max_retries=0)
+            assert resp.status_code == 200, f"异步服务端的 TLS 往返失败: {resp.error}"
+
+    def test_plaintext_client_cannot_talk_to_tls_async_server(
+        self, pki: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    ):
+        """漏配 TLS 的客户端必须连不上，而不是悄悄降级成明文。"""
+        server_tls = TLSSettings(enabled=True, cert_file=pki["server_cert"], key_file=pki["server_key"])
+        for port in self._serve_async(server_tls, monkeypatch):
+            with Downloader(host="127.0.0.1", port=port) as d:
+                resp = d.get("http://example.com/x", timeout=3, max_retries=0)
+            assert resp.status_code == -1, "明文客户端居然连上了 TLS 的异步服务端"
