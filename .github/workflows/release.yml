@@ -85,6 +85,9 @@ jobs:
               "ipclick/configs/default_config.toml",
               "ipclick/dto/proto/task_pb2.py",
               "ipclick/py.typed",
+              # 运行时要读的数据文件，不是文档：`ipclick skill show/install` 直接
+              # 读它。漏打包的话命令会在用户机器上炸，而 CI 全绿。
+              "ipclick/skills/ipclick/SKILL.md",
           ]
           if missing := [r for r in required if r not in names]:
               sys.exit(f"wheel 缺少文件: {missing}")
@@ -93,13 +96,27 @@ jobs:
           if leaked := [n for n in names if any(k in n for k in ("test", "__pycache__", ".env", ".git"))]:
               sys.exit(f"wheel 含不应分发的文件: {leaked}")
 
-          # README 会作为 long_description 成为 PyPI 项目页正文，且上传后不可修改。
-          # 相对链接在 PyPI 上会 404。
+          # README 会作为 long_description 成为 PyPI 项目页正文，且**上传后不可修改**。
+          # 相对链接会相对 https://pypi.org/project/ipclick/<version>/ 解析 → 404，
+          # 而这个 404 只能靠发一个新版本来修。
+          #
+          # 原先这里查的是 `](LICENSE)` 和 `](CHANGELOG.md)` 两个写死的字符串。
+          # 那是个白名单式的守卫：它拦得住已经踩过的两个坑，拦不住第三个。
+          # 0.7.0 发版自检就是这么漏掉 README 里的 `](docker/构建.md)` 的——
+          # 守卫在、也跑了、还是绿的。改成通用检查：凡是不带协议、不是锚点的
+          # Markdown 链接目标一律拦。
+          import re
+
           meta = zipfile.ZipFile(wheel).read(
               next(n for n in names if n.endswith("METADATA"))
           ).decode()
-          if "](LICENSE)" in meta or "](CHANGELOG.md)" in meta:
-              sys.exit("METADATA 中存在相对链接，PyPI 上会 404")
+          relative = sorted({
+              target
+              for target in re.findall(r"\]\(([^)\s]+)", meta)
+              if not target.startswith(("http://", "https://", "#", "mailto:", "data:"))
+          })
+          if relative:
+              sys.exit(f"METADATA 中存在相对链接，PyPI 上会 404：{relative}")
 
           print(f"{wheel} 校验通过")
           PY

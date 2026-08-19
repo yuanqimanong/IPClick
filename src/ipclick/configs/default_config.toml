@@ -193,8 +193,8 @@ max_concurrent_streams = 0
 #   1. 自定义适配器只实现了同步 download()，异步模式下它们被丢进线程池跑——
 #      功能一致，但一请求一线程变成线程池复用线程，谁用了 threading.local
 #      做缓存行为就变了，而且是静默的。
-#   2. 与 [CLUSTER].forward = "on" 互斥（转发器的出站调用还是同步 stub，
-#      在事件循环里会把循环阻塞住）—— 同时开会直接报错而不是静默降级。
+#   2. 0.6.0 刚换过一次并发模型（多进程）。一个版本里连换两次，出了问题没人
+#      分得清是哪一个引起的。
 #
 # 想吃满多核仍然要靠上面的 processes：协程解决并发模型，多进程解决多核，
 # 两者叠加才是终态。
@@ -482,7 +482,8 @@ record_url = true
 
 # ================ 日志配置 [LOG] ================
 [LOG]
-# 日志级别 (debug/info/warn/error)
+# 日志级别 (trace/debug/info/success/warning/error/critical)
+# warn / fatal / err 这几个常见写法也收，会自动换成 loguru 认的那个。
 level = "info"
 # 日志格式。底层是 loguru，占位符是 {time}/{level}/{message} 这种花括号写法，
 # 不是标准库 logging 的 %(asctime)s。留空则用内置格式（带颜色、含文件行号）。

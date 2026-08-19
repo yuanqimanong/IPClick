@@ -152,6 +152,9 @@ jobs:
               "ipclick/configs/default_config.toml",
               "ipclick/dto/proto/task_pb2.py",
               "ipclick/py.typed",
+              # 运行时要读的数据文件，不是文档：`ipclick skill show/install` 直接
+              # 读它。漏打包的话命令会在用户机器上炸，而 CI 全绿。
+              "ipclick/skills/ipclick/SKILL.md",
           ]
           missing = [r for r in required if r not in names]
           if missing:

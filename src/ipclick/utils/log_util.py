@@ -186,6 +186,11 @@ def _validate_format(value: object) -> str | None:
     return text
 
 
+#: 常见的日志级别别名。loguru 的级别表里没有它们，但用户会这么写——
+#: 尤其 WARN，几乎所有别的日志库都收。挡在这里比让服务起不来强。
+_LEVEL_ALIASES = {"WARN": "WARNING", "FATAL": "CRITICAL", "ERR": "ERROR", "TRACE": "TRACE"}
+
+
 class LogUtil:
     """日志工具类
 
@@ -273,6 +278,11 @@ class LogUtil:
             "| <level>{message}</level>"
         )
         level = level.upper()
+        # loguru 只认 WARNING，不认 WARN——而"warn"是几乎所有日志库都收的写法，
+        # 配置模板自己一度也把它列为合法值。传进去会抛
+        # `ValueError: Level 'WARN' does not exist`，而它发生在 IPClickServer
+        # 构造期间，表现为"改了个日志级别，服务就起不来了"。收下这个别名。
+        level = _LEVEL_ALIASES.get(level, level)
 
         cls._drop_loguru_default_handler()
 

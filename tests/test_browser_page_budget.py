@@ -114,3 +114,39 @@ class TestContainerAwareness:
         assert available is not None
         # 应当取 cgroup 的 (512 - 64) = 448MB，而不是宿主机报的那个天文数字
         assert available == 448, f"没有优先采信 cgroup 限额，拿到了 {available}MB"
+
+
+class TestMaxPagesWiring:
+    """`max_pages = 0` 要真的从**配置文件**走到自动推导。
+
+    这一组存在的理由：本文件原有的用例全都直接调 `resolve_max_pages(0, ...)`，
+    函数本身一直是对的，断的是**接线**——`from_config` 用默认 `minimum=1` 解析
+    `max_pages`，0 被判成"低于下限"静默回落到静态默认值 4。于是 0.7.0 宣传的
+    「按可用内存自动推导」从配置文件根本走不到，而且现象是"配了等于没配"，
+    不报错、不打日志。
+
+    单元测过、接线没测过——和 aio 鉴权拦截器那个洞是同一个形状。
+    """
+
+    def test_zero_survives_from_config(self) -> None:
+        """0 必须原样传下去，不能被当成非法小值吃掉。"""
+        assert BrowserSettings.from_config({"max_pages": 0}).max_pages == 0
+
+    def test_zero_reaches_the_auto_path(self) -> None:
+        """从配置一路走到最终生效值，结果要和直接调自动推导一致。"""
+        settings = BrowserSettings.from_config({"max_pages": 0})
+        assert resolve_max_pages(settings.max_pages, "camoufox") == resolve_max_pages(0, "camoufox")
+
+    def test_zero_is_not_the_same_as_unset(self) -> None:
+        """配 0 和不配必须是两件事——它们相等就说明自动推导没生效。"""
+        configured_zero = BrowserSettings.from_config({"max_pages": 0}).max_pages
+        unset = BrowserSettings.from_config({}).max_pages
+        assert configured_zero == 0
+        assert unset == BrowserSettings.max_pages
+
+    def test_explicit_value_still_wins(self) -> None:
+        assert BrowserSettings.from_config({"max_pages": 8}).max_pages == 8
+
+    def test_negative_falls_back_to_default(self) -> None:
+        """负数是真的非法（不像 0 有特殊含义），回落到默认值。"""
+        assert BrowserSettings.from_config({"max_pages": -3}).max_pages == BrowserSettings.max_pages

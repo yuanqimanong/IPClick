@@ -258,6 +258,11 @@ IPCLICK_WEB_USER=ops IPCLICK_WEB_PASSWORD=... ipclick run -w
 `[CLUSTER].allow_remote_install`：它等于允许调用方在那台机器上跑 pip，
 是从"能代发 HTTP 请求"到"能改本机 Python 环境"的实质提权。
 
+> **一个例外，说在前面**：Web 管理端「生成部署材料」产出的子节点 `ipclick.toml`
+> 里，这一项是**打开**的——理由是那份配置本来就由主控生成，你已经信任它了，
+> 否则逐台 SSH 上去装适配器很烦。不想要就把生成出来的那一行改成 `false`，
+> 之后主控的组件页对这台会返回"未开启"。
+
 **从 curl 导入**：浏览器 DevTools 里对着请求「复制为 cURL」，粘进输入框就能自动
 填好 URL / 方法 / 请求头 / 请求体。认不出的参数会明确列出来，不静默丢弃。
 
@@ -275,7 +280,7 @@ IPCLICK_WEB_USER=ops IPCLICK_WEB_PASSWORD=... ipclick run -w
 
 ### 能改什么、不能改什么
 
-- **能改**（写回 toml，保留注释与格式，改动前留 `.bak`）：69 项，分 12 组——服务端、
+- **能改**（写回 toml，保留注释与格式，改动前留 `.bak`）：74 项，分 12 组——服务端、
   日志、下载行为、重试、连接池、按 host 限流、浏览器渲染、代理、集群、链路记录、
   Web 管理端、客户端与压缩。
 - **不能改**：`[SECURITY]` 全部（令牌、TLS、SSRF 三个开关）、Web 自己的登录凭据、
@@ -485,7 +490,7 @@ docker run -d -p 9528:9528 --name ipclick ipclick:latest              # gRPC
 docker run -d -p 9528:9528 -p 9527:9527 --name ipclick ipclick:latest  # 再带上 Web 管理端
 ```
 
-镜像多阶段构建、非 root 运行。详细说明见 [`docker/构建.md`](docker/构建.md)。
+镜像多阶段构建、非 root 运行。详细说明见 [`docker/构建.md`](https://github.com/yuanqimanong/IPClick/blob/master/docker/%E6%9E%84%E5%BB%BA.md)。
 
 ## 🚧 已知限制
 
