@@ -245,6 +245,10 @@ class IPClickServer:
                 "mode": mode,
                 "node_id": getattr(self.task_service, "node_id", self.recorder.node_id),
                 "max_workers": dict(self.config.get("SERVER", {})).get("max_workers", 10),
+                # 并发形态：多进程 / 异步这两项会改变本页某些数字的含义，
+                # 页面要能说清楚，否则人看到"链路记录只有四分之一"会以为丢数据。
+                "processes": _resolve_processes(self._config_path, self._cli_port),
+                "async_mode": bool(dict(self.config.get("SERVER", {})).get("async_mode", False)),
                 "default_adapter": DEFAULT_ADAPTER_NAME,
                 "adapters": sorted(ADAPTER_CLASSES),
                 "compression": CompressionPolicy(dict(self.config.get("CLIENT", {}))).describe(),

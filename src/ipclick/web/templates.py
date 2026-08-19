@@ -31,6 +31,23 @@ TEST_RETRIES_MAX_HINT = 5
 DEFAULT_GRPC_PORT_HINT = DEFAULT_GRPC_PORT
 
 
+def _concurrency_shape(server: dict[str, Any]) -> str:
+    """一句话说清这个进程的并发形态，以及它对本页数字的影响。
+
+    多进程下**链路记录是每进程一份**，本页只看得到 0 号进程那一份。不说明的话
+    人会以为"记录丢了四分之三"，然后去查链路配置、查磁盘、查 SQLite——
+    而真相只是它本来就只统计了一个进程。
+    """
+    processes = int(server.get("processes", 1) or 1)
+    parts: list[str] = []
+    parts.append(f"{processes} 进程" if processes > 1 else "单进程")
+    parts.append("异步（实验性）" if server.get("async_mode") else "一请求一线程")
+    text = esc(" · ".join(parts))
+    if processes > 1:
+        text += f'<br><span class="muted">链路记录每进程一份，本页只统计 0 号进程——总量约为实际的 1/{processes}</span>'
+    return text
+
+
 def esc(text: Any) -> str:
     """HTML 转义。所有插值都必须过这一道。"""
     return (
@@ -353,6 +370,7 @@ def render_dashboard(snapshot: dict[str, Any], username: str, csrf: str, actions
                 ("本节点 id", f"<code>{esc(server.get('node_id', '?'))}</code>"),
                 ("运行模式", esc(server.get("mode", "?"))),
                 ("worker 线程", esc(server.get("max_workers", "?"))),
+                ("并发形态", _concurrency_shape(server)),
                 ("默认适配器", f"<code>{esc(server.get('default_adapter', '?'))}</code>"),
                 ("请求压缩", esc(server.get("compression", "—"))),
                 ("配置文件", f"<code>{esc(server.get('config_path', '—'))}</code>"),
