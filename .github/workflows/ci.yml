@@ -77,7 +77,10 @@ jobs:
         run: uv run basedpyright src/
 
       - name: Tests
-        run: uv run pytest --cov=ipclick --cov-report=term-missing --cov-report=xml
+        # -n auto：按 runner 的核数并行。测试这一步占整个 job 的 79%
+        # （实测 177s / 223s），并行之后本地从 72 秒降到 25 秒。
+        # 覆盖率在 xdist 下要靠 pytest-cov 自己合并子进程数据，它原生支持。
+        run: uv run pytest -n auto --cov=ipclick --cov-report=term-missing --cov-report=xml
 
       - name: Verify protobuf stubs are up to date
         run: |
