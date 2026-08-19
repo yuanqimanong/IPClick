@@ -61,8 +61,31 @@ class AsyncHostLimiter:
 
     def __init__(self, settings: LimiterSettings | None = None) -> None:
         self.settings: LimiterSettings = settings or LimiterSettings()
+        #: 客户端分发（forward="off"）下本节点分到的 QPS 份额。
+        #: None = 不分片（单机，或服务端转发——那时入口节点算的就是全局的）。
+        #: 由 set_cluster_size() 动态更新：节点上下线时份额跟着变。
+        self._share_qps: float | None = None
         self._slots: dict[str, _AsyncSlot] = {}
         self._slots_lock: asyncio.Lock = asyncio.Lock()
+
+    def set_cluster_size(self, live_nodes: int) -> None:
+        """告知当前存活节点数，据此重算本节点的 QPS 份额。
+
+        只有客户端分发（``forward = "off"``）才该调这个。传 1 或不调 = 不分片。
+        节点上下线时重复调用即可，份额立刻生效（已在等待的请求按旧份额走完，
+        不回溯——回溯会让那些请求被推迟到一个它们本来不该等的时刻）。
+        """
+        from ipclick.limiter import cluster_share
+
+        configured = self.settings.per_host_qps
+        self._share_qps = cluster_share(configured, live_nodes) if live_nodes > 1 else None
+        if self._share_qps is not None:
+            log.info(f"集群限流分片：{configured:g} QPS / {live_nodes} 个存活节点 = 本节点 {self._share_qps:g} QPS")
+
+    @property
+    def effective_qps(self) -> float:
+        """本节点实际生效的 QPS。未分片时就是配置值。"""
+        return self._share_qps if self._share_qps is not None else self.settings.per_host_qps
 
     def __len__(self) -> int:
         return len(self._slots)
@@ -130,7 +153,7 @@ class AsyncHostLimiter:
 
         实测 600 并发下误差 +0.2%，同步线程版是 -4.0%（欠发，来自线程调度抖动）。
         """
-        qps = self.settings.per_host_qps
+        qps = self.effective_qps
         if qps <= 0:
             return
 
