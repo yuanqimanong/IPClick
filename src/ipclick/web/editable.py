@@ -142,7 +142,67 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
                 "int",
                 minimum=1,
                 maximum=10000,
-                hint="每个请求占一个线程做阻塞 IO；同时也是批量的并发上限",
+                hint="每个请求占一个线程做阻塞 IO；同时也是批量的并发上限。"
+                "⚠️ 吞吐上不去时调它没用——实测 32 / 100 / 256 三档吞吐一样（GIL 才是天花板），"
+                "要加吞吐请看下面的「工作进程数」",
+            ),
+            Field(
+                "SERVER",
+                "processes",
+                "工作进程数",
+                "int",
+                minimum=0,
+                maximum=64,
+                default=1,
+                hint="1 = 单进程（默认）；0 = 按 CPU 核数自动（上限 8）。"
+                "多个进程靠 SO_REUSEPORT 共享同一个端口，分发由内核做，对调用方完全透明。"
+                "这是唯一能突破 GIL 的办法——实测 1→4 进程吞吐 313→663 QPS。"
+                "代价：内存按进程数近似线性增长；链路记录变成每进程一份，本页只看得到 0 号进程那一份",
+            ),
+            Field(
+                "SERVER",
+                "max_concurrent_rpcs",
+                "在途 RPC 上限",
+                "int",
+                minimum=0,
+                maximum=1000000,
+                default=0,
+                hint="0 = worker 线程数 × 8。这一项决定「排队能排多长」，和 worker 线程数"
+                "（「同时能干多少活」）是两件事。"
+                "0.5.0 里它被写死成线程数×2，于是 500 并发就开始拒流——实测成功率掉到 25.8%，"
+                "而那时服务端 CPU 只用了 1.45 个核。调大它不额外消耗资源",
+            ),
+            Field(
+                "SERVER",
+                "max_concurrent_streams",
+                "单连接并发流上限",
+                "int",
+                minimum=0,
+                maximum=1000000,
+                default=0,
+                hint="0 = 跟随上面的在途 RPC 上限（不低于 100）。"
+                "SDK 一个 Downloader 就是一条 TCP 连接，所以这个值直接就是单个客户端的并发天花板",
+            ),
+            Field(
+                "SERVER",
+                "compression",
+                "响应压缩",
+                "choice",
+                choices=("gzip", "deflate", "none"),
+                default="gzip",
+                hint="几百字节到几 KB 的 JSON 压它省不下什么；抓整页 HTML、下载文件时才有用。"
+                "实测大响应体时瓶颈通常是链路带宽而不是压缩本身",
+            ),
+            Field(
+                "SERVER",
+                "async_mode",
+                "异步模式（实验性）",
+                "bool",
+                default=False,
+                hint="换成 grpc.aio + 协程，不再一请求一线程。实测端到端 1.8×。"
+                "⚠️ 实验性，默认关：自定义适配器会被丢进线程池跑（线程安全假设变了）；"
+                "0.8 视反馈再考虑翻默认值。想吃满多核仍要靠上面的「工作进程数」——"
+                "协程解决并发模型，多进程解决多核",
             ),
             Field(
                 "GENERAL", "debug", "调试模式", "bool", restart=False, hint="强制 DEBUG 级别日志，覆盖下面的日志级别"

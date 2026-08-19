@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import threading
 import time
 from typing import Any
@@ -55,6 +56,8 @@ class NodePool:
 
         self._stop: threading.Event = threading.Event()
         self._thread: threading.Thread | None = None
+        #: 每轮探测后的回调，参数是健康节点数。见 on_health_change。
+        self._health_callbacks: list[Callable[[int], None]] = []
         if start_probing:
             self.start()
 
@@ -82,9 +85,27 @@ class NodePool:
     def _probe_loop(self) -> None:
         # 先立刻探一轮，别让首批请求撞在"全 UNKNOWN"的状态上
         self.probe_once()
+        self._notify_health()
         while not self._stop.wait(self.config.probe_interval):
             self.refresh_nodes()
             self.probe_once()
+            self._notify_health()
+
+    def on_health_change(self, callback: Callable[[int], None]) -> None:
+        """注册"每轮探测之后"的回调，参数是当前健康节点数。
+
+        复用探测节拍而不是另起一个定时器：两个独立的周期任务看到的节点状态
+        会错开，而"限流份额"和"路由决策"依据的存活数不一致是很难查的一类问题。
+        """
+        self._health_callbacks.append(callback)
+
+    def _notify_health(self) -> None:
+        healthy = sum(1 for s in self._states if s.status is NodeStatus.HEALTHY)
+        for callback in self._health_callbacks:
+            try:
+                callback(healthy)
+            except Exception as e:
+                log.warning(f"健康状态回调失败：{e}")
 
     # ---------------------------------------------------------------- #
     # 节点发现

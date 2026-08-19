@@ -152,6 +152,10 @@ class HostLimiter:
 
     def __init__(self, settings: LimiterSettings | None = None):
         self.settings: LimiterSettings = settings or LimiterSettings()
+        #: 客户端分发（forward="off"）下本节点分到的 QPS 份额。
+        #: None = 不分片（单机，或服务端转发——那时入口节点算的就是全局的）。
+        #: 由 set_cluster_size() 动态更新：节点上下线时份额跟着变。
+        self._share_qps: float | None = None
         self._slots: dict[str, _HostSlot] = {}
         self._slots_lock: threading.Lock = threading.Lock()
         self._last_sweep: float = time.monotonic()
@@ -159,6 +163,25 @@ class HostLimiter:
     # ------------------------------------------------------------------ #
     # 额度
     # ------------------------------------------------------------------ #
+
+    def set_cluster_size(self, live_nodes: int) -> None:
+        """告知当前存活节点数，据此重算本节点的 QPS 份额。
+
+        只有客户端分发（``forward = "off"``）才该调这个。传 1 或不调 = 不分片。
+        节点上下线时重复调用即可，份额立刻生效（已在等待的请求按旧份额走完，
+        不回溯——回溯会让那些请求被推迟到一个它们本来不该等的时刻）。
+        """
+        from ipclick.limiter import cluster_share
+
+        configured = self.settings.per_host_qps
+        self._share_qps = cluster_share(configured, live_nodes) if live_nodes > 1 else None
+        if self._share_qps is not None:
+            log.info(f"集群限流分片：{configured:g} QPS / {live_nodes} 个存活节点 = 本节点 {self._share_qps:g} QPS")
+
+    @property
+    def effective_qps(self) -> float:
+        """本节点实际生效的 QPS。未分片时就是配置值。"""
+        return self._share_qps if self._share_qps is not None else self.settings.per_host_qps
 
     @contextmanager
     def acquire(self, url: str, timeout: float | None = None) -> Generator[None]:
@@ -223,7 +246,7 @@ class HostLimiter:
 
     def _acquire_token(self, slot: _HostSlot, host: str, deadline: float) -> None:
         """令牌桶。没有令牌就睡到下一个令牌生成，但不超过 deadline。"""
-        qps = self.settings.per_host_qps
+        qps = self.effective_qps
         if qps <= 0:
             return
 
@@ -318,3 +341,29 @@ def build_limiter(downloader_config: dict[str, Any] | None) -> HostLimiter:
 
 
 __all__ = ["HostLimitTimeout", "HostLimiter", "LimiterSettings", "build_limiter", "host_of"]
+
+
+def cluster_share(qps: float, live_nodes: int) -> float:
+    """把全局 QPS 预算切给本节点。
+
+    **只在客户端分发（``[CLUSTER].forward = "off"``）下才需要这一步。**
+    那种形态里调用方直连每一台节点，每台各算各的限额，加起来就是
+    ``N × per_host_qps`` —— 配了 100 QPS、部署了四台，目标站点实际挨 400。
+    这是"配了限流还是被封"的一类典型原因，而且从任何单台机器的视角看都正常。
+
+    服务端转发（``forward = "on"``）不走这里：所有任务都经入口节点，在那一台上
+    算就是全局的，本来就精确。
+
+    切法是**按存活节点数均分**，份额随健康探测自动变化：一台挂了，幸存者下一轮
+    就各自分到更多，不需要任何协调。代价说清楚——负载不均时会浪费额度：四台
+    机器三台闲着，忙的那台仍然只能用 1/4。想要"精确且不浪费"得引入协调者
+    （选主 + 租约），那是另一套复杂度，也带来协调者失联这个新故障模式。
+    真需要精确又不想浪费，切到 ``forward = "on"`` 是更划算的路。
+
+    Args:
+        qps: 配置里的 ``per_host_qps``（0 表示不限速）。
+        live_nodes: 当前存活的节点数。0 或 1 都按"就我自己"处理。
+    """
+    if qps <= 0:
+        return 0.0
+    return qps / max(1, live_nodes)

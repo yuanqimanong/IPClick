@@ -1,12 +1,13 @@
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
+import asyncio
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 import functools
 from random import randrange, uniform
 import re
 import threading
 import time
-from typing import Any
+from typing import Any, cast
 
 from ipclick.adapters.settings import DEFAULT_RETRY_STATUS_CODES, AdapterSettings
 from ipclick.dto.response import Response
@@ -176,6 +177,90 @@ def retry(
                         f"in {sleep_time:.1f}s... Error: {e}"
                     )
                     time.sleep(sleep_time)
+
+            return Response.error_response(
+                url, last_exception or Exception("Max retries exceeded"), attempts=max_retries + 1
+            )
+
+        return wrapper
+
+    return decorator
+
+
+def aretry(
+    max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_delay"
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """:func:`retry` 的异步版。
+
+    单独写一份而不是复用同步那个：里面的 ``time.sleep`` 在协程里会**阻塞整个
+    事件循环**——不是拖慢这一个请求，是让同一个循环上所有在飞的请求一起停住。
+    默认退避 1+2+4 秒，一次重试就能把整个 worker 冻结七秒，而现象是"毫不相干的
+    请求也集体变慢"，极难联想到是某个失败请求在退避。
+
+    行为与同步版逐条对齐：只重试真正值得重试的，ValidationError / AdapterError
+    直接抛（重试改变不了参数写错或依赖没装）。
+    """
+
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(func)
+        async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Response:
+            requested_retries = kwargs.get("max_retries")
+            max_retries = max(
+                0, int(requested_retries) if requested_retries is not None else getattr(self, max_retries_attr, 3)
+            )
+            requested_delay = kwargs.get("retry_delay")
+            base_delay = _coerce_delay(
+                requested_delay if requested_delay is not None else getattr(self, retry_delay_attr, 1.0),
+                default=1.0,
+            )
+            url = args[0] if args else kwargs.get("url", "unknown")
+            allowed = kwargs.get("allowed_status_codes") or None
+
+            settings: AdapterSettings | None = getattr(self, "settings", None)
+            retry_codes = settings.retry_codes if settings else DEFAULT_RETRY_STATUS_CODES
+            exponent = settings.backoff_exponent if settings else 2.0
+            max_backoff = settings.max_backoff if settings else MAX_RETRY_DELAY
+
+            last_exception: Exception | None = None
+            for attempt in range(max_retries + 1):
+                start_time = time.monotonic()
+                try:
+                    result = await func(self, *args, **kwargs)
+                    if hasattr(result, "elapsed_ms") and result.elapsed_ms == 0:
+                        result.elapsed_ms = int((time.monotonic() - start_time) * 1000)
+                    if hasattr(result, "attempts"):
+                        result.attempts = attempt + 1
+
+                    status = getattr(result, "status_code", None)
+                    if (
+                        attempt < max_retries
+                        and isinstance(status, int)
+                        and status in retry_codes
+                        and not (allowed and status in allowed)
+                    ):
+                        sleep_time = _backoff(attempt, base_delay, exponent, max_backoff)
+                        get_recorder().record_retry(getattr(self, "adapter_name", "unknown"), "status_code")
+                        log.warning(
+                            f"Download {url} returned {status}, retrying {attempt + 1}/{max_retries} "
+                            f"in {sleep_time:.1f}s..."
+                        )
+                        await asyncio.sleep(sleep_time)
+                        continue
+                    return result
+
+                except (ValidationError, AdapterError):
+                    raise
+                except Exception as e:
+                    last_exception = e
+                    if attempt >= max_retries:
+                        return Response.error_response(url, e, attempts=attempt + 1)
+                    sleep_time = _backoff(attempt, base_delay, exponent, max_backoff)
+                    get_recorder().record_retry(getattr(self, "adapter_name", "unknown"), "exception")
+                    log.warning(
+                        f"Download {url} failed, retrying {attempt + 1}/{max_retries} "
+                        f"in {sleep_time:.1f}s... Error: {e}"
+                    )
+                    await asyncio.sleep(sleep_time)
 
             return Response.error_response(
                 url, last_exception or Exception("Max retries exceeded"), attempts=max_retries + 1
@@ -370,6 +455,46 @@ class DownloaderAdapter(ABC):
             Response: 统一的响应对象
         """
         raise NotImplementedError
+
+    #: 这个适配器有没有自己的异步实现。
+    #:
+    #: 服务端的异步模式据此决定走哪条路：True 就 await adownload()，
+    #: False 就把同步的 download() 丢进线程池。**默认 False**——这一条是
+    #: 整套异步化能做成"加法"而不是破坏性变更的关键：项目支持注册自定义
+    #: 适配器（见 README），它们只实现了同步 download()，不该因为服务端换了
+    #: 并发模型就集体失效。
+    supports_async: bool = False
+
+    async def adownload(self, url: str, **kwargs: Any) -> Response:
+        """异步执行一次请求。
+
+        默认实现把同步的 :meth:`download` 丢进线程池——**语义完全一致，
+        只是拿不到协程的好处**（那个线程仍然是稀缺资源）。真正想要收益的
+        适配器覆写此方法并把 ``supports_async`` 置 True。
+
+        为什么不把 download 直接改成 async：那会打断每一个第三方适配器，
+        而它们看不到任何提示——基类方法签名变了，子类的同步实现会被当成
+        协程去 await，报出来的错误（"object Response can't be used in
+        'await' expression"）和真正的原因（"你的适配器该改成 async 了"）
+        之间没有任何字面联系。
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, functools.partial(self.download, url, **kwargs))
+
+    async def adownload_stream(self, url: str, **kwargs: Any) -> "AsyncIterator[StreamEvent]":
+        """异步流式。默认把同步迭代器逐个搬到线程池里取。
+
+        逐个搬而不是一次性取完：流式的意义就在于响应体不整个进内存，
+        先 list() 再 yield 等于把这个性质丢掉。
+        """
+        loop = asyncio.get_running_loop()
+        iterator = await loop.run_in_executor(None, functools.partial(self.download_stream, url, **kwargs))
+        sentinel = object()
+        while True:
+            item = await loop.run_in_executor(None, next, iterator, sentinel)
+            if item is sentinel:
+                return
+            yield cast(StreamEvent, item)
 
     def download_stream(
         self,

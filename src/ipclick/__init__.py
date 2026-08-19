@@ -29,7 +29,7 @@ try:
     __version__ = importlib.metadata.version("ipclick")
     __author__ = importlib.metadata.metadata("ipclick")["Author"]
 except importlib.metadata.PackageNotFoundError:  # pragma: no cover - 仅在未安装时走到
-    __version__ = "0.6.0"
+    __version__ = "0.7.0"
     __author__ = "元气码农少女酱"
 
 

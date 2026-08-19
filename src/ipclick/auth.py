@@ -141,6 +141,16 @@ class TokenAuthInterceptor(grpc.ServerInterceptor):
     def enabled(self) -> bool:
         return bool(self._tokens)
 
+    @property
+    def tokens(self) -> tuple[str, ...]:
+        """有效令牌，只读。
+
+        给 aio 拦截器复用**同一份**令牌与判定函数用。鉴权规则在同步/异步两条路上
+        各写一份，就等着哪天异步模式悄悄放行了本该拒绝的调用——而那种缺陷不会
+        报错，只会安静地少拦一些人。
+        """
+        return self._tokens
+
     @staticmethod
     def _reject(_request: Any, context: grpc.ServicerContext) -> Any:
         context.abort(grpc.StatusCode.UNAUTHENTICATED, "缺少或无效的鉴权令牌")

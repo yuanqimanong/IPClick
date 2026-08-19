@@ -245,6 +245,10 @@ class IPClickServer:
                 "mode": mode,
                 "node_id": getattr(self.task_service, "node_id", self.recorder.node_id),
                 "max_workers": dict(self.config.get("SERVER", {})).get("max_workers", 10),
+                # 并发形态：多进程 / 异步这两项会改变本页某些数字的含义，
+                # 页面要能说清楚，否则人看到"链路记录只有四分之一"会以为丢数据。
+                "processes": _resolve_processes(self._config_path, self._cli_port),
+                "async_mode": bool(dict(self.config.get("SERVER", {})).get("async_mode", False)),
                 "default_adapter": DEFAULT_ADAPTER_NAME,
                 "adapters": sorted(ADAPTER_CLASSES),
                 "compression": CompressionPolicy(dict(self.config.get("CLIENT", {}))).describe(),
@@ -448,6 +452,20 @@ class IPClickServer:
         # 仍然照常生效，[SECURITY].allow_secrets_in_config = true 可关掉提示。
         warn_secrets_in_config(self.config)
 
+        # [SERVER].async_mode：换成 grpc.aio 服务端。默认关，见 async_server 的模块注释。
+        if bool(server_config.get("async_mode", False)):
+            self._start_async(
+                server_host=server_host,
+                server_port=server_port,
+                max_workers=max_workers,
+                max_concurrent_rpcs=max_concurrent_rpcs,
+                max_concurrent_streams=max_concurrent_streams,
+                auth_interceptor=auth_interceptor,
+                tls_settings=tls_settings,
+                server_config=server_config,
+            )
+            return
+
         # 创建gRPC服务器
         self.server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ipclick-worker"),
@@ -496,6 +514,8 @@ class IPClickServer:
                 )
             else:
                 self.task_service = TaskService(self.config)
+
+            self._wire_rate_sharding()
 
             # 注册服务
             task_pb2_grpc.add_TaskServiceServicer_to_server(self.task_service, self.server)
@@ -547,6 +567,109 @@ class IPClickServer:
             log.exception(f"Failed to start server: {e}")
             self.stop()
             raise
+
+    def _start_async(
+        self,
+        *,
+        server_host: str,
+        server_port: int,
+        max_workers: int,
+        max_concurrent_rpcs: int,
+        max_concurrent_streams: int,
+        auth_interceptor: TokenAuthInterceptor,
+        tls_settings: TLSSettings,
+        server_config: Any,
+    ) -> None:
+        """异步模式的启动路径。
+
+        刻意不复用同步那一大段：aio 的 server 生命周期是协程（start / stop /
+        wait_for_termination 都要 await），硬塞进同步流程只会让两边都别扭。
+        共用的是**参数解析**——上面算出来的 max_workers、准入上限、压缩、
+        鉴权、TLS 全部原样传进去，所以两种模式对同一份配置的理解完全一致。
+        """
+        import asyncio as _asyncio
+
+        from ipclick.async_server import serve_async
+        from ipclick.services.async_task_service import AsyncTaskService
+
+        if self.cluster_config.forwarding_enabled:
+            # 转发的**路由决策**（挑节点、故障转移、防环路）复用同步实现，
+            # 只有"本地执行"那一跳走异步。出站那一跳仍是同步 stub、仍占线程，
+            # 取舍写在 async_forwarder 的模块注释里。
+            from ipclick.cluster.async_forwarder import AsyncForwardingTaskService
+
+            self.task_service = AsyncForwardingTaskService(
+                self.config,
+                self.cluster_config,
+                tls=tls_settings,
+                server_host=server_host,
+                server_port=server_port,
+            )
+        else:
+            self.task_service = AsyncTaskService(self.config)
+
+        self._wire_rate_sharding()
+
+        listen_addr = f"{server_host}:{server_port}"
+        self._listen_addr = listen_addr
+
+        # Web 管理端照常起。「试一试」走 AsyncTaskService.send_from_thread：
+        # 它跑在 HTTP 工作线程里，用 run_coroutine_threadsafe 把协程投递回服务端的
+        # 事件循环，并**带超时**——循环若被卡住，不能让 HTTP 工作线程无限期占着，
+        # 那会把管理端一起拖挂，而人看到的只是页面转圈。
+        self._start_web()
+
+        log.info(f"IPClick server starting on {listen_addr}（async_mode，实验性）")
+        warn_if_insecure(tls_settings, server_host)
+        try:
+            _asyncio.run(
+                serve_async(
+                    self.task_service,
+                    listen_addr,
+                    credentials=server_credentials(tls_settings) if tls_settings.enabled else None,
+                    health_enabled=bool(self._monitor_config.get("health_check", True)),
+                    max_workers=max_workers,
+                    max_concurrent_rpcs=max_concurrent_rpcs,
+                    max_concurrent_streams=max_concurrent_streams,
+                    compression=self._compression(server_config),
+                    auth=auth_interceptor,
+                    reuseport=self._reuseport,
+                )
+            )
+        except KeyboardInterrupt:
+            log.info("Received KeyboardInterrupt, shutting down...")
+
+    def _wire_rate_sharding(self) -> None:
+        """客户端分发形态下，把 QPS 按存活节点数分片。
+
+        只在**同时满足**这三条时才做，任何一条不满足都是零开销：
+
+        * ``forward = "off"`` —— 服务端转发时所有任务过入口节点，本来就是全局的
+        * 配了 ``[CLUSTER].nodes`` —— 没有集群就没有分片一说
+        * 配了 ``per_host_qps`` —— 没限速就不该凭空造出一个限速
+
+        为此会起一个只探活、不参与任何路由的节点池。这是必要成本：份额要跟着
+        节点上下线变，就得知道现在活着几台。份额更新挂在探测回调上而不是另起
+        定时器——两个独立周期看到的节点状态会错开，而"限流份额"和"路由决策"
+        依据的存活数不一致是很难查的一类问题。
+        """
+        service = self.task_service
+        if service is None or self.cluster_config.forwarding_enabled:
+            return
+        limiters = service.limiters_for_sharding()
+        if not limiters or limiters[0].settings.per_host_qps <= 0 or not self.cluster_config.nodes:
+            return
+
+        if self._node_pool is None:
+            self._start_node_pool()
+        pool = self._node_pool
+        if pool is None:
+            log.warning("集群限流分片未启用：节点池起不来，本节点将按完整 per_host_qps 限速")
+            return
+
+        for limiter in limiters:
+            pool.on_health_change(limiter.set_cluster_size)
+        log.info(f"集群限流分片已启用：{len(self.cluster_config.nodes)} 个节点，份额随健康探测变化")
 
     def _setup_signal_handlers(self):
         """设置信号处理器"""

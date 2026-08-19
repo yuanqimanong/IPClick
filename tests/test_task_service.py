@@ -288,6 +288,6 @@ class TestCallerGone:
 
     def test_unprobeable_context_is_treated_as_waiting(self, service: TaskService):
         """批量路径和测试里传的都是假 context，误判成断开会让正常请求凭空失败。"""
-        from ipclick.services.task_service import _caller_still_waiting
+        from ipclick.services.task_service import caller_still_waiting
 
-        assert _caller_still_waiting(object()) is True
+        assert caller_still_waiting(object()) is True

@@ -9,6 +9,7 @@
 """
 
 from dataclasses import dataclass, field
+import os
 from typing import Any
 
 
@@ -85,7 +86,10 @@ class BrowserSettings:
     #: 默认拦截的资源类型。图片 / 字体 / 视频对取 HTML 没用，拦掉能省大量时间和带宽。
     block_resources: tuple[str, ...] = ("image", "media", "font")
 
-    #: 同时打开的页面上限。无头浏览器每个页面几十上百 MB，不设上限很容易把机器打满。
+    #: 同时打开的页面上限。``0`` = 按本机内存自动推导（见 :func:`resolve_max_pages`）。
+    #:
+    #: 默认仍是 4 而不是 0——自动推导会因机器而异，静默改变既有部署的行为不合适。
+    #: 想让它跟着机器走就显式写 0。
     max_pages: int = 4
 
     #: 是否允许请求携带 automation_script（在页面里执行任意 JS）。
@@ -172,3 +176,104 @@ class BrowserSettings:
 
 
 __all__ = ["BLOCKABLE_RESOURCES", "BROWSER_KINDS", "WAIT_UNTIL_CHOICES", "BrowserSettings"]
+
+
+#: 每个并发页面的内存预算（MB），按引擎区分。
+#:
+#: 这些不是精确值，是**保守的量级**：真实占用随页面复杂度浮动很大（一个静态
+#: 页几十 MB，一个重 JS 的应用能到几百）。取保守值的理由是失败代价不对称——
+#: 少开一个页面只是慢一点，多开一个把机器推进 swap 就是请求从几秒变几分钟、
+#: 看起来像卡死，而且很难从现象联想到是并发开太大。
+#:
+#: camoufox 明显更贵：它是 Firefox 加一整套反检测扩展，单个 context 的开销
+#: 高于 Chromium 系。配置注释里"内存紧张的机器（≤4GB）建议设成 1~2"说的
+#: 就是它。
+ENGINE_PAGE_BUDGET_MB: dict[str, int] = {
+    "camoufox": 400,
+    "playwright": 250,
+    "patchright": 250,
+    "drissionpage": 250,
+}
+DEFAULT_PAGE_BUDGET_MB = 300
+
+#: 自动推导时给系统留的余量（MB）。把内存吃到一滴不剩比少开几个页面糟得多。
+MEMORY_HEADROOM_MB = 1024
+
+#: 自动推导的硬上限。再多的页面收益也会被目标站点和网络吃掉，
+#: 而每个页面都是一份实打实的内存。
+MAX_AUTO_PAGES = 16
+
+
+def available_memory_mb() -> int | None:
+    """本机可用内存（MB）。读不出来返回 None，由调用方回落到静态默认值。
+
+    优先读 cgroup 的限额而不是宿主机总量：容器里 ``/proc/meminfo`` 报的是
+    **宿主机**的内存，照它推导会在一个 512MB 的容器里开出十几个页面，
+    然后被 OOM killer 杀掉——而现象只是"容器莫名其妙重启"。
+    """
+    import os
+    from pathlib import Path as _Path
+
+    limits: list[int] = []
+
+    # cgroup v2 → v1，取能读到的那个
+    for path, current in (
+        ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
+        ("/sys/fs/cgroup/memory/memory.limit_in_bytes", "/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    ):
+        try:
+            raw = _Path(path).read_text(encoding="utf-8").strip()
+            if raw in ("max", ""):
+                continue
+            total = int(raw)
+            # 没设限时内核会报一个天文数字，那等于"不受限"
+            if total <= 0 or total > (1 << 50):
+                continue
+            used = int(_Path(current).read_text(encoding="utf-8").strip() or 0)
+            limits.append(max(0, total - used) // (1024 * 1024))
+            break
+        except (OSError, ValueError):
+            continue
+
+    try:
+        meminfo = _Path("/proc/meminfo").read_text(encoding="utf-8")
+        for line in meminfo.splitlines():
+            if line.startswith("MemAvailable:"):
+                limits.append(int(line.split()[1]) // 1024)
+                break
+    except (OSError, ValueError, IndexError):
+        pass
+
+    if not limits:
+        try:
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            limits.append(os.sysconf("SC_AVPHYS_PAGES") * page_size // (1024 * 1024))
+        except (ValueError, OSError, AttributeError):
+            return None
+
+    return min(limits) if limits else None
+
+
+def resolve_max_pages(configured: int, engine: str) -> int:
+    """算出真正生效的页面并发上限。
+
+    ``configured > 0`` 就照用——显式配置永远优先，自动推导不该覆盖人的决定。
+
+    ``configured == 0`` 时按**内存**推导，而不是 CPU 核数。这一点容易搞反：
+    浏览器页面是内存瓶颈不是 CPU 瓶颈，按核数算的话一台 16 核 4GB 的机器会
+    开出 16 个 camoufox 页面（约 6.4GB），直接换页。CPU 核数只做上限——
+    页面渲染确实要 CPU，开得比核数多也没意义。
+    """
+    if configured > 0:
+        return configured
+
+    budget = ENGINE_PAGE_BUDGET_MB.get(engine.lower(), DEFAULT_PAGE_BUDGET_MB)
+    available = available_memory_mb()
+    if available is None:
+        # 读不出内存就退回静态默认值，别自作聪明
+        return BrowserSettings.max_pages
+
+    usable = max(0, available - MEMORY_HEADROOM_MB)
+    by_memory = usable // budget
+    by_cpu = os.cpu_count() or 1
+    return max(1, min(by_memory, by_cpu, MAX_AUTO_PAGES))
