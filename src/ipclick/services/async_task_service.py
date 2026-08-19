@@ -67,13 +67,27 @@ class AsyncTaskService(TaskService):
         future = asyncio.run_coroutine_threadsafe(self.Send(request, context), loop)
         return future.result(timeout=timeout)
 
+    # ------------------------------------------------------------------ #
+    # RPC 入口
+    #
+    # 下面四个方法把父类的同步签名覆写成协程，类型检查器会报
+    # reportIncompatibleMethodOverride —— **它是对的**：AsyncTaskService 不能
+    # 替换 TaskService 使用。这里逐个抑制而不是关掉整条规则，也不是假装没这回事。
+    #
+    # 为什么仍然这么写：两个类由 [SERVER].async_mode 在启动时二选一，进程里
+    # 永远只存在其中一个，不存在"拿到一个不知道是哪种"的调用点——除了 Web 端，
+    # 而那一处已经在运行时挡住了（pages.py 走 getattr(svc, "send_from_thread")，
+    # 并有测试守着）。改成继承一个不含 RPC 方法的共享基类才是正解，但那要重排
+    # 一个 954 行文件的结构，而受影响的是**默认的同步路径**——留作后续独立重构。
+    # ------------------------------------------------------------------ #
+
     @override
     def limiters_for_sharding(self) -> list[Any]:
         """异步模式下真正生效的是 _async_limiter，不是继承来的 host_limiter。"""
         return [self._async_limiter]
 
     @override
-    async def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
+    async def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":  # pyright: ignore[reportIncompatibleMethodOverride]
         log.debug("Received request: {} for URL: {}", request.uuid, request.url)
         start_time = time.monotonic()
         method_name = METHOD_MAP.get(request.method, "GET")
@@ -140,7 +154,7 @@ class AsyncTaskService(TaskService):
         return limiter
 
     @override
-    async def SendStream(
+    async def SendStream(  # pyright: ignore[reportIncompatibleMethodOverride]
         self, request: "task_pb2.ReqTask", context: ServicerContext
     ) -> AsyncIterator["task_pb2.TaskRespChunk"]:
         """流式下载。
@@ -151,15 +165,24 @@ class AsyncTaskService(TaskService):
         """
         loop = asyncio.get_running_loop()
         iterator: Iterator[task_pb2.TaskRespChunk] = super().SendStream(request, context)
-        sentinel = object()
+
+        def _next() -> "task_pb2.TaskRespChunk | None":
+            """取下一个分片，取完返回 None。
+
+            不用 sentinel 对象：那会让 yield 的类型被推成
+            ``TaskRespChunk | object``，签名对不上。这里 None 不是合法分片，
+            拿它当结束标记是安全的。
+            """
+            return next(iterator, None)
+
         while True:
-            chunk = await loop.run_in_executor(None, next, iterator, sentinel)
-            if chunk is sentinel:
+            chunk = await loop.run_in_executor(None, _next)
+            if chunk is None:
                 return
-            yield chunk  # type: ignore[misc]
+            yield chunk
 
     @override
-    async def SendBatch(self, request_iterator: Any, context: ServicerContext) -> AsyncIterator["task_pb2.TaskResp"]:
+    async def SendBatch(self, request_iterator: Any, context: ServicerContext) -> AsyncIterator["task_pb2.TaskResp"]:  # pyright: ignore[reportIncompatibleMethodOverride]
         """批量下载：结果按**完成顺序**产出，不是提交顺序。
 
         异步版用 ``asyncio.as_completed`` 而不是线程池——批量本来就是"量大"的
@@ -180,7 +203,7 @@ class AsyncTaskService(TaskService):
             yield await completed
 
     @override
-    async def Ping(self, request: "task_pb2.PingReq", context: ServicerContext) -> "task_pb2.PingResp":
+    async def Ping(self, request: "task_pb2.PingReq", context: ServicerContext) -> "task_pb2.PingResp":  # pyright: ignore[reportIncompatibleMethodOverride]
         return super().Ping(request, context)
 
 

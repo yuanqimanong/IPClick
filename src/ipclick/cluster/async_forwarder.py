@@ -33,7 +33,9 @@ from ipclick.services.async_task_service import AsyncTaskService
 from ipclick.utils.log_util import log
 
 
-class AsyncForwardingTaskService(AsyncTaskService, ForwardingTaskService):
+class AsyncForwardingTaskService(  # pyright: ignore[reportUnsafeMultipleInheritance, reportIncompatibleMethodOverride]
+    AsyncTaskService, ForwardingTaskService
+):
     """异步 + 服务端转发。
 
     MRO 是 AsyncTaskService → ForwardingTaskService → TaskService：
@@ -41,8 +43,18 @@ class AsyncForwardingTaskService(AsyncTaskService, ForwardingTaskService):
     RPC 入口走 AsyncTaskService，而 :meth:`Send` 在这里显式编排两者。
     """
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """显式转给 ForwardingTaskService 的构造。
+
+        MRO 上 AsyncTaskService 没有 __init__，所以不写这一句也能跑通。但写出来
+        是有价值的：多重继承下"父类构造到底有没有被调用"是靠 MRO 推出来的，
+        而 MRO 会随着谁加了个 __init__ 而变——那时节点池、self_id、TLS 全部
+        不会初始化，症状是转发时 AttributeError，跟继承顺序毫无字面联系。
+        """
+        ForwardingTaskService.__init__(self, *args, **kwargs)
+
     @override
-    async def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
+    async def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":  # pyright: ignore[reportIncompatibleMethodOverride]
         if is_forwarded(context):
             # 已经是转发来的：绝不再转。这是防环路的唯一依据，别加任何例外。
             self._local_count += 1
@@ -83,7 +95,7 @@ class AsyncForwardingTaskService(AsyncTaskService, ForwardingTaskService):
         return await AsyncTaskService.Send(self, request, context)
 
     @override
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:  # pyright: ignore[reportIncompatibleMethodOverride]
         return ForwardingTaskService.snapshot(self)
 
 

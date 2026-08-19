@@ -357,15 +357,20 @@ class WebPages:
             return {"error_only": True, "error": str(e)}
 
         target = (form.get("target_node") or "").strip()
+        # 显式标注：下面两条分支一条返回 TaskResp、一条经 getattr 拿到的是 Any，
+        # 不标注的话类型检查器会把两者并成 object，后面每一处 response.xxx 都报错。
+        response: task_pb2.TaskResp
         try:
             if target:
                 response = self._send_to_node(request, target)
             else:
                 # 异步服务端上 Send 是协程，直接调只会拿到一个没人 await 的
                 # coroutine 对象——页面上表现为静默失败，只有 GC 时才警告一句。
+                # 所以走 send_from_thread 把它投递回服务端的事件循环。
+                # 同步服务上没有这个方法，自然回退到直接调 Send。
                 sender = getattr(self.task_service, "send_from_thread", None)
                 if callable(sender):
-                    response = sender(request, cast(Any, _WebContext()))
+                    response = cast("task_pb2.TaskResp", sender(request, cast(Any, _WebContext())))
                 else:
                     response = self.task_service.Send(request, cast(Any, _WebContext()))
         except Exception as e:  # 页面不该因为一次试探而 500

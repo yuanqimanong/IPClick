@@ -24,18 +24,26 @@ from typing import Any
 import grpc
 from grpc import aio
 
-from ipclick.auth import TokenAuthInterceptor
+from ipclick.auth import TokenAuthInterceptor, extract_token, is_exempt, token_matches
 from ipclick.dto.proto import task_pb2_grpc
 from ipclick.services.async_task_service import AsyncTaskService
+from ipclick.trace import get_recorder
 from ipclick.utils.log_util import log
 
 
 class _AsyncAuthInterceptor(aio.ServerInterceptor):
     """令牌鉴权的 aio 版。
 
-    复用同步拦截器的判定逻辑（``TokenAuthInterceptor`` 里那套常量时间比较、
-    免鉴权前缀、拒绝时记链路），只把外壳换成 aio 的接口——鉴权规则在两条路上
-    必须完全一致，各写一份就等着哪天异步模式悄悄放行了本该拒绝的调用。
+    复用同步拦截器的**令牌与判定函数**（``extract_token`` / ``token_matches`` 那套
+    常量时间比较、``is_exempt`` 的免鉴权前缀），只把外壳换成 aio 接口。
+    鉴权规则各写一份，就等着哪天异步模式悄悄放行了本该拒绝的调用——那种缺陷
+    不会报错，只会安静地少拦一些人。
+
+    ⚠️ 拒绝用的是 ``grpc.unary_unary_rpc_method_handler`` 而**不是** ``aio.``——
+    后者根本不存在（``grpc.aio`` 没有这个符号）。写成 ``aio.`` 的话，鉴权拒绝
+    路径会在运行时抛 AttributeError：非法调用不再拿到 UNAUTHENTICATED，而是
+    一个含糊的内部错误。这个洞是类型检查器发现的，正常测试跑不到——除非专门
+    测"异步模式下拒绝非法令牌"（见 tests/test_async_auth.py）。
     """
 
     def __init__(self, delegate: TokenAuthInterceptor) -> None:
@@ -46,12 +54,21 @@ class _AsyncAuthInterceptor(aio.ServerInterceptor):
         return self._delegate.enabled
 
     async def intercept_service(self, continuation: Any, handler_call_details: Any) -> Any:
-        handler = self._delegate.intercept_service(lambda details: None, handler_call_details)
-        # 同步拦截器放行时返回 continuation(...) 的结果（这里被我们喂了 None），
-        # 拒绝时返回它自己构造的 _deny handler。所以"拿到了 handler"就等于被拒。
-        if handler is not None:
-            return aio.unary_unary_rpc_method_handler(_deny)
-        return await continuation(handler_call_details)
+        if not self._delegate.enabled:
+            return await continuation(handler_call_details)
+
+        method: str = getattr(handler_call_details, "method", "") or ""
+        if is_exempt(method):
+            return await continuation(handler_call_details)
+
+        token = extract_token(getattr(handler_call_details, "invocation_metadata", None))
+        if token_matches(token, self._delegate.tokens):
+            return await continuation(handler_call_details)
+
+        # 只记方法名，绝不记令牌本身（哪怕是错误的那个）
+        log.warning(f"拒绝未通过鉴权的调用: {method}")
+        get_recorder().record_rejected("unauthenticated")
+        return grpc.unary_unary_rpc_method_handler(_deny)
 
 
 async def _deny(_request: Any, context: Any) -> Any:
@@ -123,7 +140,10 @@ async def serve_async(
         # TypeError 把整个服务端带崩，而症状是"客户端连不上"——很容易被误读
         # 成端口或防火墙问题。
         from grpc_health.v1 import health_pb2, health_pb2_grpc
-        from grpc_health.v1.health import aio as health_aio
+
+        # grpc_health 没为 .health.aio 发类型信息，但运行时确实存在（已实测）。
+        # 这里只忽略"找不到符号"，不忽略其它问题。
+        from grpc_health.v1.health import aio as health_aio  # pyright: ignore[reportAttributeAccessIssue]
 
         servicer = health_aio.HealthServicer()
         health_pb2_grpc.add_HealthServicer_to_server(servicer, server)

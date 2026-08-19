@@ -99,7 +99,14 @@ class _DirectContext:
         return ()
 
 
-@final
+# 0.7.0 起去掉了 @final。原本标 final 是合理的——那时只有一个转发实现，
+# 而它继承 TaskService 已经够绕了。现在多了一个 AsyncForwardingTaskService：
+# 它要复用这里全部的路由决策（挑节点、故障转移、防环路、健康计数），只把
+# "本地执行那一跳"换成协程。把这些逻辑再抄一份才是更糟的选择——两份路由代码
+# 失步的表现是"同步和异步模式挑到了不同的节点"，几乎不可能从现象查回来。
+#
+# 子类只允许覆写 RPC 入口。碰 _pool / _forward / self_id 这些内部状态之前，
+# 先想清楚同步那条路会不会跟着变。
 class ForwardingTaskService(TaskService):
     """带服务端转发的 TaskService。
 
