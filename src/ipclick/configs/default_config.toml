@@ -370,7 +370,15 @@ user_agent = ""
 # 视窗尺寸
 viewport = { width = 1920, height = 1080 }
 # 默认的等待时机：load / domcontentloaded / networkidle / commit
-wait_until = "load"
+#
+# 默认是 networkidle：load 只保证首屏资源到齐，load 之后才由 JS 填进来的内容会被
+# **静默丢掉**——响应仍是 200、DOM 也完整，只是少一块，看不出哪里错了。
+#
+# networkidle 的经典风险（长连接页面永远等不到空闲）在这里被兜住了：先按 load
+# 完成导航，再额外等 networkidle，等不到就打一条 warning 并按 load 时的内容返回。
+# 也就是说最坏情况是多花 [BROWSER.timeout].settle 秒，不会让原本能成功的请求失败。
+# 追求最低延迟（且确认目标页面没有异步内容）就改回 "load"。
+wait_until = "networkidle"
 # 默认拦截的资源类型，只取 HTML 时拦掉能省大量时间与带宽。
 # 可选值：image media font stylesheet script xhr fetch websocket other
 block_resources = ["image", "media", "font"]
@@ -419,6 +427,9 @@ bypass_list = []                 # 例如 ["*.internal.com"]
 [BROWSER.timeout]
 page_load = 30      # 页面加载超时
 script_exec = 60    # automation_script 执行超时
+# wait_until = "networkidle" 时，load 之后额外等网络空闲的预算上限（秒）。
+# 等不到不算失败，只是按 load 时的内容返回。设 0 等于不等。
+settle = 5
 
 
 

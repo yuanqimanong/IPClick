@@ -5,6 +5,7 @@ import time
 from typing import Any, Protocol
 
 from ipclick.exceptions import TransportError, ValidationError
+from ipclick.protocols import StreamedBody
 from ipclick.utils.log_util import log
 
 
@@ -12,7 +13,7 @@ _RETRY_BACKOFF = 1.0
 
 
 class _Streamer(Protocol):
-    def stream(self, url: str, **kwargs: Any) -> Any: ...
+    def stream(self, url: str, **kwargs: Any) -> StreamedBody: ...
 
 
 @dataclass

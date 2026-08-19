@@ -42,10 +42,11 @@ data/
 *.db
 *.log
 
-# 文档与示例（镜像里用不到）
+# 文档与示例（镜像里用不到）。
+# LICENSE 不能排除：pyproject 用 PEP 639 的 license-files 声明了它，
+# 构建后端读不到文件就直接报 Invalid project metadata。
 examples/
 docker/构建.md
-LICENSE
 
 # 本地配置
 .env

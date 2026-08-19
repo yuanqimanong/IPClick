@@ -5,12 +5,8 @@ from typing import Any
 import grpc
 
 from ipclick.exceptions import ConfigError
+from ipclick.utils.coerce import as_bool, as_optional_text
 from ipclick.utils.log_util import log
-
-
-def _as_path(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
 
 
 def _read_pem(path: str, what: str) -> bytes:
@@ -44,12 +40,12 @@ class TLSSettings:
         config = dict((security_config or {}).get("tls") or {})
         defaults = cls()
         return cls(
-            enabled=bool(config.get("enabled", defaults.enabled)),
-            cert_file=_as_path(config.get("cert_file")),
-            key_file=_as_path(config.get("key_file")),
-            ca_file=_as_path(config.get("ca_file")),
-            require_client_cert=bool(config.get("require_client_cert", defaults.require_client_cert)),
-            server_name_override=_as_path(config.get("server_name_override")),
+            enabled=as_bool(config.get("enabled"), defaults.enabled),
+            cert_file=as_optional_text(config.get("cert_file")),
+            key_file=as_optional_text(config.get("key_file")),
+            ca_file=as_optional_text(config.get("ca_file")),
+            require_client_cert=as_bool(config.get("require_client_cert"), defaults.require_client_cert),
+            server_name_override=as_optional_text(config.get("server_name_override")),
         )
 
     @property

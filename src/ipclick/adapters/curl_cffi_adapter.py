@@ -1,17 +1,11 @@
 from collections.abc import Iterator
-import threading
 from typing import TYPE_CHECKING, Any
 
 from typing_extensions import override
 
-from ipclick.adapters.base import (
-    DEFAULT_CHUNK_SIZE,
-    DownloaderAdapter,
-    StreamEvent,
-    StreamHeader,
-    aretry,
-    retry,
-)
+from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader
+from ipclick.adapters.retry import aretry, retry
+from ipclick.adapters.sessions import AsyncSessionCache, SessionCache
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError
@@ -47,6 +41,8 @@ FAKE_UA_AVAILABLE: bool = _user_agent_cls is not None
 
 _SUPPORTED_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
 
+SessionKey = tuple[str | None, bool, str | None]
+
 _PASSTHROUGH_KWARGS = frozenset({"ja3", "akamai", "default_headers", "http_version", "interface", "cert"})
 
 
@@ -64,31 +60,31 @@ class CurlCffiAdapter(DownloaderAdapter):
         self.ja3: str | None = None
         self.akamai: str | None = None
 
-        self._sessions: dict[tuple[str | None, bool, str | None], Any] = {}
-        self._sessions_lock: threading.Lock = threading.Lock()
-        self._async_sessions: dict[tuple[int, str | None, bool, str | None], Any] = {}
+        self._sessions: SessionCache[SessionKey] = SessionCache(self.adapter_name, self._new_session)
+        self._async_sessions: AsyncSessionCache[SessionKey] = AsyncSessionCache(
+            self.adapter_name, self._new_async_session
+        )
 
         self.ua_generator: Any = _user_agent_cls(platforms="desktop") if _user_agent_cls is not None else None
 
-    def _get_session(self, proxy: str | None, verify: bool, impersonate: str | None) -> Any:
-        key = (proxy, verify, impersonate)
-        session = self._sessions.get(key)
-        if session is not None:
-            return session
+    def _session_kwargs(self, key: SessionKey) -> dict[str, Any]:
+        proxy, verify, impersonate = key
+        kwargs: dict[str, Any] = {
+            "proxies": self._build_proxies(proxy),
+            "verify": verify,
+            "impersonate": impersonate or DEFAULT_CHROME,
+            "trust_env": bool(self.trust_env),
+            "timeout": self.settings.download_timeout,
+        }
+        if proxy and _curl_opt is not None:
+            kwargs["curl_options"] = {_curl_opt.NOPROXY: ""}
+        return kwargs
 
-        with self._sessions_lock:
-            if key not in self._sessions:
-                session_kwargs: dict[str, Any] = {
-                    "proxies": self._build_proxies(proxy),
-                    "verify": verify,
-                    "impersonate": impersonate or DEFAULT_CHROME,
-                    "trust_env": bool(self.trust_env),
-                    "timeout": self.settings.download_timeout,
-                }
-                if proxy and _curl_opt is not None:
-                    session_kwargs["curl_options"] = {_curl_opt.NOPROXY: ""}
-                self._sessions[key] = _curl_cffi.Session(**session_kwargs)
-            return self._sessions[key]
+    def _new_session(self, key: SessionKey) -> Any:
+        return _curl_cffi.Session(**self._session_kwargs(key))
+
+    def _new_async_session(self, key: SessionKey) -> Any:
+        return _curl_cffi.AsyncSession(max_clients=self.settings.max_connections, **self._session_kwargs(key))
 
     def _build_proxies(self, proxy: str | None) -> "ProxySpec | None":
         if proxy:
@@ -157,7 +153,7 @@ class CurlCffiAdapter(DownloaderAdapter):
             }
         )
 
-        session = self._get_session(proxy, verify, impersonate)
+        session = self._sessions.get((proxy, verify, impersonate))
 
         try:
             curl_cffi_resp = session.request(method, url, **request_kwargs)
@@ -175,28 +171,6 @@ class CurlCffiAdapter(DownloaderAdapter):
             log.warning(f"curl_cffi request failed for {url}: {e}")
             raise
 
-    def _get_async_session(self, proxy: str | None, verify: bool, impersonate: str | None) -> Any:
-        import asyncio
-
-        loop_key = id(asyncio.get_running_loop())
-        key = (loop_key, proxy, verify, impersonate)
-        session = self._async_sessions.get(key)
-        if session is not None:
-            return session
-
-        session_kwargs: dict[str, Any] = {
-            "proxies": self._build_proxies(proxy),
-            "verify": verify,
-            "impersonate": impersonate or DEFAULT_CHROME,
-            "trust_env": bool(self.trust_env),
-            "timeout": self.settings.download_timeout,
-        }
-        if proxy and _curl_opt is not None:
-            session_kwargs["curl_options"] = {_curl_opt.NOPROXY: ""}
-        session = _curl_cffi.AsyncSession(**session_kwargs)
-        self._async_sessions[key] = session
-        return session
-
     @override
     @aretry()
     async def adownload(self, url: str, **kwargs: Any) -> Response:
@@ -205,8 +179,8 @@ class CurlCffiAdapter(DownloaderAdapter):
             raise ValidationError(f"Unsupported HTTP method: {method}")
 
         request_kwargs = self._build_request_kwargs(kwargs)
-        session = self._get_async_session(
-            kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate")
+        session = self._async_sessions.get(
+            (kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate"))
         )
         try:
             resp = await session.request(method, url, **request_kwargs)
@@ -235,7 +209,7 @@ class CurlCffiAdapter(DownloaderAdapter):
             yield StreamHeader(url=url, status_code=-1, error=f"Unsupported HTTP method: {method}")
             return
 
-        session = self._get_session(kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate"))
+        session = self._sessions.get((kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate")))
 
         request_kwargs: dict[str, Any] = {
             "headers": kwargs.get("headers"),
@@ -268,13 +242,13 @@ class CurlCffiAdapter(DownloaderAdapter):
 
     @override
     def close(self) -> None:
-        with self._sessions_lock:
-            for session in self._sessions.values():
-                try:
-                    session.close()
-                except Exception as e:
-                    log.debug(f"关闭 curl_cffi session 失败: {e}")
-            self._sessions.clear()
+        self._sessions.close()
+        self._async_sessions.close()
+
+    @override
+    async def aclose(self) -> None:
+        self._sessions.close()
+        await self._async_sessions.aclose()
 
 
 def is_available() -> bool:

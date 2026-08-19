@@ -21,7 +21,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /bin/uv
 
 # 先只复制依赖定义，让依赖层能被 Docker 缓存复用
-COPY pyproject.toml uv.lock README.md ./
+# LICENSE 也要进来：pyproject 用 PEP 639 的 license-files 声明了它，
+# 缺文件会让构建后端在生成元数据时直接失败。
+COPY pyproject.toml uv.lock README.md LICENSE ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev
 

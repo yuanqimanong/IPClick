@@ -19,8 +19,10 @@ from ipclick.limiter import LimiterSettings
 from ipclick.ports import DEFAULT_GRPC_PORT, DEFAULT_WEB_PORT
 from ipclick.secrets import SECRETS, describe_source
 from ipclick.server import serve
+from ipclick.server_settings import ServerSettings
 from ipclick.tls import TLSSettings, describe
 from ipclick.trace import TraceSettings
+from ipclick.utils.config_util import section
 from ipclick.utils.log_util import LogUtil
 from ipclick.web.auth import generate_password
 from ipclick.web.server import is_public_host
@@ -204,7 +206,7 @@ def health(host: str, port: int | None, config: Path | None, service: str, timeo
     LogUtil.init(level="ERROR")
 
     resolved_port = port or int(
-        dict(load_config(str(config) if config else None).get("SERVER", {})).get("port", DEFAULT_GRPC_PORT)
+        section(load_config(str(config) if config else None), "SERVER").get("port", DEFAULT_GRPC_PORT)
     )
     target = f"{host}:{resolved_port}"
 
@@ -220,14 +222,14 @@ def config_info(config: Path | None):
     try:
         cfg = load_config(str(config) if config else None)
 
-        server = dict(cfg.get("SERVER", {}))
-        proxy = dict(cfg.get("PROXY", {}))
-        security = dict(cfg.get("SECURITY", {}))
-        log_cfg = dict(cfg.get("LOG", {}))
-        downloader_cfg = dict(cfg.get("DOWNLOADER", {}))
-        monitor = dict(cfg.get("MONITOR", {}))
+        server = section(cfg, "SERVER")
+        proxy = section(cfg, "PROXY")
+        security = section(cfg, "SECURITY")
+        log_cfg = section(cfg, "LOG")
+        downloader_cfg = section(cfg, "DOWNLOADER")
+        monitor = section(cfg, "MONITOR")
 
-        web = dict(cfg.get("WEB", {}))
+        web = section(cfg, "WEB")
         click.echo("Current configuration:")
         click.echo(f"  Server host:  {server.get('host', '[::]')}")
         click.echo(f"  gRPC port:    {server.get('port', DEFAULT_GRPC_PORT)}   ← 客户端、SDK、其他节点连这个")
@@ -235,7 +237,7 @@ def config_info(config: Path | None):
             f"  Web port:     {web.get('port', DEFAULT_WEB_PORT)}   "
             f"← 浏览器打开这个（{'已启用' if web.get('enabled') else '未启用，用 run -w 开'}）"
         )
-        click.echo(f"  Max workers:  {server.get('max_workers', 10)}")
+        click.echo(f"  Max workers:  {ServerSettings.from_config(server).max_workers}")
         click.echo(f"  Log level:    {log_cfg.get('level', 'info')}")
         click.echo(f"  Log output:   {log_cfg.get('output', 'stdout')}")
 
@@ -263,7 +265,7 @@ def config_info(config: Path | None):
         else:
             click.echo("  未启用")
 
-        browser = BrowserSettings.from_config(dict(cfg.get("BROWSER", {})))
+        browser = BrowserSettings.from_config(section(cfg, "BROWSER"))
         click.echo("")
         click.echo("Browser rendering:")
         if browser.enabled:
@@ -298,7 +300,7 @@ def config_info(config: Path | None):
         click.echo("")
         click.echo("Monitoring:")
         click.echo(f"  健康检查:     {monitor.get('health_check', True)}")
-        trace = TraceSettings.from_config(dict(cfg.get("TRACE", {})))
+        trace = TraceSettings.from_config(section(cfg, "TRACE"))
         click.echo(f"  链路内存缓冲: {f'最近 {trace.memory_size} 条' if trace.memory_size else '已关闭'}")
         if trace.sqlite_enabled:
             retention = f"保留 {trace.retention_days} 天" if trace.retention_days else "永久保留"

@@ -7,8 +7,9 @@ from typing import Any
 
 from typing_extensions import override
 
-from ipclick.adapters.base import DownloaderAdapter, raise_if_script_error, retry
+from ipclick.adapters.base import DownloaderAdapter, raise_if_script_error
 from ipclick.adapters.browser_settings import BrowserSettings
+from ipclick.adapters.retry import retry
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError

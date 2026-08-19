@@ -1,6 +1,7 @@
+from collections.abc import Mapping
 from pathlib import Path
 import tomllib
-from typing import cast
+from typing import Any, cast
 
 from box import Box
 
@@ -9,6 +10,17 @@ from ipclick.utils.log_util import log
 
 class Settings(Box):
     pass
+
+
+def section(config: Mapping[str, Any] | None, name: str) -> dict[str, Any]:
+    if not config:
+        return {}
+    value = config.get(name)
+    if isinstance(value, Mapping):
+        return dict(value)
+    if value is not None:
+        log.warning(f"配置节 [{name}] 不是一个表（得到 {type(value).__name__}），已按空配置处理")
+    return {}
 
 
 class ConfigUtil:

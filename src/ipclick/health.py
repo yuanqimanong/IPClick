@@ -6,7 +6,8 @@ from typing import Any
 import grpc
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
-from ipclick.tls import TLSSettings, channel_credentials, channel_options
+from ipclick.rpc import open_channel_for
+from ipclick.tls import TLSSettings
 from ipclick.utils.log_util import log
 
 
@@ -67,14 +68,7 @@ def check_health(
     tls: TLSSettings | None = None,
 ) -> tuple[bool, str]:
     try:
-        settings = tls or TLSSettings()
-        options: list[tuple[str, Any]] = [("grpc.enable_http_proxy", 0), *channel_options(settings)]
-        channel_ctx = (
-            grpc.secure_channel(target, channel_credentials(settings), options=options)
-            if settings.enabled
-            else grpc.insecure_channel(target, options=options)
-        )
-        with channel_ctx as channel:
+        with open_channel_for(target, tls) as channel:
             stub: Any = health_pb2_grpc.HealthStub(channel)
             response = stub.Check(health_pb2.HealthCheckRequest(service=service), timeout=timeout)
     except grpc.RpcError as e:

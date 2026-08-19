@@ -15,22 +15,68 @@ env:
   NO_PROXY: "*"
 
 jobs:
+  # ---------------------------------------------------------------- #
+  # 静态检查。装齐可选适配器，否则 basedpyright 会把它们的 import 报成
+  # unresolved——而那正是 CI 该替人盯住的地方。
+  # 只跑一个 Python 版本：pyright 的目标版本由 [tool.pyright].pythonVersion
+  # 固定，矩阵化只会把同一份结论算多遍。
+  # ---------------------------------------------------------------- #
+  checks:
+    runs-on: ubuntu-latest
+    # 兜底：GitHub 默认 6 小时。挂住的 job 占着并发额度，
+    # 还会让 PR 的检查一直显示 pending，看不出是坏了还是慢。
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        # 刻意不用 --all-extras：[camoufox] 与 [playwright] 已在 pyproject 的
+        # [tool.uv].conflicts 里声明为互斥（camoufox 钉着 playwright<1.61），
+        # --all-extras 会同时点亮两者而直接失败。这里逐个列出，覆盖到每个
+        # 可选适配器的 import —— playwright 本体由 camoufox 带进来。
+        # 只装 lint / proto 两组：跑测试是 test job 的事，twine 是 build job 的。
+        run: >-
+          uv sync --frozen
+          --group lint --group proto
+          --extra niquests --extra camoufox --extra patchright --extra drissionpage
+
+      - name: Lint (ruff)
+        run: uv run ruff check src/ tests/
+
+      - name: Format check (ruff)
+        run: uv run ruff format --check src/ tests/
+
+      - name: Type check (basedpyright)
+        run: uv run basedpyright src/ tests/
+
+      - name: Verify protobuf stubs are up to date
+        run: |
+          uv run python src/ipclick/dto/proto/generate.py
+          git diff --exit-code -- src/ipclick/dto/proto/ \
+            || (echo "::error::task.proto 改动后未重新生成代码，请运行 uv run python src/ipclick/dto/proto/generate.py" && exit 1)
+
+  # ---------------------------------------------------------------- #
+  # 测试。刻意**不装任何 extra**：绝大多数用户只装核心依赖，
+  # 于是这个 job 同时验证「可选适配器缺席时仍能 import 与运行」。
+  # ---------------------------------------------------------------- #
   test:
     runs-on: ubuntu-latest
-    # 兜底：GitHub 默认 6 小时，而这个 job 实测最长 8.5 分钟。挂住的 job
-    # 占着并发额度，还会让 PR 的检查一直显示 pending，看不出是坏了还是慢。
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        # ⚠️ 只测最新版，而 pyproject 里声明的是 requires-python = ">=3.11"。
-        # 也就是说 3.11 / 3.12 / 3.13 是**声称支持但不做验证**的——在那几个版本上
-        # 装不上或跑挂，CI 不会告诉你。这是有意的取舍（换 CI 时间），不是遗漏；
-        # 哪天想收回这个取舍，把它们加回这个数组即可，别的都不用动。
+        # 对齐 requires-python = ">=3.11"，只测两端。中间的 3.12 / 3.13 仍是
+        # 声称支持但不做验证——这是有意的取舍（换 CI 时间），要收回就往这里加。
         #
-        # 另外注意别写成 "3.14t"：自由线程版的 SOABI 是 cpython-314t，
+        # 注意别写成 "3.14t"：自由线程版的 SOABI 是 cpython-314t，
         # grpcio / orjson 都没发对应轮子，会退化成源码编译并卡在 Rust 工具链上。
-        python-version: ["3.14"]
+        python-version: ["3.11", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -44,24 +90,10 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        # --all-extras：装上可选的 metrics / requests / playwright 依赖，
-        # 否则相关测试会被整体跳过
-        run: uv sync --frozen --all-groups --all-extras
+        run: uv sync --frozen --no-default-groups --group test
 
-      - name: Lint (ruff)
-        run: uv run ruff check src/
-
-      - name: Format check (ruff)
-        run: uv run ruff format --check src/
-
-      - name: Type check (basedpyright)
-        run: uv run basedpyright src/
-
-      - name: Verify protobuf stubs are up to date
-        run: |
-          uv run python src/ipclick/dto/proto/generate.py
-          git diff --exit-code -- src/ipclick/dto/proto/ \
-            || (echo "::error::task.proto 改动后未重新生成代码，请运行 uv run python src/ipclick/dto/proto/generate.py" && exit 1)
+      - name: Run tests
+        run: uv run --no-default-groups --group test pytest
 
   build:
     runs-on: ubuntu-latest
@@ -76,7 +108,8 @@ jobs:
         run: uv build
 
       - name: Check package metadata
-        run: uv run --with twine twine check dist/*
+        # uvx 而不是 uv run：这一步只需要 twine，不必为它把整个项目连依赖装一遍
+        run: uvx twine check dist/*
 
       - name: Verify package data is included
         run: |
@@ -87,6 +120,8 @@ jobs:
           required = [
               "ipclick/configs/default_config.toml",
               "ipclick/dto/proto/task_pb2.py",
+              # 类型存根：漏了它，装了本包的下游 pyright 会把 proto 消息全看成 Any
+              "ipclick/dto/proto/task_pb2.pyi",
               "ipclick/py.typed",
               # 运行时要读的数据文件，不是文档：`ipclick skill show/install` 直接
               # 读它。漏打包的话命令会在用户机器上炸，而 CI 全绿。

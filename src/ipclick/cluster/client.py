@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 import threading
-from typing import Any
+from typing import Any, TypeVar
 
 from ipclick.cluster.discovery import create_discovery
 from ipclick.cluster.node import ClusterConfig, NodeState
@@ -11,7 +11,11 @@ from ipclick.dto.models import DownloadResponse, DownloadTask, HttpMethod
 from ipclick.exceptions import ClientClosedError, IPClickError, TransportError
 from ipclick.sdk import ClientBase, Downloader, StreamedResponse
 from ipclick.tls import TLSSettings
+from ipclick.utils.config_util import section
 from ipclick.utils.log_util import log
+
+
+_T = TypeVar("_T")
 
 
 class ClusterDownloader(ClientBase):
@@ -26,9 +30,9 @@ class ClusterDownloader(ClientBase):
     ):
         super().__init__(config_path=config_path, token=token, tls=tls)
         self.cluster_config: ClusterConfig = cluster_config or ClusterConfig.from_config(
-            dict(self.config.get("CLUSTER", {}))
+            section(self.config, "CLUSTER")
         )
-        discovery, discovery_config = create_discovery(dict(self.config.get("CLUSTER", {})), self.cluster_config.nodes)
+        discovery, discovery_config = create_discovery(section(self.config, "CLUSTER"), self.cluster_config.nodes)
         self.pool: NodePool = NodePool(
             self.cluster_config,
             start_probing=start_probing,
@@ -81,7 +85,7 @@ class ClusterDownloader(ClientBase):
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         self.close()
 
-    def _with_failover(self, operation: Any, description: str) -> Any:
+    def _with_failover(self, operation: Callable[[Downloader], _T], description: str) -> _T:
         tried: set[str] = set()
         attempts = self.cluster_config.max_failover + 1
         last_error: Exception | None = None

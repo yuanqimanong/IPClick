@@ -1,48 +1,56 @@
+from __future__ import annotations
+
+from collections.abc import Iterable, Iterator, Mapping
 import threading
-from typing import Any
+from typing import Any, Self, final
 
 from typing_extensions import override
 
 from ipclick.config_loader import load_config
+from ipclick.dto.models import DownloadResponse, DownloadTask
 from ipclick.exceptions import ConfigError
+from ipclick.protocols import DownloadClient, StreamedBody
+from ipclick.utils.coerce import as_text
+from ipclick.utils.config_util import section
 from ipclick.utils.log_util import log
 from ipclick.utils.secure_util import SecureUtil
 
 
 CLIENT_MODES: frozenset[str] = frozenset({"standalone", "cluster", "auto"})
 
+STANDALONE = "standalone"
 
-def resolve_mode(config: Any) -> str:
-    general = dict(config.get("GENERAL", {}))
-    mode = str(general.get("mode") or "standalone").strip().lower()
+CLUSTER = "cluster"
+
+
+def resolve_mode(config: Mapping[str, Any] | None) -> str:
+    mode = as_text(section(config, "GENERAL").get("mode"), STANDALONE).lower()
     if mode not in CLIENT_MODES:
         raise ConfigError(f"未知的 [GENERAL].mode {mode!r}，可选：{'、'.join(sorted(CLIENT_MODES))}")
 
-    cluster = dict(config.get("CLUSTER", {}))
+    cluster = section(config, "CLUSTER")
     has_nodes = bool(cluster.get("nodes"))
-    discovery_mode = str(dict(cluster.get("discovery") or {}).get("mode") or "static").strip().lower()
-    has_discovery = discovery_mode != "static"
+    has_discovery = as_text(section(cluster, "discovery").get("mode"), "static").lower() != "static"
 
-    if mode == "cluster":
+    if mode == CLUSTER:
         if not (has_nodes or has_discovery):
             raise ConfigError(
                 '[GENERAL].mode = "cluster" 但既没有 [CLUSTER].nodes 也没有配置 [CLUSTER.discovery]。'
                 "静默退回单机会让你以为集群生效了，实际所有流量都打在一个节点上、也没有故障转移。"
             )
-        return "cluster"
+        return CLUSTER
 
     if mode == "auto":
-        return "cluster" if (has_nodes or has_discovery) else "standalone"
-    return "standalone"
+        return CLUSTER if (has_nodes or has_discovery) else STANDALONE
+    return STANDALONE
 
 
-def create_client(config_path: str | None = None, **kwargs: Any) -> Any:
+def create_client(config_path: str | None = None, **kwargs: Any) -> DownloadClient:
     from ipclick.sdk import Downloader
 
     config = load_config(config_path)
-    mode = resolve_mode(config)
 
-    if mode == "cluster":
+    if resolve_mode(config) == CLUSTER:
         from ipclick.cluster import ClusterDownloader
 
         for key in ("host", "port"):
@@ -54,11 +62,11 @@ def create_client(config_path: str | None = None, **kwargs: Any) -> Any:
     return Downloader(config_path=config_path, **kwargs)
 
 
-_downloader_cache: dict[str, Any] = {}
+_downloader_cache: dict[str, DownloadClient] = {}
 _cache_lock = threading.Lock()
 
 
-def get_downloader(config_path: str | None = None, host: str | None = None, port: int | None = None) -> Any:
+def get_downloader(config_path: str | None = None, host: str | None = None, port: int | None = None) -> DownloadClient:
     key = SecureUtil.md5([config_path, host, port])
     instance = _downloader_cache.get(key)
     if instance is not None:
@@ -66,13 +74,17 @@ def get_downloader(config_path: str | None = None, host: str | None = None, port
 
     with _cache_lock:
         if key not in _downloader_cache:
-            if host is not None or port is not None:
-                from ipclick.sdk import Downloader
-
-                _downloader_cache[key] = Downloader(config_path=config_path, host=host, port=port)
-            else:
-                _downloader_cache[key] = create_client(config_path)
+            _downloader_cache[key] = _build_client(config_path, host, port)
         return _downloader_cache[key]
+
+
+def _build_client(config_path: str | None, host: str | None, port: int | None) -> DownloadClient:
+    if host is None and port is None:
+        return create_client(config_path)
+
+    from ipclick.sdk import Downloader
+
+    return Downloader(config_path=config_path, host=host, port=port)
 
 
 def close_all_downloaders() -> None:
@@ -82,18 +94,62 @@ def close_all_downloaders() -> None:
         _downloader_cache.clear()
 
 
+@final
 class _LazyDownloader:
     __slots__: tuple[str, ...] = ()
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(get_downloader(), name)
+    @property
+    def client(self) -> DownloadClient:
+        return get_downloader()
+
+    def download(self, task: DownloadTask) -> DownloadResponse:
+        return self.client.download(task)
+
+    def request(self, *, url: str, **kwargs: Any) -> DownloadResponse:
+        return self.client.request(url=url, **kwargs)
+
+    def stream(self, url: str, **kwargs: Any) -> StreamedBody:
+        return self.client.stream(url, **kwargs)
+
+    def batch(self, tasks: Iterable[DownloadTask], timeout: float | None = None) -> Iterator[DownloadResponse]:
+        return self.client.batch(tasks, timeout=timeout)
+
+    def get(self, url: str, params: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
+        return self.client.get(url, params=params, **kwargs)
+
+    def post(self, url: str, data: Any = None, json: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
+        return self.client.post(url, data=data, json=json, **kwargs)
+
+    def put(self, url: str, data: Any = None, **kwargs: Any) -> DownloadResponse:
+        return self.client.put(url, data=data, **kwargs)
+
+    def patch(self, url: str, data: Any = None, **kwargs: Any) -> DownloadResponse:
+        return self.client.patch(url, data=data, **kwargs)
+
+    def delete(self, url: str, **kwargs: Any) -> DownloadResponse:
+        return self.client.delete(url, **kwargs)
+
+    def head(self, url: str, **kwargs: Any) -> DownloadResponse:
+        return self.client.head(url, **kwargs)
+
+    def options(self, url: str, **kwargs: Any) -> DownloadResponse:
+        return self.client.options(url, **kwargs)
+
+    def close(self) -> None:
+        close_all_downloaders()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        self.close()
 
     @override
     def __repr__(self) -> str:
         return "<ipclick.downloader (lazy)>"
 
 
-downloader: Any = _LazyDownloader()
+downloader: DownloadClient = _LazyDownloader()
 
 
 __all__ = [

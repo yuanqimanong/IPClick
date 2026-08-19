@@ -4,7 +4,7 @@ import base64
 from pathlib import Path
 import sys
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 
@@ -12,7 +12,11 @@ from ipclick import __version__
 from ipclick.cli.output import DEFAULT_BODY_LIMIT, Exit, classify, emit, fail, json_option, note
 from ipclick.config_loader import load_config, placeholders
 from ipclick.ports import DEFAULT_GRPC_PORT, DEFAULT_WEB_PORT
-from ipclick.utils.config_util import Settings
+from ipclick.utils.config_util import Settings, section
+
+
+if TYPE_CHECKING:
+    from ipclick.trace import TraceReader
 
 
 def config_option(func: Any) -> Any:
@@ -59,7 +63,7 @@ def _server_port(config: Settings, port: int | None) -> int:
     if port:
         return port
     try:
-        return int(dict(config.get("SERVER", {})).get("port", DEFAULT_GRPC_PORT))
+        return int(section(config, "SERVER").get("port", DEFAULT_GRPC_PORT))
     except (TypeError, ValueError):
         return DEFAULT_GRPC_PORT
 
@@ -323,17 +327,17 @@ def status(
 
     healthy, health_detail = check_health(target, timeout=timeout)
 
-    security = dict(config_data.get("SECURITY", {}))
-    browser = BrowserSettings.from_config(dict(config_data.get("BROWSER", {})))
+    security = section(config_data, "SECURITY")
+    browser = BrowserSettings.from_config(section(config_data, "BROWSER"))
     trace_settings = TraceSettings.from_config(
-        placeholders.resolve_for("TRACE", dict(config_data.get("TRACE", {})), resolved_port)
+        placeholders.resolve_for("TRACE", section(config_data, "TRACE"), resolved_port)
     )
     try:
         mode = resolve_mode(config_data)
     except Exception as e:
         mode = f"配置错误: {e}"
 
-    web_port = int(dict(config_data.get("WEB", {})).get("port", DEFAULT_WEB_PORT))
+    web_port = int(section(config_data, "WEB").get("port", DEFAULT_WEB_PORT))
     components = components_snapshot(browser)
     nodes = _node_entries(config_data)
     probes: list[dict[str, Any]] = []
@@ -351,7 +355,7 @@ def status(
             "mode": mode,
             "grpc_port": resolved_port,
             "web_port": web_port,
-            "web_enabled_in_config": bool(dict(config_data.get("WEB", {})).get("enabled", False)),
+            "web_enabled_in_config": bool(section(config_data, "WEB").get("enabled", False)),
             "web_reachable": _port_open(host or "127.0.0.1", web_port),
         },
         "security": {
@@ -406,12 +410,12 @@ def trace() -> None:
     pass
 
 
-def _reader(config_data: Settings, port: int | None, as_json: bool) -> Any:
+def _reader(config_data: Settings, port: int | None, as_json: bool) -> TraceReader:
     from ipclick.trace import TraceReader, TraceSettings
 
     resolved_port = _server_port(config_data, port)
     settings = TraceSettings.from_config(
-        placeholders.resolve_for("TRACE", dict(config_data.get("TRACE", {})), resolved_port)
+        placeholders.resolve_for("TRACE", section(config_data, "TRACE"), resolved_port)
     )
     if not settings.sqlite_enabled:
         fail(
@@ -602,8 +606,8 @@ def _probe_one(config_data: Settings, entry: dict[str, Any], timeout: float) -> 
 
     result = probe_node(
         parsed,
-        secret=cluster_secret(dict(config_data.get("CLUSTER", {}))),
-        tls=TLSSettings.from_config(dict(config_data.get("SECURITY", {}))),
+        secret=cluster_secret(section(config_data, "CLUSTER")),
+        tls=TLSSettings.from_config(section(config_data, "SECURITY")),
         timeout=timeout,
     )
     return result.snapshot()
@@ -616,7 +620,7 @@ def node_list(config: Path | None, as_json: bool) -> None:
     _quiet_logs()
     config_data = _load(config, as_json)
     nodes = _node_entries(config_data)
-    cluster = dict(config_data.get("CLUSTER", {}))
+    cluster = section(config_data, "CLUSTER")
 
     if as_json:
         emit(
@@ -699,7 +703,7 @@ def component_list(config: Path | None, as_json: bool) -> None:
 
     _quiet_logs()
     config_data = _load(config, as_json)
-    browser = BrowserSettings.from_config(dict(config_data.get("BROWSER", {})))
+    browser = BrowserSettings.from_config(section(config_data, "BROWSER"))
     components = components_snapshot(browser)
     toolchain = detect_toolchain()
 

@@ -15,7 +15,6 @@ from ipclick.adapters.base import (
     normalize_js,
     raise_if_permanent_navigation_error,
     raise_if_script_error,
-    retry,
 )
 from ipclick.adapters.browser_settings import (
     BLOCKABLE_RESOURCES,
@@ -23,6 +22,7 @@ from ipclick.adapters.browser_settings import (
     BrowserSettings,
     resolve_max_pages,
 )
+from ipclick.adapters.retry import retry
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError
@@ -39,6 +39,28 @@ _COLD_START_ALLOWANCE = 60.0
 _OVERHEAD_ALLOWANCE = 15.0
 
 _MAX_WAIT_FOR_TIMEOUT_MS = 60_000
+
+NETWORK_IDLE = "networkidle"
+
+_GOTO_FALLBACK_STATE = "load"
+
+
+def _goto_state(wait_until: str) -> str:
+    return _GOTO_FALLBACK_STATE if wait_until == NETWORK_IDLE else wait_until
+
+
+async def _settle(page: Any, plan: _RenderPlan) -> None:
+    if plan.wait_until != NETWORK_IDLE or plan.settle_timeout_ms <= 0:
+        return
+    budget = min(plan.settle_timeout_ms, plan.page_timeout_ms)
+    try:
+        await page.wait_for_load_state(NETWORK_IDLE, timeout=budget)
+    except Exception as e:
+        log.warning(
+            f"{plan.url} 在 {budget}ms 内没有进入 networkidle（{type(e).__name__}），"
+            f"按 load 时的页面内容返回。长连接页面属正常；要缩短这段等待请调 [BROWSER.timeout].settle，"
+            f"要完全不等就把 [BROWSER].wait_until 设为 load"
+        )
 
 
 class _BrowserWorker:
@@ -204,12 +226,14 @@ class _BrowserWorker:
 
         page = await context.new_page()
         try:
-            response = await page.goto(plan.url, wait_until=plan.wait_until, timeout=plan.page_timeout_ms)
+            response = await page.goto(plan.url, wait_until=_goto_state(plan.wait_until), timeout=plan.page_timeout_ms)
         except Exception as e:
             raise_if_permanent_navigation_error(e)
             raise
         if response is None:
             raise AdapterError(f"浏览器没有为 {plan.url} 产生任何响应（可能是下载或 about: 跳转）")
+
+        await _settle(page, plan)
 
         if plan.wait_for_selector:
             await page.wait_for_selector(plan.wait_for_selector, timeout=plan.page_timeout_ms)
@@ -269,6 +293,7 @@ class _RenderPlan:
     wait_until: str
     page_timeout_ms: int
     script_timeout: float
+    settle_timeout_ms: int = 0
     wait_for_selector: str | None = None
     wait_for_timeout_ms: int = 0
     scroll_to_bottom: bool = False
@@ -402,6 +427,7 @@ class BrowserAdapter(DownloaderAdapter):
             block_resources=block_resources,
             wait_until=wait_until,
             page_timeout_ms=int(page_timeout * 1000),
+            settle_timeout_ms=int(s.settle_timeout * 1000),
             wait_for_selector=(str(config["wait_for_selector"]) if config.get("wait_for_selector") else None),
             wait_for_timeout_ms=min(_MAX_WAIT_FOR_TIMEOUT_MS, self._positive_number(config, "wait_for_timeout")),
             scroll_to_bottom=bool(config.get("scroll_to_bottom")),

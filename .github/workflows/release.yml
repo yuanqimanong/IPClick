@@ -44,13 +44,21 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen --all-groups --all-extras
+        # 不用 --all-extras：[camoufox] 与 [playwright] 在 [tool.uv].conflicts
+        # 里是互斥的，同时点亮会直接解不出来。见 ci.yml 里的同一处说明。
+        run: >-
+          uv sync --frozen
+          --group lint --group test
+          --extra niquests --extra camoufox --extra patchright --extra drissionpage
 
       - name: Lint / format / types
         run: |
-          uv run ruff check src/
-          uv run ruff format --check src/
-          uv run basedpyright src/
+          uv run ruff check src/ tests/
+          uv run ruff format --check src/ tests/
+          uv run basedpyright src/ tests/
+
+      - name: Test
+        run: uv run pytest
 
       - name: Build
         run: uv build
@@ -73,7 +81,7 @@ jobs:
 
       - name: Verify artifacts
         run: |
-          uv run --with twine twine check dist/*
+          uvx twine check dist/*
           python - <<'PY'
           import glob, sys, zipfile
 
@@ -83,6 +91,8 @@ jobs:
           required = [
               "ipclick/configs/default_config.toml",
               "ipclick/dto/proto/task_pb2.py",
+              # 类型存根：漏了它，装了本包的下游 pyright 会把 proto 消息全看成 Any
+              "ipclick/dto/proto/task_pb2.pyi",
               "ipclick/py.typed",
               # 运行时要读的数据文件，不是文档：`ipclick skill show/install` 直接
               # 读它。漏打包的话命令会在用户机器上炸，而 CI 全绿。
@@ -91,8 +101,24 @@ jobs:
           if missing := [r for r in required if r not in names]:
               sys.exit(f"wheel 缺少文件: {missing}")
 
-          # 不该出现在分发包里的东西
-          if leaked := [n for n in names if any(k in n for k in ("test", "__pycache__", ".env", ".git"))]:
+          # 不该出现在分发包里的东西。
+          # 注意别用 `"test" in name` 这种子串匹配：包内合法存在名字带 test 的模块
+          # （例如渲染「试一试」页的模板），那样会把正常发布拦下来。只认真正的
+          # 测试目录与 pytest 的文件命名约定。
+          import posixpath
+
+          def _is_leak(name: str) -> bool:
+              base = posixpath.basename(name)
+              return (
+                  name.startswith("tests/")
+                  or "/tests/" in name
+                  or base.startswith("test_")
+                  or base.endswith("_test.py")
+                  or "__pycache__" in name
+                  or base in (".env", ".git", ".gitignore")
+              )
+
+          if leaked := [n for n in names if _is_leak(n)]:
               sys.exit(f"wheel 含不应分发的文件: {leaked}")
 
           # README 会作为 long_description 成为 PyPI 项目页正文，且**上传后不可修改**。
