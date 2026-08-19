@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import os
+import sys
 from typing import Any
 
 
@@ -186,7 +187,7 @@ def available_memory_mb() -> int | None:
     except (OSError, ValueError, IndexError):
         pass
 
-    if not limits:
+    if not limits and sys.platform != "win32":
         try:
             page_size = os.sysconf("SC_PAGE_SIZE")
             limits.append(os.sysconf("SC_AVPHYS_PAGES") * page_size // (1024 * 1024))
