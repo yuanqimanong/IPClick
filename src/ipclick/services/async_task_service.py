@@ -42,6 +42,31 @@ if TYPE_CHECKING:
 class AsyncTaskService(TaskService):
     """异步版任务服务。只覆写 RPC 入口，其余复用父类。"""
 
+    #: 服务端运行所在的事件循环。由 serve_async 在启动时绑定。
+    #: Web 管理端跑在自己的线程里，要把协程投递回这里才能执行。
+    _loop: "asyncio.AbstractEventLoop | None" = None
+
+    def bind_loop(self, loop: "asyncio.AbstractEventLoop") -> None:
+        self._loop = loop
+
+    def send_from_thread(self, request: "task_pb2.ReqTask", context: Any, timeout: float = 300.0) -> Any:
+        """从**非事件循环线程**发起一次请求，阻塞等结果。
+
+        专供 Web 管理端的「试一试」：那条路径跑在 HTTP 服务的工作线程里，
+        而 :meth:`Send` 是协程，直接调只会拿到一个没人 await 的 coroutine 对象
+        （而且 Python 只会在垃圾回收时警告一句 "coroutine was never awaited"，
+        页面上表现为静默失败）。
+
+        用 ``run_coroutine_threadsafe`` 投递回服务端的循环，并**带超时**：
+        循环若被什么东西卡住，这里不能无限期占着一个 HTTP 工作线程——那会让
+        整个管理端跟着挂掉，而人看到的只是页面转圈。
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            raise RuntimeError("异步服务端尚未就绪（事件循环未绑定），请稍后再试")
+        future = asyncio.run_coroutine_threadsafe(self.Send(request, context), loop)
+        return future.result(timeout=timeout)
+
     @override
     async def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
         log.debug("Received request: {} for URL: {}", request.uuid, request.url)

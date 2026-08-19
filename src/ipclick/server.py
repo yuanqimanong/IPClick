@@ -587,25 +587,29 @@ class IPClickServer:
         from ipclick.services.async_task_service import AsyncTaskService
 
         if self.cluster_config.forwarding_enabled:
-            raise ConfigError(
-                '[SERVER].async_mode 目前不支持与 [CLUSTER].forward = "on" 同时开启：'
-                "转发器的出站调用还是同步 gRPC stub，在事件循环里会把循环阻塞住。"
-                "两者择一，或等后续版本"
-            )
+            # 转发的**路由决策**（挑节点、故障转移、防环路）复用同步实现，
+            # 只有"本地执行"那一跳走异步。出站那一跳仍是同步 stub、仍占线程，
+            # 取舍写在 async_forwarder 的模块注释里。
+            from ipclick.cluster.async_forwarder import AsyncForwardingTaskService
 
-        self.task_service = AsyncTaskService(self.config)
+            self.task_service = AsyncForwardingTaskService(
+                self.config,
+                self.cluster_config,
+                tls=tls_settings,
+                server_host=server_host,
+                server_port=server_port,
+            )
+        else:
+            self.task_service = AsyncTaskService(self.config)
+
         listen_addr = f"{server_host}:{server_port}"
         self._listen_addr = listen_addr
 
-        # Web 管理端在异步模式下暂不启动：它的「试一试」直接同步调用
-        # task_service.Send()，而那现在是个协程。跨线程投递那条路径还没写，
-        # 与其让人点了没反应，不如明确说不支持。
-        if self.web_config.enabled:
-            log.warning(
-                "[SERVER].async_mode 下暂不启动 Web 管理端："
-                "「试一试」走的是同步调用，异步服务端上需要跨线程投递到事件循环，"
-                "这条路径尚未实现。需要 Web 端请暂时关掉 async_mode"
-            )
+        # Web 管理端照常起。「试一试」走 AsyncTaskService.send_from_thread：
+        # 它跑在 HTTP 工作线程里，用 run_coroutine_threadsafe 把协程投递回服务端的
+        # 事件循环，并**带超时**——循环若被卡住，不能让 HTTP 工作线程无限期占着，
+        # 那会把管理端一起拖挂，而人看到的只是页面转圈。
+        self._start_web()
 
         log.info(f"IPClick server starting on {listen_addr}（async_mode，实验性）")
         warn_if_insecure(tls_settings, server_host)

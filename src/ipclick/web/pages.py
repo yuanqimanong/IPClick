@@ -361,7 +361,13 @@ class WebPages:
             if target:
                 response = self._send_to_node(request, target)
             else:
-                response = self.task_service.Send(request, cast(Any, _WebContext()))
+                # 异步服务端上 Send 是协程，直接调只会拿到一个没人 await 的
+                # coroutine 对象——页面上表现为静默失败，只有 GC 时才警告一句。
+                sender = getattr(self.task_service, "send_from_thread", None)
+                if callable(sender):
+                    response = sender(request, cast(Any, _WebContext()))
+                else:
+                    response = self.task_service.Send(request, cast(Any, _WebContext()))
         except Exception as e:  # 页面不该因为一次试探而 500
             log.exception(f"试一试请求失败：{e}")
             return {"error_only": True, "error": _readable_error(e, target)}

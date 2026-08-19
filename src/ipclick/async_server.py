@@ -111,6 +111,10 @@ async def serve_async(
     **server_kwargs: Any,
 ) -> None:
     """起一个 aio 服务端并等它终止。"""
+    # 把循环记到 service 上：Web 管理端跑在自己的线程里，「试一试」要把协程
+    # 投递回这个循环才能执行（见 AsyncTaskService.send_from_thread）。
+    service.bind_loop(asyncio.get_running_loop())
+
     server = build_async_server(**server_kwargs)
     task_pb2_grpc.add_TaskServiceServicer_to_server(service, server)
 

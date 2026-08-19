@@ -88,7 +88,7 @@
 - [ ] `grpc.aio.server()` 分支，与多进程（`processes`）叠加
 - [ ] 实测对比：同步 vs 异步 × 单进程 vs 多进程
 
-### 🔄 阶段 4：limiter / forwarder / Web 桥接
+### ✅ 阶段 4：limiter / forwarder / Web 桥接
 - [x] **异步限流器** `src/ipclick/async_limiter.py` —— `asyncio.Semaphore` +
       预约式令牌桶（原子占住未来时刻再精确睡到那一刻，不轮询、先到先服务）
 - [x] 接进 `AsyncTaskService`，替掉原先"丢线程池"的临时实现
@@ -105,10 +105,26 @@
 
       方向是**欠发**不是超发。精度提升有限（4% → 0.2%），异步版真正的收益是
       **不占线程、不阻塞事件循环**。注释已按实测改正。
-- [ ] forwarder：出站 gRPC 换 aio channel
-- [ ] Web 端：`pages.py:364` 的同步 `task_service.Send()` 跨线程投递到事件循环
+- [x] **Web 端跨线程桥接** —— `AsyncTaskService.send_from_thread()`，
+      用 `run_coroutine_threadsafe` 投递回服务端循环，**带超时**。
+      异步模式下 Web 管理端现在照常可用（原先是启动时打 warning 说不支持）。
 
-### ⬜ 阶段 5：浏览器并发上限
+      超时是必须的：循环若卡住，不能让 HTTP 工作线程无限期占着——那会把
+      管理端一个个拖挂，而用户看到的只是页面转圈。
+- [x] **异步转发** `src/ipclick/cluster/async_forwarder.py` ——
+      解掉了 `async_mode` 与 `forward="on"` 的互斥。
+      组合而非重写：路由决策（挑节点、故障转移、防环路、健康计数）全部复用
+      同步的 `ForwardingTaskService`，只有"本地执行"那一跳走异步。
+
+      ⚠️ **出站那一跳仍是同步 stub、仍占线程**。没一并换 aio 是因为那要重做
+      连接池 / TLS 凭据 / 故障转移 / 健康计数一整套，风险不该和"换并发模型"
+      捆在一起。所以异步模式对**纯转发流量**收益有限，收益集中在入口自己
+      执行的那部分。
+- [x] 端到端验证：异步 + 转发 + Web 三者同开，真实请求 200/6ms
+
+### ✅ 阶段 4 完成
+
+### 🔄 阶段 5（下一步）：浏览器并发上限
 - [ ] `max_pages` 默认值按 `min(cpu_count, 可用内存 / 每引擎经验值)` 推导
 - [ ] 各引擎不同系数（camoufox ≫ chromium）
 
