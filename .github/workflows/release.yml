@@ -28,6 +28,7 @@ jobs:
   # ---------------------------------------------------------------- #
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     outputs:
@@ -117,6 +118,9 @@ jobs:
   publish-pypi:
     needs: build
     runs-on: ubuntu-latest
+    # 刻意不设 timeout-minutes：这个 job 卡在 environment 的人工审批上，
+    # 而审批可能要等几小时甚至隔天。上传本身只有几秒，真正的风险不是它跑太久，
+    # 而是一个超时把等待审批的发布悄悄掐掉。
     environment:
       name: pypi
       url: https://pypi.org/p/ipclick
@@ -138,6 +142,7 @@ jobs:
     if: github.event_name == 'push'
     needs: publish-pypi
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:

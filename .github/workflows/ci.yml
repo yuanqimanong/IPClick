@@ -17,6 +17,9 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # 兜底：GitHub 默认 6 小时，而这个 job 实测最长 8.5 分钟。挂住的 job
+    # 占着并发额度，还会让 PR 的检查一直显示 pending，看不出是坏了还是慢。
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +49,13 @@ jobs:
         # （见 tests/test_browser_adapter.py 里的 IPCLICK_TEST_ENGINES），
         # 引擎选择与配置解析那部分不需要浏览器，照常覆盖。
         # DrissionPage 用 runner 自带的 Chrome。
+        #
+        # 超时收紧到 10 分钟：--with-deps 会走 apt-get，而 runner 上的
+        # unattended-upgrades 偶尔占住 dpkg 锁不放——实测这一步卡死过 25 分钟
+        # 毫无进展，而同一个提交在另一个 Python 版本上 3 分 41 秒就跑完了整个
+        # job。没有超时的话它会一直挂到默认上限（6 小时），既占着并发额度，
+        # 又让 PR 的检查一直显示 pending，看不出是坏了还是慢。
+        timeout-minutes: 10
         run: |
           uv run playwright install --with-deps chromium
           uv run patchright install chromium
@@ -70,6 +80,7 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -106,6 +117,7 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
