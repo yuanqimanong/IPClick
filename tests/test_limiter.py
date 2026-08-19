@@ -202,6 +202,12 @@ class TestRateLimit:
             pass
 
 
+# 这一组用 127.0.0.1 而不是 target.example 之类的假域名：
+# SSRF 准入（validate_url）会对主机名做一次**同步 DNS 解析**，而不存在的域名
+# 要等满 5 秒解析超时——实测 20 个请求因此跑了 20 秒，整套测试里最慢的一个，
+# 而它想测的是限流器，跟 DNS 毫无关系。纯 IP 走同一条准入路径但零解析开销。
+
+
 class TestServerIntegration:
     """闸门必须真的挡在下载路径上——单测限流器本身通过、但没接进去的话等于没做。"""
 
@@ -256,7 +262,7 @@ class TestServerIntegration:
         )
         try:
             with Downloader(host="127.0.0.1", port=port) as d, ThreadPoolExecutor(10) as pool:
-                results = list(pool.map(lambda i: d.get(f"http://target.example/{i}"), range(20)))
+                results = list(pool.map(lambda i: d.get(f"http://127.0.0.1/{i}"), range(20)))
             assert all(r.status_code == 200 for r in results)
             assert state["peak"] <= 2, f"服务端并发峰值 {state['peak']} 超过了 per_host_max_concurrent=2"
             assert state["peak"] > 1, "峰值恒为 1 说明并发根本没起来，这个断言就没意义了"
@@ -275,7 +281,7 @@ class TestServerIntegration:
             with Downloader(host="127.0.0.1", port=port) as d, ThreadPoolExecutor(8) as pool:
                 outcomes = list(
                     pool.map(
-                        lambda i: _capture(lambda: d.get(f"http://target.example/{i}")),
+                        lambda i: _capture(lambda: d.get(f"http://127.0.0.1/{i}")),
                         range(8),
                     )
                 )
