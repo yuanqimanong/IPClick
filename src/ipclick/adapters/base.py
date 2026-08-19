@@ -1,12 +1,13 @@
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
+import asyncio
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 import functools
 from random import randrange, uniform
 import re
 import threading
 import time
-from typing import Any
+from typing import Any, cast
 
 from ipclick.adapters.settings import DEFAULT_RETRY_STATUS_CODES, AdapterSettings
 from ipclick.dto.response import Response
@@ -370,6 +371,46 @@ class DownloaderAdapter(ABC):
             Response: 统一的响应对象
         """
         raise NotImplementedError
+
+    #: 这个适配器有没有自己的异步实现。
+    #:
+    #: 服务端的异步模式据此决定走哪条路：True 就 await adownload()，
+    #: False 就把同步的 download() 丢进线程池。**默认 False**——这一条是
+    #: 整套异步化能做成"加法"而不是破坏性变更的关键：项目支持注册自定义
+    #: 适配器（见 README），它们只实现了同步 download()，不该因为服务端换了
+    #: 并发模型就集体失效。
+    supports_async: bool = False
+
+    async def adownload(self, url: str, **kwargs: Any) -> Response:
+        """异步执行一次请求。
+
+        默认实现把同步的 :meth:`download` 丢进线程池——**语义完全一致，
+        只是拿不到协程的好处**（那个线程仍然是稀缺资源）。真正想要收益的
+        适配器覆写此方法并把 ``supports_async`` 置 True。
+
+        为什么不把 download 直接改成 async：那会打断每一个第三方适配器，
+        而它们看不到任何提示——基类方法签名变了，子类的同步实现会被当成
+        协程去 await，报出来的错误（"object Response can't be used in
+        'await' expression"）和真正的原因（"你的适配器该改成 async 了"）
+        之间没有任何字面联系。
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, functools.partial(self.download, url, **kwargs))
+
+    async def adownload_stream(self, url: str, **kwargs: Any) -> "AsyncIterator[StreamEvent]":
+        """异步流式。默认把同步迭代器逐个搬到线程池里取。
+
+        逐个搬而不是一次性取完：流式的意义就在于响应体不整个进内存，
+        先 list() 再 yield 等于把这个性质丢掉。
+        """
+        loop = asyncio.get_running_loop()
+        iterator = await loop.run_in_executor(None, functools.partial(self.download_stream, url, **kwargs))
+        sentinel = object()
+        while True:
+            item = await loop.run_in_executor(None, next, iterator, sentinel)
+            if item is sentinel:
+                return
+            yield cast(StreamEvent, item)
 
     def download_stream(
         self,
