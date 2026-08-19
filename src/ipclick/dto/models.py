@@ -11,10 +11,7 @@ from ipclick.utils import json_serializer
 
 
 class IPClickAdapter(Enum):
-    # 定义格式: (Protobuf枚举值, 内部识别名称)
     CURL_CFFI = (task_pb2.CURL_CFFI, "curl_cffi")
-    #: 已移除的适配器。枚举值保留是为了兼容旧客户端——它们发来这个值时
-    #: 服务端会明确报错，而不是静默换成别的适配器。
     HTTPX = (task_pb2.HTTPX, "httpx")
     REQUESTS = (task_pb2.REQUESTS, "requests")
     NIQUESTS = (task_pb2.NIQUESTS, "niquests")
@@ -23,9 +20,6 @@ class IPClickAdapter(Enum):
     PLAYWRIGHT = (task_pb2.PLAYWRIGHT, "playwright")
     CAMOUFOX = (task_pb2.CAMOUFOX, "camoufox")
     PATCHRIGHT = (task_pb2.PATCHRIGHT, "patchright")
-    #: "用浏览器渲染就行，引擎由服务端定"。服务端按 [BROWSER].engine 解析，
-    #: 默认按平台选：Windows -> DrissionPage，Linux/macOS -> Camoufox。
-    #: 客户端不必关心服务端装了哪个内核。
     BROWSER = (task_pb2.BROWSER, "browser")
 
     def __init__(self, pb_value: int, display_name: str):
@@ -70,7 +64,6 @@ class HttpMethod(Enum):
     TRACE = task_pb2.TRACE
 
 
-# 转换HTTP方法枚举（由 HttpMethod 推导，避免与 proto 枚举各写一份而失步）
 METHOD_MAP: dict[int, str] = {member.value: member.name for member in HttpMethod}
 
 
@@ -97,20 +90,13 @@ class ProxyConfig:
         if not self.host and not self.tunnel_server:
             return None
 
-        # 认证信息
         auth = f"{self.auth_key}:{self.auth_password}" if self.auth_key else ""
-        # 自定义通道名
         channel_name = f":C{self.channel_name}" if self.channel_name else ""
-        # 存活时间
         session_ttl = f":T{self.session_ttl}" if self.session_ttl else ""
-        # 国家编码
         country_code = f":A{self.country_code}" if self.country_code else ""
-        # 隧道服务器
         tunnel_server = self.tunnel_server if self.tunnel_server else f"{self.host}:{self.port}"
-        # 分隔符
         delimiter = "@" if any([auth, channel_name, country_code, session_ttl]) else ""
 
-        # curl -x {authkey}:{authpwd}:C{自定义通道名}:T{存活时间}:A{国家编码}@{隧道服务器} {目标url}
         return f"{self.scheme}://{auth}{channel_name}{session_ttl}{country_code}{delimiter}{tunnel_server}"
 
 
@@ -119,10 +105,8 @@ class DownloadTask:
     """下载任务"""
 
     uuid: str = ""
-    # 允许传适配器名字符串（如 "niquests"），to_protobuf() 会解析成枚举成员
     adapter: IPClickAdapter | str = IPClickAdapter.CURL_CFFI
 
-    # 协议
     method: HttpMethod = HttpMethod.GET
     url: str = ""
     headers: dict[str, Any] | None = None
@@ -138,15 +122,13 @@ class DownloadTask:
     allow_redirects: bool = True
     stream: bool = False
 
-    impersonate: str | None = None  # curl_cffi 浏览器指纹伪装
+    impersonate: str | None = None
 
-    # 渲染
     automation_config: str | None = None
     automation_script: str | None = None
 
-    allowed_status_codes: list[int] = field(default_factory=list)  # 允许的状态码
+    allowed_status_codes: list[int] = field(default_factory=list)
 
-    # kwargs
     kwargs: str | None = None
 
     def __post_init__(self):
@@ -156,7 +138,6 @@ class DownloadTask:
         if not self.url.startswith(("http://", "https://")):
             raise ValidationError("URL must start with http:// or https://")
 
-        # 不能同时指定多种请求体
         if self.data is not None and self.json is not None:
             raise ValidationError("Cannot specify both data and json")
 
@@ -165,7 +146,6 @@ class DownloadTask:
         if self.timeout <= 0:
             raise ValidationError("timeout must be > 0")
 
-        # 设置默认的浏览器伪装
         if self.adapter == IPClickAdapter.CURL_CFFI and not self.impersonate:
             self.impersonate = "chrome"
 
@@ -234,7 +214,6 @@ class DownloadTask:
 
             return task_pb2.ReqTask(
                 uuid=str(self.uuid) or str(uuid.uuid7()),
-                # protobuf 生成的 stub 把枚举参数标成 AdapterType，运行时接受 int
                 adapter=adapter_member.pb_value,  # pyright: ignore[reportArgumentType]
                 method=self.method.value,
                 url=self.url,
@@ -244,8 +223,6 @@ class DownloadTask:
                 data=self._encode_body(self.data),
                 json=json.dumps(self.json, default=json_serializer) if self.json is not None else None,
                 proxy=self._proxy_to_str(),
-                # 这些字段在 proto 里是 optional，显式传值即代表"已设置"，
-                # 服务端才能把"未设置"和"显式设为 0/false"区分开。
                 timeout_seconds=self.timeout,
                 max_retries=self.max_retries,
                 retry_backoff_seconds=self.retry_backoff,
@@ -305,8 +282,6 @@ class DownloadResponse:
 
     elapsed_ms: int = 0
     error: str | None = None
-    #: 链路信息。服务端没带时是一个全默认值的 ResponseTrace（而不是 None），
-    #: 这样调用方写 ``resp.trace.node_id`` 永远不会 AttributeError。
     trace: ResponseTrace = field(default_factory=lambda: ResponseTrace())
 
     @staticmethod

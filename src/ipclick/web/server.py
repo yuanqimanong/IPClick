@@ -62,14 +62,10 @@ from ipclick.web.pages import WebPages
 from ipclick.web.templates import dashboard_live, render_dashboard, render_login, set_default_theme
 
 
-#: 会话 cookie 名
 COOKIE_NAME = "ipclick_session"
 
-#: 单次请求体上限。最大的表单是"试一试"页面（可以贴请求体和请求头）与配置页，
-#: 256KB 足够宽松；不设上限的话一个大 POST 就能把内存吃掉。
 MAX_BODY_BYTES = 256 * 1024
 
-#: CSP 头。脚本哈希在进程启动时算一次——脚本是源码里的常量，不会变。
 _CSP = csp()
 
 
@@ -92,13 +88,10 @@ class _QuietThreadingHTTPServer(ThreadingHTTPServer):
         log.exception(f"Web 端处理请求出错（来自 {client_address}）：{error}")
 
 
-#: 主题。刻意只有两个值：0.5 去掉了"跟随系统"，理由见 :mod:`ipclick.web.assets`。
 THEMES: tuple[str, ...] = ("light", "dark")
 
-#: 主题的默认值。
 DEFAULT_THEME = "light"
 
-#: 会被当成"监听所有网卡"的写法。用来判断要不要发明文告警。
 WILDCARD_HOSTS: frozenset[str] = frozenset({"0.0.0.0", "::", "[::]", "*"})
 
 
@@ -123,12 +116,9 @@ class WebConfig:
         data = dict(config or {})
         self.enabled: bool = bool(data.get("enabled", False))
         self.port: int = _as_int(data.get("port"), DEFAULT_WEB_PORT)
-        # 默认只监听本机。管理界面暴露的是运行状态与节点拓扑，
-        # 而且它后面就是一个能代发任意请求的服务——不该默认对外。
         self.host: str = str(data.get("host") or "127.0.0.1").strip() or "127.0.0.1"
         self.username: str = str(data.get("username") or "").strip()
         self.password: str = str(data.get("password") or "")
-        #: 页面的默认主题（light / dark）。浏览器里手动点过的选择优先于它。
         self.theme: str = normalize_theme(data.get("theme"))
 
     def as_credentials_config(self) -> dict[str, Any]:
@@ -166,28 +156,16 @@ class WebServer:
         self._credentials: WebCredentials = credentials
         self._actions: Callable[[str, dict[str, str]], tuple[bool, str]] | None = action_handler
         self.sessions: SessionStore = sessions or SessionStore()
-        #: 请求流 / 试一试 / 配置这几页需要的数据源与写入口。为 None 时那些页面
-        #: 直接返回 404——库模式下起一个只看状态的 Web 端是合法用法。
         self.pages: WebPages | None = pages
-        #: 总览页自动刷新用的轻量数据源。每 5 秒被拉一次，所以不该走完整快照
-        #: （那里面有 TLS 解析、集群拓扑、四个引擎的文件系统探测）。
-        #: 没注入时回落到完整快照——功能一样，只是贵一点。
         self._live: Callable[[], dict[str, Any]] = live_provider or snapshot_provider
-        #: 页面默认主题。只在浏览器**没有**本地选择时生效——用户点过的那一下
-        #: 永远优先，否则"我明明选了亮色"会在每次刷新时被服务端推翻。
         self.theme: str = normalize_theme(theme)
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
-
-    # ------------------------------------------------------------------ #
-    # 生命周期
-    # ------------------------------------------------------------------ #
 
     def start(self, host: str = "127.0.0.1", port: int = DEFAULT_WEB_PORT) -> str | None:
         """启动。返回访问地址；起不来返回 None。"""
         if self._httpd is not None:
             return f"http://{host}:{port}/"
-        # 主题是进程级的渲染默认值，在起服务之前定一次。见 templates.set_default_theme。
         set_default_theme(self.theme)
         try:
             self._httpd = _QuietThreadingHTTPServer((host, port), self._make_handler())
@@ -218,10 +196,6 @@ class WebServer:
             self._httpd = None
         self._thread = None
 
-    # ------------------------------------------------------------------ #
-    # 请求处理
-    # ------------------------------------------------------------------ #
-
     def _make_handler(self) -> type[BaseHTTPRequestHandler]:
         server = self
 
@@ -231,8 +205,6 @@ class WebServer:
             @override
             def log_message(self, format: str, *args: Any) -> None:
                 """默认实现直接打到 stderr，会绕过本项目的日志配置。"""
-
-            # -------------------- 基础工具 -------------------- #
 
             @property
             def source(self) -> str:
@@ -261,13 +233,9 @@ class WebServer:
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
-                # 管理界面不该被嵌进别人的页面里（点击劫持）
                 self.send_header("X-Frame-Options", "DENY")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
-                # 页面里没有任何外部资源，把 CSP 收到最紧。
-                # script-src 用的是两段内联脚本的 sha256，不是 'unsafe-inline'——
-                # 万一某处转义漏了、注入进一行 <script>，它也执行不了。
                 self.send_header("Content-Security-Policy", _CSP)
                 for key, value in extra_headers or []:
                     self.send_header(key, value)
@@ -291,8 +259,6 @@ class WebServer:
                     return {}
                 raw = self.rfile.read(length).decode("utf-8", errors="replace")
                 return {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True).items()}
-
-            # -------------------- 路由 -------------------- #
 
             def _query(self) -> dict[str, str]:
                 _, _, raw = self.path.partition("?")
@@ -320,8 +286,6 @@ class WebServer:
                     return self._send(HTTPStatus.OK, payload.encode(), "application/json; charset=utf-8")
 
                 if path == "/fragment/dashboard":
-                    # 总览页里自己刷新的那一块。和整页走同一个渲染函数，
-                    # 所以不存在"局部刷出来的和整页渲染的不一样"。
                     return self._send(HTTPStatus.OK, dashboard_live(server._safe_live()).encode())
 
                 pages = server.pages
@@ -340,13 +304,11 @@ class WebServer:
                     return self._send(HTTPStatus.OK, payload.encode(), "application/json; charset=utf-8")
 
                 if path == "/test":
-                    # 带 r= 的是 POST 之后重定向回来的，把那次结果取出来渲染
                     form, result = pages.take_test_result(self._query().get("r", ""))
                     body = pages.test_page(form, result, session.username, session.csrf_token)
                     return self._send(HTTPStatus.OK, body.encode())
 
                 if path == "/components":
-                    # ?node=<id> 时看的是那台子节点的组件，不是本机的
                     body = pages.components_page(
                         session.username, session.csrf_token, node_id=self._query().get("node", "")
                     )
@@ -357,8 +319,6 @@ class WebServer:
 
                 if path == "/config":
                     query = self._query()
-                    # 带 g= 的是刚生成完机密重定向回来的。取完即弃——
-                    # "只显示一次"就是靠这个保证的。
                     body = pages.config_page(
                         session.username,
                         session.csrf_token,
@@ -368,8 +328,6 @@ class WebServer:
                     return self._send(HTTPStatus.OK, body.encode())
 
                 if path == "/nodes":
-                    # 0.5 把节点管理并进了配置页的「集群设置」——它本来就是集群
-                    # 配置的一部分。老地址仍然可用，直接送过去。
                     return self._redirect("/config?tab=cluster")
 
                 if path == "/deploy":
@@ -388,9 +346,6 @@ class WebServer:
                     return self._send(HTTPStatus.OK, body.encode())
 
                 if path == "/skill.md":
-                    # 原文下载。放在登录后面和其余页面一致——这份文档本身不含机密，
-                    # 但"这台机器上跑着 IPClick、版本是多少"就是信息，没理由白送。
-                    # 离线拿同一份：`ipclick skill show`。
                     return self._send(
                         HTTPStatus.OK,
                         pages.skill_markdown().encode(),
@@ -429,7 +384,6 @@ class WebServer:
                 if path == "/login":
                     return self._handle_login()
 
-                # 其余 POST 一律要求已登录 + CSRF
                 session_id = self._session_id()
                 session = server.sessions.get(session_id)
                 if session is None:
@@ -455,8 +409,6 @@ class WebServer:
 
                 if path == "/test":
                     if form.get("action") == "import_curl":
-                        # 解析出来的表单直接渲染回去，不发请求——导入和发送是
-                        # 两步，中间要让人有机会看一眼、改一改。
                         imported, notes, error = pages.import_curl(form)
                         body = pages.test_page(
                             imported,
@@ -467,16 +419,12 @@ class WebServer:
                             curl_error=error,
                         )
                         return self._send(HTTPStatus.OK, body.encode())
-                    # Post/Redirect/Get：结果存起来再 303 回去。直接渲染的话用户按
-                    # F5 会把整次请求重新提交一遍——而这一页的一次提交可能是几十秒
-                    # 的真实浏览器渲染，用户还以为自己"只是刷新了一下"。
                     result = pages.run_test(form)
                     return self._redirect(f"/test?r={pages.stash_test_result(form, result)}")
 
                 if path == "/components":
                     node_id = form.get("node", "")
                     if node_id:
-                        # 远程那边没有本地探测缓存要清，重新拉一次列表即可
                         return self._redirect(f"/components?node={quote(node_id)}")
                     ok, message = pages.refresh_components()
                     log.info(f"Web 端刷新组件状态：{message}")
@@ -495,8 +443,6 @@ class WebServer:
 
                 if path == "/config":
                     if form.get("action") == "generate_secret":
-                        # Post/Redirect/Get + 一次性 token：值只在那一次 GET 里出现，
-                        # 服务端不留副本，刷新就没了。
                         token = pages.generate_secret(form.get("secret", ""))
                         return self._redirect(f"/config?g={token}" if token else "/config")
                     if form.get("action") == "add_node":
@@ -521,13 +467,11 @@ class WebServer:
                 password = form.get("password", "")
                 if not server._credentials.verify(username, password):
                     server.sessions.record_failure(self.source)
-                    # 不区分"用户名不存在"和"密码错误"——那等于给撞库确认用户名
                     return self._send(HTTPStatus.UNAUTHORIZED, render_login(error="用户名或密码错误").encode())
 
                 server.sessions.record_success(self.source)
                 session_id, _ = server.sessions.create(username)
                 log.info(f"Web 端登录成功：{username}（来自 {self.source}）")
-                # HttpOnly 挡 XSS 偷 cookie；SameSite=Strict 挡跨站发起的请求
                 cookie = f"{COOKIE_NAME}={session_id}; Path=/; HttpOnly; SameSite=Strict"
                 return self._redirect("/", [("Set-Cookie", cookie)])
 
@@ -558,7 +502,6 @@ class WebServer:
         try:
             return self._live()
         except Exception as e:
-            # 自动刷新失败不该刷屏：它每 5 秒来一次，出问题就是每 5 秒一条堆栈
             log.warning(f"取总览实时数据失败：{e}")
             return {}
 

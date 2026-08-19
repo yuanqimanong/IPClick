@@ -37,14 +37,10 @@ from ipclick.utils.log_util import log
 from ipclick.utils.url_util import merge_query_params
 
 
-# 可选依赖：**懒加载**。模块级 import 会把"装没装"的结论固化在进程启动那一刻，
-# 运行时装完不重启就永远看不到（详见 :mod:`ipclick.utils.module_probe`）。
 _UNPROBED: Any = object()
 _Chromium: Any = _UNPROBED
 _ChromiumOptions: Any = _UNPROBED
 
-#: 探测用的顶层模块名。注意发行版名是小写的 drissionpage，模块名是驼峰的
-#: DrissionPage —— 两者不一样，探测必须用后者。
 DRISSIONPAGE_MODULE = "DrissionPage"
 
 
@@ -63,7 +59,6 @@ def _load_drission() -> tuple[Any, Any]:
 
 _SUPPORTED_METHODS = frozenset({"GET"})
 
-#: 等待浏览器关闭的上限（秒）
 _SHUTDOWN_TIMEOUT = 30.0
 
 
@@ -81,8 +76,6 @@ class DrissionPageAdapter(DownloaderAdapter):
         settings: AdapterSettings | None = None,
         browser_settings: BrowserSettings | None = None,
     ):
-        # 真正的 import 就发生在这里——"能不能用"的展示层走 find_spec，
-        # 执行路径仍然老老实实 import 一次。
         if _load_drission()[0] is None:
             raise AdapterError('DrissionPage is not installed. Install it with: pip install "ipclick[drissionpage]"')
 
@@ -96,15 +89,8 @@ class DrissionPageAdapter(DownloaderAdapter):
 
         self._browser: Any = None
         self._browser_lock: threading.Lock = threading.Lock()
-        # DrissionPage 不是线程安全的，所有浏览器操作都串到这一个线程上。
-        # max_pages 由信号量控制并发页数，但真正的操作仍然是串行的——
-        # 这比 Playwright 那套弱，是 CDP 同步 API 的固有限制。
         self._pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ipclick-drissionpage")
         self._closed: bool = False
-
-    # ------------------------------------------------------------------ #
-    # 浏览器
-    # ------------------------------------------------------------------ #
 
     def _options(self) -> Any:
         s = self.browser_settings
@@ -112,8 +98,6 @@ class DrissionPageAdapter(DownloaderAdapter):
         if s.executable_path:
             options.set_browser_path(s.executable_path)
         options.headless(s.headless)
-        # 无痕：DrissionPage 没有 BrowserContext，只能靠这个把 profile 隔离开，
-        # 至少保证服务重启之间、以及与用户日常浏览器之间不共享数据。
         options.incognito(True)
         if s.no_sandbox:
             options.set_argument("--no-sandbox")
@@ -125,8 +109,6 @@ class DrissionPageAdapter(DownloaderAdapter):
         if s.proxy_gateway:
             options.set_proxy(s.proxy_gateway)
         options.set_timeouts(base=s.page_load_timeout, page_load=s.page_load_timeout, script=s.script_timeout)
-        # 随机端口：固定端口会和用户已经开着的浏览器抢，也会让两个 IPClick
-        # 实例互相接管对方的浏览器。
         options.auto_port()
         return options
 
@@ -144,10 +126,6 @@ class DrissionPageAdapter(DownloaderAdapter):
                 log.info(f"DrissionPage 浏览器已启动：headless={self.browser_settings.headless}")
             return self._browser
 
-    # ------------------------------------------------------------------ #
-    # 参数
-    # ------------------------------------------------------------------ #
-
     def _parse_automation_config(self, automation_config: str | None) -> dict[str, Any]:
         if not automation_config:
             return {}
@@ -158,10 +136,6 @@ class DrissionPageAdapter(DownloaderAdapter):
         if not isinstance(parsed, dict):
             raise ValidationError(f"automation_config 必须是 JSON 对象，收到 {type(parsed).__name__}")
         return parsed
-
-    # ------------------------------------------------------------------ #
-    # 下载
-    # ------------------------------------------------------------------ #
 
     @override
     @retry()
@@ -190,8 +164,6 @@ class DrissionPageAdapter(DownloaderAdapter):
         kwargs: str | None = None,
     ) -> Response:
         """用真实浏览器打开页面，返回渲染后的 DOM。"""
-        # 浏览器引擎自带的反检测处理不是 curl_cffi 那种 TLS/HTTP2 指纹伪装，
-        # impersonate 在这里无从生效，所以明确报错。
         self.reject_impersonate(impersonate)
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
@@ -211,8 +183,6 @@ class DrissionPageAdapter(DownloaderAdapter):
                 "页面内 JS 可绕过 URL 安全策略访问内网，请确认调用方可信后再开启。"
             )
         if proxy and proxy != self.browser_settings.proxy_gateway:
-            # DrissionPage 的代理是浏览器进程级的，启动后改不了。默默忽略等于
-            # 让请求从错误的出口 IP 发出去——对一个代理服务来说是严重的静默错误。
             raise ValidationError(
                 "DrissionPage 的代理是浏览器进程级的，不支持按请求指定。"
                 "请改用 [BROWSER.proxy].gateway 全局配置，或换用 camoufox / patchright / playwright 引擎。"
@@ -224,7 +194,6 @@ class DrissionPageAdapter(DownloaderAdapter):
         future: Future[Response] = self._pool.submit(
             self._render, target, headers, cookies, config, automation_script, page_timeout
         )
-        # 线程池是单线程的，排队时间要算进去，否则并发请求会误判超时
         budget = page_timeout + self.browser_settings.script_timeout + 60
         try:
             return future.result(timeout=budget)
@@ -251,11 +220,8 @@ class DrissionPageAdapter(DownloaderAdapter):
                 tab.set.cookies(cookies)
             blocked = config.get("block_resources", self.browser_settings.block_resources)
             if blocked:
-                # DrissionPage 只能按 URL 模式拦，没有 Playwright 那种 resource_type。
-                # 用后缀近似——拦不全，但图片/字体这类大头能挡住。
                 tab.set.blocked_urls(_blocked_patterns(blocked))
 
-            # 主文档那一条请求，用来取状态码与响应头
             tab.listen.start(targets=url, method="GET")
             ok = tab.get(url, timeout=page_timeout, retry=0)
             packet = tab.listen.wait(timeout=max(1.0, page_timeout), raise_err=False)
@@ -302,8 +268,6 @@ class DrissionPageAdapter(DownloaderAdapter):
                 raw_response=None,
             )
         finally:
-            # tab 之间共享 profile，用完清掉再关，免得下一个调用方捡到上一个的
-            # 登录态。这不如 Playwright 的 context 隔离干净，但比什么都不做好。
             try:
                 tab.set.cookies.clear()
             except Exception as e:
@@ -327,8 +291,6 @@ class DrissionPageAdapter(DownloaderAdapter):
         self._pool.shutdown(wait=False)
 
 
-#: 资源类型 -> 用来拦截的 URL 后缀。DrissionPage 没有 resource_type 概念，
-#: 只能按 URL 近似匹配，因此拦不全（比如没有扩展名的图片接口）。
 _RESOURCE_PATTERNS: dict[str, tuple[str, ...]] = {
     "image": ("*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.svg", "*.ico", "*.bmp"),
     "media": ("*.mp4", "*.webm", "*.ogg", "*.mp3", "*.wav", "*.m4a", "*.avi", "*.mov"),

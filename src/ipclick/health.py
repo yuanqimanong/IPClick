@@ -25,11 +25,8 @@ from ipclick.tls import TLSSettings, channel_credentials, channel_options
 from ipclick.utils.log_util import log
 
 
-#: gRPC 约定：空字符串代表"整个服务器"的总体健康状态。
-#: kubelet 的 gRPC 探针默认查的就是它。
 OVERALL_SERVICE = ""
 
-#: 本项目具体服务的全限定名，与 task.proto 中的 package + service 一致。
 TASK_SERVICE_NAME = "task.TaskService"
 
 SERVING = health_pb2.HealthCheckResponse.SERVING
@@ -41,8 +38,6 @@ class HealthReporter:
 
     def __init__(self, enabled: bool = True, max_workers: int = 2):
         self.enabled: bool = enabled
-        # HealthServicer 的 Watch 是流式的，需要自己的线程池，不能占用
-        # 业务请求的 worker——否则一堆 watcher 就能把业务线程池占满。
         self._servicer: health.HealthServicer | None = (
             health.HealthServicer(experimental_thread_pool=futures.ThreadPoolExecutor(max_workers=max_workers))
             if enabled
@@ -112,8 +107,6 @@ def check_health(
         ``(是否健康, 状态描述)``
     """
     try:
-        # enable_http_proxy=0：gRPC 也会读环境里的 http_proxy，不关掉的话
-        # 探本机节点会被路由到环境代理去。
         settings = tls or TLSSettings()
         options: list[tuple[str, Any]] = [("grpc.enable_http_proxy", 0), *channel_options(settings)]
         channel_ctx = (
@@ -123,8 +116,6 @@ def check_health(
         )
         with channel_ctx as channel:
             stub = health_pb2_grpc.HealthStub(channel)
-            # grpc_health 没有随包发 health_pb2_grpc.pyi，且 Check 是在 __init__ 里
-            # 动态赋值的，类型检查器看不到——运行时是存在的。
             response = stub.Check(  # pyright: ignore[reportAttributeAccessIssue]
                 health_pb2.HealthCheckRequest(service=service), timeout=timeout
             )

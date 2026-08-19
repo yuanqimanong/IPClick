@@ -27,11 +27,8 @@ from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
 
 
-# 单条消息上限（收发一致）
 _MAX_MESSAGE_LENGTH = 500 * 1024 * 1024
 
-# RPC 超时在任务超时之上留的余量（秒）：服务端还要做重试、解析和序列化，
-# 如果 deadline 正好等于任务超时，客户端会先于服务端超时，拿不到错误详情。
 _RPC_TIMEOUT_MARGIN = 30.0
 
 
@@ -51,9 +48,6 @@ def _as_float(value: Any, default: float) -> float:
     return result if result >= 0 else default
 
 
-#: 服务端并发已满时，gRPC 在客户端侧报出来的两种说法。
-#: 服务端 maximum_concurrent_rpcs 打满时会拒流（HTTP/2 RST_STREAM，错误码 7
-#: REFUSED_STREAM），gRPC 把它归到 UNAVAILABLE——和"连不上"用了同一个状态码。
 _REFUSED_MARKERS = ("refused_stream", "concurrent rpc limit", "too_many_pings")
 
 
@@ -81,18 +75,15 @@ def unavailable_hint(details: str | None, port: int) -> str:
     return port_hint(port)
 
 
-#: gRPC channel 选项，同步与异步客户端共用
 CHANNEL_OPTIONS: list[tuple[str, Any]] = [
     ("grpc.max_send_message_length", _MAX_MESSAGE_LENGTH),
     ("grpc.max_receive_message_length", _MAX_MESSAGE_LENGTH),
-    # 不读环境里的 http_proxy：目标是本项目自己的服务端，不该被环境代理劫走
     ("grpc.enable_http_proxy", 0),
     ("grpc.keepalive_time_ms", 60000),
     ("grpc.keepalive_timeout_ms", 30000),
     ("grpc.keepalive_permit_without_calls", True),
 ]
 
-#: DownloadTask 直接认识的字段；其余关键字参数作为 kwargs 透传给底层 HTTP 客户端
 _TASK_FIELDS = frozenset(
     {
         "headers",
@@ -130,7 +121,6 @@ class StreamedResponse:
         self._closed: bool = False
         self._exhausted: bool = False
 
-        #: 以下三项要等 trailer 到达（即 body 读完）之后才有值
         self.elapsed_ms: int = 0
         self.total_bytes: int = 0
         self.trailer_error: str | None = None
@@ -222,37 +212,27 @@ class ClientBase:
         self.config_path: str | None = config_path
         self.config: Settings = load_config(self.config_path)
 
-        # 优先级：函数参数 > 配置文件 > 内置默认值
         server_config: dict[str, Any] = dict(self.config.get("SERVER", {}))
         self.host: str = host or server_config.get("host") or "127.0.0.1"
         self.port: int = int(port or server_config.get("port") or DEFAULT_GRPC_PORT)
 
-        # 服务端可能监听 "[::]"/"0.0.0.0"（所有网卡），但客户端不能拿它当目标地址
         if self.host in ("[::]", "::", "0.0.0.0", ""):
             self.host = "127.0.0.1"
 
-        # 鉴权令牌：参数 > 环境变量 IPCLICK_AUTH_TOKEN > [SECURITY].auth_token
         security_config = dict(self.config.get("SECURITY", {}))
         resolved_token = token or (load_tokens(security_config) or (None,))[0]
         self._metadata: tuple[tuple[str, str], ...] = build_client_metadata(resolved_token)
 
-        # 传输层加密。凭据在这里就构造出来——证书路径写错要在建连之前失败，
-        # 而不是等到第一个请求发出去才报一个含糊的连接错误。
         self.tls: TLSSettings = tls or TLSSettings.from_config(security_config)
         self._credentials: grpc.ChannelCredentials | None = channel_credentials(self.tls) if self.tls.enabled else None
         self._channel_options: list[tuple[str, Any]] = CHANNEL_OPTIONS + channel_options(self.tls)
 
-        # 客户端到服务端这一跳的重试。适配器内部的重试解决的是"目标站点抖了"，
-        # 这里解决的是"我们自己的服务端抖了"，两者互不覆盖。
         client_config = dict(self.config.get("CLIENT", {}))
         self.rpc_max_retries: int = _as_int(client_config.get("rpc_max_retries"), 2)
         self.rpc_retry_backoff: float = _as_float(client_config.get("rpc_retry_backoff"), 0.5)
-        # 请求压缩。自动化脚本是主要动机：整个脚本文件走线，压完通常只剩几十分之一。
         self.compression: CompressionPolicy = CompressionPolicy(client_config)
-        # 子类的 close() 会改写它，声明在这里以便类型检查器识别
         self._closed: bool = False
 
-        # 配置里含代理密码、鉴权令牌等机密，只打印结构不打印内容
         log.debug(
             f"{type(self).__name__} 已加载配置，目标服务端 {self.host}:{self.port}，"
             f"配置节: {sorted(self.config.keys())}，"
@@ -269,8 +249,6 @@ class ClientBase:
         """把 gRPC 错误翻译成本项目的异常类型。"""
         code = e.code() if hasattr(e, "code") else None
         details = e.details() if hasattr(e, "details") else str(e)
-        # 鉴权失败重试多少次都没用，单独抛出让调用方去改令牌，
-        # 而不是被 request() 当成网络失败吞成 status_code == -1 的响应。
         if code is grpc.StatusCode.UNAUTHENTICATED:
             hint = "未配置令牌" if not self._metadata else "令牌不被服务端接受"
             return AuthenticationError(
@@ -278,21 +256,12 @@ class ClientBase:
                 f"请通过环境变量 {AUTH_TOKEN_ENV}、配置 [SECURITY].auth_token "
                 f"或 token=... 提供正确的令牌"
             )
-        # 参数错误同理：换成 -1 响应会让调用方去查网络，而真正要改的是自己的
-        # 调用参数。客户端本地发现的参数错误早就是抛出的，服务端发现的没理由不一致。
         if code is grpc.StatusCode.INVALID_ARGUMENT:
             return ValidationError(f"请求参数不被服务端接受：{details}")
-        # "这个服务端做不到"——适配器没实现、可选依赖没装、浏览器渲染被关掉。
-        # 改参数没用，得改服务端部署，所以也不该伪装成一次网络抖动。
         if code is grpc.StatusCode.FAILED_PRECONDITION:
             return AdapterError(f"服务端无法处理该请求：{details}")
-        # 服务端的按 host 限流生效了。同样不是网络问题——要么降低发送速率，
-        # 要么调大 [DOWNLOADER] 里的 per_host 限额。
         if code is grpc.StatusCode.RESOURCE_EXHAUSTED:
             return HostLimitTimeout(f"服务端限流：{details}")
-        # 连不上时附一句端口提示。0.5.0 把 9527 让给了 Web 管理端，从 0.4 升上来
-        # 的调用方仍然连 9527 就会握到一个 HTTP 服务上——gRPC 报出来的错误
-        # （UNAVAILABLE / 握手失败）和"端口变了"这件事看不出任何关系。
         if code is grpc.StatusCode.UNAVAILABLE:
             return TransportError(f"gRPC 调用失败 [{code}]: {details}{unavailable_hint(details, self.port)}")
         return TransportError(f"gRPC 调用失败 [{code}]: {details}")
@@ -332,7 +301,6 @@ class ClientBase:
         **kwargs: Any,
     ) -> DownloadTask:
         """把调用方参数组装成 DownloadTask。"""
-        # 代理：True 表示"用配置文件里的 [PROXY]"
         resolved_proxy: str | None
         if not proxy:
             resolved_proxy = None
@@ -403,10 +371,6 @@ class Downloader(ClientBase):
         self._stub: task_pb2_grpc.TaskServiceStub | None = None
         self._lock: threading.Lock = threading.Lock()
 
-    # ------------------------------------------------------------------ #
-    # 连接管理
-    # ------------------------------------------------------------------ #
-
     def _get_stub(self) -> task_pb2_grpc.TaskServiceStub:
         """惰性创建并复用 channel。
 
@@ -452,10 +416,6 @@ class Downloader(ClientBase):
 
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         self.close()
-
-    # ------------------------------------------------------------------ #
-    # 请求
-    # ------------------------------------------------------------------ #
 
     def request(
         self,
@@ -525,12 +485,6 @@ class Downloader(ClientBase):
         try:
             return self.download(task)
         except TransportError as e:
-            # 只吞传输层失败：调用方拿到的东西必须始终满足 -> DownloadResponse
-            # 的签名（Wiki 的「SDK 用法」也是这么用的）。
-            #
-            # 注意这里不能写 `except IPClickError`——ValidationError 也是它的子类，
-            # 于是「适配器名拼错」这类参数错误会被伪装成 status_code == -1 的
-            # 网络失败，调用方对着网络排查半天也找不到原因。参数错误必须抛出。
             log.error(f"请求 {url} 失败：{e}")
             return DownloadResponse.from_error(str(e), url=url)
 
@@ -557,8 +511,6 @@ class Downloader(ClientBase):
                     pb_request,
                     timeout=self._deadline(task),
                     metadata=self._metadata or None,
-                    # 带自动化脚本的请求压完通常只剩几十分之一；小请求会被
-                    # 策略跳过，不白费 CPU。见 ipclick.compression。
                     compression=self.compression.for_request(pb_request),
                 )
                 return DownloadResponse.from_protobuf(pb_response)
@@ -569,13 +521,7 @@ class Downloader(ClientBase):
             except Exception as e:
                 raise TransportError(f"连接 {self.target} 失败: {e}") from e
 
-        # for 正常走完只可能是最后一次也重试失败了，而那一次 _should_retry_rpc
-        # 会返回 False 并抛出——所以这里理论上不可达，留个明确的错误兜底。
         raise TransportError(f"连接 {self.target} 失败：重试 {self.rpc_max_retries} 次后仍不可用")
-
-    # ------------------------------------------------------------------ #
-    # 流式下载
-    # ------------------------------------------------------------------ #
 
     def stream(self, url: str, **kwargs: Any) -> StreamedResponse:
         """流式下载：响应体分片返回，全程不把整个 body 放进内存。
@@ -608,10 +554,6 @@ class Downloader(ClientBase):
         except grpc.RpcError as e:
             raise self._rpc_error(e) from e
 
-    # ------------------------------------------------------------------ #
-    # 批量
-    # ------------------------------------------------------------------ #
-
     def batch(self, tasks: Iterable[DownloadTask], timeout: float | None = None) -> Iterator[DownloadResponse]:
         """批量下载：一次 RPC 处理多个任务。
 
@@ -632,8 +574,6 @@ class Downloader(ClientBase):
                 yield task.to_protobuf()
 
         try:
-            # 批量走流式，压缩只能在整条流上设一次（不能逐条判定），
-            # 所以这里按模式来：auto 也压——批量本来就是"量大"的场景。
             for pb_response in stub.SendBatch(
                 _requests(),
                 timeout=timeout,
@@ -643,10 +583,6 @@ class Downloader(ClientBase):
                 yield DownloadResponse.from_protobuf(pb_response)
         except grpc.RpcError as e:
             raise self._rpc_error(e) from e
-
-    # ------------------------------------------------------------------ #
-    # 便捷方法
-    # ------------------------------------------------------------------ #
 
     def get(self, url: str, params: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
         """发送GET请求"""
@@ -675,6 +611,3 @@ class Downloader(ClientBase):
     def options(self, url: str, **kwargs: Any) -> DownloadResponse:
         """发送OPTIONS请求"""
         return self.request(method=HttpMethod.OPTIONS, url=url, **kwargs)
-
-
-# 按 (config_path, host, port) 缓存的下载器实例。

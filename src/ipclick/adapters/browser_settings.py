@@ -13,13 +13,10 @@ import os
 from typing import Any
 
 
-#: 可选的浏览器内核
 BROWSER_KINDS: frozenset[str] = frozenset({"chromium", "firefox", "webkit"})
 
-#: page.goto 的等待时机，取值来自 playwright
 WAIT_UNTIL_CHOICES: frozenset[str] = frozenset({"load", "domcontentloaded", "networkidle", "commit"})
 
-#: 可被拦截的资源类型（playwright 的 request.resource_type 取值）
 BLOCKABLE_RESOURCES: frozenset[str] = frozenset(
     {"image", "media", "font", "stylesheet", "script", "xhr", "fetch", "websocket", "other"}
 )
@@ -54,62 +51,34 @@ class BrowserSettings:
 
     enabled: bool = True
 
-    #: 渲染引擎：auto / camoufox / patchright / playwright / drissionpage。
-    #: auto 按平台选（Windows -> drissionpage，Linux/macOS -> camoufox），
-    #: 解析逻辑在 browser_engines.resolve_engine（放在那边是为了避免循环导入）。
     engine: str = "auto"
 
-    # 内核与启动
     kind: str = "chromium"
     headless: bool = True
-    #: 系统浏览器路径。留空则用 playwright 自己下载的那份
-    #: （``playwright install chromium``，约 150MB）。容器里通常指向系统 chromium。
     executable_path: str | None = None
-    #: 传给浏览器进程的额外命令行参数
     args: tuple[str, ...] = ()
-    #: 容器里没有 user namespace 时 chromium 起不来，需要 --no-sandbox。
-    #: 默认 False——关沙箱会让页面里的代码更容易逃逸到宿主进程，得由部署方明确选择。
     no_sandbox: bool = False
 
-    # 页面
     user_agent: str | None = None
     viewport_width: int = 1920
     viewport_height: int = 1080
 
-    # 超时（秒）
     page_load_timeout: float = 30.0
     script_timeout: float = 60.0
 
-    #: 默认的 page.goto 等待时机
     wait_until: str = "load"
 
-    #: 默认拦截的资源类型。图片 / 字体 / 视频对取 HTML 没用，拦掉能省大量时间和带宽。
     block_resources: tuple[str, ...] = ("image", "media", "font")
 
-    #: 同时打开的页面上限。``0`` = 按本机内存自动推导（见 :func:`resolve_max_pages`）。
-    #:
-    #: 默认仍是 4 而不是 0——自动推导会因机器而异，静默改变既有部署的行为不合适。
-    #: 想让它跟着机器走就显式写 0。
     max_pages: int = 4
 
-    #: 是否允许请求携带 automation_script（在页面里执行任意 JS）。
-    #: 默认关闭：页面 JS 能绕过服务端的 URL 策略去访问内网，等于把 SSRF 防线
-    #: 整个让开。需要时由部署方显式打开，并自行确保只有可信调用方能访问。
     allow_scripts: bool = False
 
-    # 代理
     proxy_gateway: str | None = None
     proxy_bypass: tuple[str, ...] = field(default_factory=tuple)
 
-    # ---- 仅 camoufox ----
-    #: 伪装的语言环境，如 "zh-CN"。留空则由 camoufox 自行生成。
     locale: str | None = None
-    #: 模拟人类的鼠标移动。True 用默认时长，也可以给一个秒数上限。
-    #: 会显著拖慢每次请求，默认关闭。
     humanize: bool | float = False
-    #: 让时区 / 语言 / 经纬度与代理出口 IP 对上。
-    #: 只有配置级代理（proxy_gateway）能生效——请求级代理是在 context 上设的，
-    #: 那时指纹早就生成完了。
     geoip: bool = False
 
     @property
@@ -165,10 +134,6 @@ class BrowserSettings:
             script_timeout=_as_float(timeout.get("script_exec"), defaults.script_timeout),
             wait_until=wait_until,
             block_resources=block_resources,
-            # minimum=0 是关键：0 不是"非法的小值"，而是"按可用内存自动推导"这个
-            # 特性的开关（见 resolve_max_pages）。用默认的 minimum=1 会把它判成
-            # 低于下限、静默回落到静态默认值 4 —— 于是 max_pages = 0 和不写这一行
-            # 完全等价，整个自动推导从配置文件根本走不到。
             max_pages=_as_int(config.get("max_pages"), defaults.max_pages, minimum=0),
             allow_scripts=bool(config.get("allow_scripts", defaults.allow_scripts)),
             proxy_gateway=gateway,
@@ -189,16 +154,6 @@ __all__ = [
 ]
 
 
-#: 每个并发页面的内存预算（MB），按引擎区分。
-#:
-#: 这些不是精确值，是**保守的量级**：真实占用随页面复杂度浮动很大（一个静态
-#: 页几十 MB，一个重 JS 的应用能到几百）。取保守值的理由是失败代价不对称——
-#: 少开一个页面只是慢一点，多开一个把机器推进 swap 就是请求从几秒变几分钟、
-#: 看起来像卡死，而且很难从现象联想到是并发开太大。
-#:
-#: camoufox 明显更贵：它是 Firefox 加一整套反检测扩展，单个 context 的开销
-#: 高于 Chromium 系。配置注释里"内存紧张的机器（≤4GB）建议设成 1~2"说的
-#: 就是它。
 ENGINE_PAGE_BUDGET_MB: dict[str, int] = {
     "camoufox": 400,
     "playwright": 250,
@@ -207,11 +162,8 @@ ENGINE_PAGE_BUDGET_MB: dict[str, int] = {
 }
 DEFAULT_PAGE_BUDGET_MB = 300
 
-#: 自动推导时给系统留的余量（MB）。把内存吃到一滴不剩比少开几个页面糟得多。
 MEMORY_HEADROOM_MB = 1024
 
-#: 自动推导的硬上限。再多的页面收益也会被目标站点和网络吃掉，
-#: 而每个页面都是一份实打实的内存。
 MAX_AUTO_PAGES = 16
 
 
@@ -227,7 +179,6 @@ def available_memory_mb() -> int | None:
 
     limits: list[int] = []
 
-    # cgroup v2 → v1，取能读到的那个
     for path, current in (
         ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
         ("/sys/fs/cgroup/memory/memory.limit_in_bytes", "/sys/fs/cgroup/memory/memory.usage_in_bytes"),
@@ -237,7 +188,6 @@ def available_memory_mb() -> int | None:
             if raw in ("max", ""):
                 continue
             total = int(raw)
-            # 没设限时内核会报一个天文数字，那等于"不受限"
             if total <= 0 or total > (1 << 50):
                 continue
             used = int(_Path(current).read_text(encoding="utf-8").strip() or 0)
@@ -281,7 +231,6 @@ def resolve_max_pages(configured: int, engine: str) -> int:
     budget = ENGINE_PAGE_BUDGET_MB.get(engine.lower(), DEFAULT_PAGE_BUDGET_MB)
     available = available_memory_mb()
     if available is None:
-        # 读不出内存就退回静态默认值，别自作聪明
         return BrowserSettings.max_pages
 
     usable = max(0, available - MEMORY_HEADROOM_MB)

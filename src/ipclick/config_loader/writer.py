@@ -25,24 +25,19 @@ from ipclick.exceptions import ConfigError
 from ipclick.utils.log_util import log
 
 
-#: 允许的标量类型。别的类型（dict、嵌套 list）不走这条路——
-#: 节点列表那种结构由 :func:`write_nodes` 专门处理。
 Scalar = str | int | float | bool
 
 
 def format_value(value: Any) -> str:
     """把 Python 值格式化成 TOML 字面量。"""
     if isinstance(value, bool):
-        # 必须在 int 之前判断：Python 里 bool 是 int 的子类
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return repr(value)
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(format_value(v) for v in value) + "]"
     text = str(value)
-    # 双引号字符串：只需要转义反斜杠与双引号（TOML 基本字符串规则）
     escaped = text.replace("\\", "\\\\").replace('"', '\\"')
-    # 控制字符在 TOML 基本字符串里非法，用转义序列表示
     escaped = escaped.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
     return f'"{escaped}"'
 
@@ -67,8 +62,6 @@ def _section_bounds(lines: list[str], section: str) -> tuple[int, int] | None:
     return start, len(lines)
 
 
-#: ``key = { a = 1, b = 2 }  # 注释`` 拆成「头部」「花括号里的内容」「尾部」。
-#: TOML 1.0 的内联表必须写在一行里，所以单行正则是够的。
 _INLINE_TABLE_RE = re.compile(r"^(\s*[^=\s]+\s*=\s*)\{(.*)\}(\s*(?:#.*)?)$")
 
 
@@ -148,8 +141,6 @@ def _set_in_inline_table(lines: list[str], parent: str, table: str, key: str, li
     else:
         pairs.append(f" {key} = {literal}")
 
-    # 每项统一成 " k = v"，再用逗号连起来——原样保留各项前后的空格会让
-    # "改过的那一项"和"没改的"排版不一致，看起来像文件被弄乱了。
     body_out = ",".join(f" {pair.strip()}" for pair in pairs)
     lines[index] = f"{head}{{{body_out} }}{tail}{newline}"
     return True
@@ -215,23 +206,15 @@ def set_values(text: str, updates: dict[str, dict[str, Any]]) -> tuple[str, list
             bounds = _section_bounds(lines, section)
 
             if bounds is None:
-                # 没有 [section] 这个节头。先看看它是不是父节里的一个**内联表**
-                # （``viewport = { width = 1920, height = 1080 }``）——那种情况下
-                # 直接追加一个 [section] 节头会让同一个键被声明两次，产出的文件
-                # 下次启动解析不了（save() 现在会拦住，但那时保存已经失败了）。
                 parent, _, table = section.rpartition(".")
                 if parent and _set_in_inline_table(lines, parent, table, key, literal):
                     changes.append(f"[{parent}].{table}.{key} = {literal}")
                     continue
                 if parent and _section_bounds(lines, parent) is not None:
-                    # 父节在，但那一项既不是内联表也不是子节——改不动，明说。
-                    # 猜着写下去的结果是产出一个开不了机的配置。
                     raise ConfigError(
                         f"改不了 [{section}].{key}：配置文件里 [{parent}] 下的 {table} "
                         f"不是可以就地编辑的形式。请手工编辑这个文件"
                     )
-                # 整节都不存在：追加到末尾。注释说明它是被界面加进来的，
-                # 否则以后看到一个没有任何说明的裸节会一头雾水。
                 if lines and not lines[-1].endswith("\n"):
                     lines[-1] += "\n"
                 lines.extend(["\n", f"[{section}]\n", f"{key} = {literal}\n"])
@@ -241,8 +224,6 @@ def set_values(text: str, updates: dict[str, dict[str, Any]]) -> tuple[str, list
             start, end = bounds
             index = _find_key(lines, start + 1, end, key)
             if index is None:
-                # 节存在但没有这个键：插在节头之后，而不是节尾——
-                # 节尾往前常常是一段说明下一节的注释，插在那里会被误读成属于下一节。
                 insert_at = start + 1
                 lines.insert(insert_at, f"{key} = {literal}\n")
                 changes.append(f"[{section}].{key} = {literal}（新增）")
@@ -300,7 +281,6 @@ def set_nodes(text: str, nodes: list[dict[str, Any]]) -> str:
         lines.insert(start + 1, block)
         return "".join(lines)
 
-    # 找配平的右括号：数组里的内联表自己也带括号，所以要计数而不是找第一个 ]
     depth = 0
     stop = index
     for cursor in range(index, end):
@@ -346,8 +326,6 @@ def save(path: Path, text: str, *, backup: bool = True) -> Path | None:
             backup_path = path.with_suffix(path.suffix + ".bak")
             _ = shutil.copy2(path, backup_path)
 
-        # 同目录下的临时文件 + os.replace：同一文件系统内 replace 是原子的，
-        # 所以任何时刻这个路径上要么是旧内容、要么是新内容，不会是半截。
         temp = path.with_name(path.name + ".tmp")
         mode = 0o600 if path.exists() and (path.stat().st_mode & 0o077) == 0 else 0o644
         with os.fdopen(os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode), "w", encoding="utf-8") as f:

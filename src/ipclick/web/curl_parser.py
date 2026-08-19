@@ -19,7 +19,6 @@ import shlex
 from typing import final
 
 
-#: 认得的、**带一个参数**的选项。值是它在表单里的去处。
 _VALUE_FLAGS: dict[str, str] = {
     "-X": "method",
     "--request": "method",
@@ -42,17 +41,15 @@ _VALUE_FLAGS: dict[str, str] = {
     "--connect-timeout": "timeout",
 }
 
-#: 认得的、**不带参数**的开关。这些对 IPClick 来说要么是默认行为、要么无关，
-#: 静静吃掉即可——但必须列出来，否则会被当成"不认识的参数"而误报。
 _BOOL_FLAGS: frozenset[str] = frozenset(
     {
-        "--compressed",  # IPClick 总是接受压缩响应
+        "--compressed",
         "-s",
         "--silent",
         "-S",
         "--show-error",
         "-L",
-        "--location",  # 默认就跟随重定向
+        "--location",
         "-i",
         "--include",
         "-v",
@@ -69,7 +66,6 @@ _BOOL_FLAGS: frozenset[str] = frozenset(
     }
 )
 
-#: 带参数、但**要提醒用户**的选项：它们会改变请求语义，而这里对应不上。
 _UNSUPPORTED_VALUE_FLAGS: dict[str, str] = {
     "-F": "文件上传（-F / --form）没有对应的表单项，请改用请求体",
     "--form": "文件上传（-F / --form）没有对应的表单项，请改用请求体",
@@ -82,13 +78,11 @@ _UNSUPPORTED_VALUE_FLAGS: dict[str, str] = {
     "--output": "-o / --output 指定的输出文件与本页无关，已忽略",
 }
 
-#: 不带参数、要提醒的开关
 _UNSUPPORTED_BOOL_FLAGS: dict[str, str] = {
     "-k": "-k / --insecure 会跳过证书校验，本页不支持——请确认目标证书有效",
     "--insecure": "-k / --insecure 会跳过证书校验，本页不支持——请确认目标证书有效",
 }
 
-#: 有 body 但没写 -X 时 curl 用的方法
 _IMPLIED_METHOD_WITH_BODY = "POST"
 
 _KNOWN_METHODS = frozenset({"GET", "POST", "HEAD", "PUT", "PATCH", "DELETE", "OPTIONS"})
@@ -104,7 +98,6 @@ class ParsedCurl:
     headers: dict[str, str] = field(default_factory=dict)
     body: str = ""
     timeout: str = ""
-    #: 认不出或没导入的东西。**必须**展示——静默丢弃会让人以为已经导入了。
     notes: list[str] = field(default_factory=list)
     error: str = ""
 
@@ -129,14 +122,11 @@ def parse_curl(command: str) -> ParsedCurl:
     if not text:
         return ParsedCurl(error="请先粘贴一条 curl 命令")
 
-    # DevTools 导出的命令是多行的，行尾用 \ 续行；PowerShell 版本用 `。
-    # 两种都先摊平成一行再交给 shlex。
     text = text.replace("\\\n", " ").replace("^\n", " ").replace("`\n", " ")
 
     try:
         tokens = shlex.split(text)
     except ValueError as e:
-        # 引号没配平是最常见的粘贴事故（选中范围少了半行）
         return ParsedCurl(error=f"命令解析失败（引号没有配对？）：{e}")
 
     if not tokens:
@@ -160,7 +150,6 @@ def _consume(tokens: list[str]) -> ParsedCurl:
             positional.append(token)
             continue
 
-        # --header=value 与 --header value 都要认
         flag, sep, inline = token.partition("=")
         if not sep:
             flag, inline = token, ""
@@ -174,7 +163,6 @@ def _consume(tokens: list[str]) -> ParsedCurl:
         target = _VALUE_FLAGS.get(flag)
         unsupported = _UNSUPPORTED_VALUE_FLAGS.get(flag)
         if target is None and unsupported is None:
-            # 合并短选项（-sS）在 DevTools 的输出里很常见，逐个拆开看
             if _is_bundled_bools(flag):
                 continue
             _note(result, f"未识别的参数 {flag}，已忽略")
@@ -186,7 +174,6 @@ def _consume(tokens: list[str]) -> ParsedCurl:
 
         if unsupported is not None:
             _note(result, unsupported)
-            # --data-urlencode 仍然有 body，尽量别丢
             if flag == "--data-urlencode":
                 result.body = _join_body(result.body, value)
             continue
@@ -201,7 +188,6 @@ def _consume(tokens: list[str]) -> ParsedCurl:
             notes=result.notes,
         )
     if not result.url.startswith(("http://", "https://")):
-        # curl 允许省略协议，IPClick 的准入策略要求写全
         result.url = f"https://{result.url}"
         _note(result, "命令里没写协议，已按 https:// 补全")
 
@@ -228,7 +214,6 @@ def _apply(result: ParsedCurl, target: str, value: str) -> None:
     elif target == "data":
         result.body = _join_body(result.body, value)
     elif target == "cookie":
-        # -b 可以是 "a=1; b=2" 也可以是一个文件名。后者这里处理不了。
         if "=" in value:
             result.headers.setdefault("Cookie", value)
         else:
@@ -261,8 +246,6 @@ def _is_bundled_bools(flag: str) -> bool:
 def _looks_like_url(token: str) -> bool:
     if token.startswith(("http://", "https://")):
         return True
-    # curl 允许省略协议：example.com/path。要求带点或斜杠，免得把
-    # 某个漏配对的参数值当成网址。
     return "." in token and not token.startswith("-")
 
 

@@ -31,9 +31,6 @@ from ipclick.utils.log_util import log
 from ipclick.utils.url_util import URLPolicy, validate_url
 
 
-# proto 未设置这些字段时服务端采用的默认值。
-# 超时与重试三项改从 [DOWNLOADER] 配置读取（见 self.adapter_settings），
-# 这里只保留没有对应配置项的布尔默认值。
 _DEFAULT_VERIFY_SSL = True
 _DEFAULT_ALLOW_REDIRECTS = True
 _DEFAULT_STREAM = False
@@ -64,8 +61,6 @@ def caller_still_waiting(context: object) -> bool:
         return True
 
 
-#: 转发标记。集群里 A 把任务转给子节点时带上这个 metadata，子节点据此
-#: 知道自己不是入口（用于链路展示，也是防转发环路的依据）。
 FORWARD_HEADER = "ipclick-forwarded"
 
 
@@ -138,47 +133,30 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     def __init__(self, config: Settings):
         self.config: Settings = config
 
-        # 适配器默认行为。此前这里只是把 [DOWNLOADER] 存进一个再没被读过的
-        # dict，导致配置文件里的超时与重试策略完全不生效。
         self.adapter_settings: AdapterSettings = AdapterSettings.from_config(dict(self.config.get("DOWNLOADER", {})))
-        # 同理，[BROWSER] 此前也没有任何消费方
         self.browser_settings: BrowserSettings = BrowserSettings.from_config(dict(self.config.get("BROWSER", {})))
 
         self._adapter_cache: dict[str, DownloaderAdapter] = {}
         self._cache_lock: threading.Lock = threading.Lock()
         self._recorder: TraceRecorder = get_recorder()
-        # 本节点标识。刻意存在服务实例上而不是改记录器的字段——记录器是进程级
-        # 单例，同一进程里起多个服务（测试、或一个进程内跑多实例）时改它会串台：
-        # 后起的那个会把先起的那个的 node_id 覆盖掉。
         self.node_id: str = str(dict(self.config.get("CLUSTER", {})).get("self_id", "") or "") or (
             self._recorder.node_id
         )
 
         downloader_config = dict(self.config.get("DOWNLOADER", {}))
         self._chunk_size: int = int(downloader_config.get("chunk_size", DEFAULT_CHUNK_SIZE) or DEFAULT_CHUNK_SIZE)
-        # 批量的并发度沿用 SERVER.max_workers：这里再开一个不受约束的池的话，
-        # 总并发会变成 max_workers x 批量数，把下游打爆。
         self._batch_concurrency: int = max(1, int(dict(self.config.get("SERVER", {})).get("max_workers", 10) or 10))
-        #: 批量任务共用的线程池。懒建，见 _batch_pool()。
         self._batch_executor: ThreadPoolExecutor | None = None
-        #: 供 Ping 报告运行时长。用 monotonic：系统时钟被 NTP 调过之后
-        #: wall clock 的差值会变成负数或者跳几个小时。
         self._started_at: float = time.monotonic()
-        #: 远程组件管理用的安装任务管理器。惰性建（多数节点一辈子用不到它），
-        #: 但**进程内唯一**——它靠自己那把锁保证"同一时刻只跑一个任务"。
         self._install_manager: Any = None
 
-        # 目标 URL 准入策略（SSRF 防护）
         self.url_policy: URLPolicy = URLPolicy.from_config(dict(self.config.get("SECURITY", {})))
 
-        # 按 host 的并发与速率闸门。未配置时是零开销的空操作。
         self.host_limiter: HostLimiter = build_limiter(downloader_config)
 
-        # 获取默认适配器
         self.default_adapter: DownloaderAdapter = get_default_adapter(self.adapter_settings)
         self._adapter_cache[self.default_adapter.adapter_name] = self.default_adapter
 
-        # 记录初始化信息
         log.debug(
             f"TaskService initialized with default adapter: {self.default_adapter.adapter_name}, "
             f"timeout={self.adapter_settings.download_timeout}s, "
@@ -201,10 +179,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         """
         return [self.host_limiter]
 
-    # ------------------------------------------------------------------ #
-    # 适配器
-    # ------------------------------------------------------------------ #
-
     def _cache_key(self, name: str) -> str:
         """把请求里写的适配器名归一成缓存键。
 
@@ -217,7 +191,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             try:
                 return resolve_browser_adapter_name(self.browser_settings)
             except Exception:
-                # 引擎名配错了：保持原样，让 get_adapter 去抛那个更具体的错
                 return name
         return name
 
@@ -237,10 +210,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 self._adapter_cache[key] = get_adapter(name, self.adapter_settings, self.browser_settings)
             return self._adapter_cache[key]
 
-    # ------------------------------------------------------------------ #
-    # RPC
-    # ------------------------------------------------------------------ #
-
     @override
     def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
         """
@@ -253,19 +222,10 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         Returns:
             task_pb2.TaskResp: gRPC响应对象
         """
-        # 每请求两条 INFO 是压测里最贵的一项非必要开销：默认 info 级别下，
-        # 光是 loguru 的格式化 + 着色 + 写 stderr 就占掉约 12% 的 GIL 时间，
-        # 实测把级别调到 warning 能让吞吐涨 22%。降到 debug 并改成惰性参数
-        # （`"{}", x` 而不是 f-string），级别没开时连字符串都不拼。
-        # 运维需要的"谁在什么时候请求了什么"由链路记录负责，那是结构化的、
-        # 有上限的、Web 端能查的，比刷屏的日志更适合这个用途。
         log.debug("Received request: {} for URL: {}", request.uuid, request.url)
         start_time = time.monotonic()
         method_name = METHOD_MAP.get(request.method, "GET")
 
-        # 适配器名必须在进入 track_request 之前解析：上下文管理器在进入时就
-        # 固定了它，放在 try 里面赋值的话所有记录都会记成 "unknown"。
-        # 枚举值非法时用 "unknown" 是正确的——下面的 from_pb 会抛错并记为拒绝。
         try:
             adapter_name = IPClickAdapter.from_pb(request.adapter).display_name
         except ValueError:
@@ -278,15 +238,10 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 adapter_member = IPClickAdapter.from_pb(request.adapter)
                 adapter_name = adapter_member.display_name
                 adapter = self._get_cached_adapter(adapter_name)
-                # 用适配器自己报的名字：adapter=BROWSER 时这里会是被解析出来的
-                # 具体引擎（camoufox / drissionpage），比 "browser" 有用得多。
                 tr.adapter = adapter.adapter_name
 
                 validate_url(request.url, self.url_policy)
 
-                # 调用方已经走了就别开工了。浏览器渲染一次能占几十秒和一个页面
-                # 额度，用户关掉标签页之后还接着跑纯属浪费——尤其在小内存机器上，
-                # 反复点几次「试一试」就能把浏览器额度和内存全占死。
                 if not caller_still_waiting(context):
                     log.info(f"Request {request.uuid} 在开工前发现调用方已断开，放弃")
                     raise CallerGone
@@ -338,8 +293,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             return self._build_error_response(request, str(exc), tr)
 
         if isinstance(exc, HostLimitTimeout):
-            # 本机限流策略生效，不是目标站点或网络的问题。RESOURCE_EXHAUSTED
-            # 是 gRPC 里表达"被限流了，稍后再来"的标准状态码。
             log.warning(f"Request {request.uuid} throttled: {exc}")
             self._recorder.record_rejected("host_limit")
             context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
@@ -347,9 +300,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             return self._build_error_response(request, str(exc), tr)
 
         if isinstance(exc, AdapterError):
-            # 与 ValueError 分开：这是"本服务端做不到"（适配器不存在、依赖没装、
-            # 浏览器渲染被关掉），不是调用方参数写错。混成 INVALID_ARGUMENT
-            # 会让调用方去改自己的参数，而实际要改的是服务端部署。
             log.warning(f"Request {request.uuid} cannot be served: {exc}")
             self._recorder.record_rejected("failed_precondition")
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
@@ -363,15 +313,9 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             context.set_details(str(exc))
             return self._build_error_response(request, str(exc), tr)
 
-        # 任何未预期的异常都不应该让 RPC 以 UNKNOWN + 堆栈的形式返回，
-        # 调用方拿不到结构化信息，服务端也可能泄漏内部路径。
         log.exception(f"Request {request.uuid} failed unexpectedly: {exc}")
         self._recorder.record_rejected("internal_error")
         return self._build_error_response(request, f"内部错误: {type(exc).__name__}", tr)
-
-    # ------------------------------------------------------------------ #
-    # 下载
-    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _decode_body(raw: str | bytes, field_name: str) -> Any:
@@ -412,8 +356,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         data = self._decode_body(request.data, "data")
         json_data = self._decode_body(request.json, "json")
 
-        # optional 字段：用 HasField 区分"未设置"与"显式设为 0/false"。
-        # 这一步是 verify_ssl 默认被关掉那个问题的根因修复。
         download_kwargs: dict[str, Any] = {
             "method": method,
             "headers": headers,
@@ -422,7 +364,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             "data": data,
             "json": json_data,
             "proxy": request.proxy or None,
-            # 未设置时回落到 [DOWNLOADER] 配置，而不是写死的常量
             "timeout": (
                 request.timeout_seconds
                 if request.HasField("timeout_seconds")
@@ -448,7 +389,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             "kwargs": request.kwargs or None,
         }
 
-        # timeout 为 0 会让适配器立刻超时，这里兜底成默认值
         if not download_kwargs["timeout"] or download_kwargs["timeout"] <= 0:
             download_kwargs["timeout"] = self.adapter_settings.download_timeout
 
@@ -461,8 +401,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         waiting_since = time.monotonic()
         with self.host_limiter.acquire(request.url):
             if tr is not None:
-                # 在闸门里排的时间要和真正的下载耗时分开记：两者都是"慢"，
-                # 但一个该调限流配置，另一个该查目标站点或网络。
                 tr.queued_ms = int((time.monotonic() - waiting_since) * 1000)
             return adapter.download(request.url, **self._build_download_kwargs(request))
 
@@ -475,16 +413,9 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             try:
                 yield from stream
             finally:
-                # 提前 break（调用方断开）时也要让适配器释放底层连接。
-                # download_stream 的签名只承诺 Iterator，不一定是生成器，
-                # 所以这里探测一下再调，不能直接用 contextlib.closing。
                 closer = getattr(stream, "close", None)
                 if callable(closer):
                     closer()
-
-    # ------------------------------------------------------------------ #
-    # 响应
-    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _build_grpc_response(
@@ -504,8 +435,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         return task_pb2.TaskResp(
             request_uuid=request.uuid,
             adapter=request.adapter,
-            # 不回传 original_request：它含代理账号密码等凭证，且会让每个响应
-            # 白白多带一份完整请求体。要查链路请看 trace。
             effective_url=response.url,
             status_code=response.status_code,
             response_headers=response.headers or {},
@@ -528,10 +457,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             error_message=message,
             trace=_build_trace(tr),
         )
-
-    # ------------------------------------------------------------------ #
-    # 流式下载
-    # ------------------------------------------------------------------ #
 
     @override
     def SendStream(self, request: "task_pb2.ReqTask", context: ServicerContext) -> Iterator["task_pb2.TaskRespChunk"]:
@@ -566,13 +491,9 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 validate_url(request.url, self.url_policy)
 
                 download_kwargs = self._build_download_kwargs(request)
-                # 流式路径不做重试：重试要么得缓存已发出的分片、要么让调用方
-                # 看到重复数据，两者都不可接受。
                 download_kwargs.pop("max_retries", None)
                 download_kwargs.pop("retry_delay", None)
 
-                # 限流额度要持有到整条流结束：流式请求同样占着一条到该 host 的连接，
-                # 只在建流时占额度等于没限住。
                 stream = self._limited_stream(
                     request.url,
                     adapter.download_stream(request.url, chunk_size=self._chunk_size, **download_kwargs),
@@ -580,7 +501,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
                 header_sent = False
                 for event in stream:
-                    if context.is_active() is False:  # 调用方已断开，别再白白下载
+                    if context.is_active() is False:
                         log.info(f"Stream request {request.uuid} cancelled by client")
                         break
 
@@ -606,8 +527,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                         yield task_pb2.TaskRespChunk(chunk=event)
 
                 if not header_sent:
-                    # 适配器一个事件都没产出——不该发生，但别让调用方收到一个
-                    # 没有 header 的流而无从判断。
                     error_message = "适配器未返回任何响应"
                     yield task_pb2.TaskRespChunk(
                         header=task_pb2.TaskRespHeader(
@@ -676,10 +595,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             )
         )
 
-    # ------------------------------------------------------------------ #
-    # 批量
-    # ------------------------------------------------------------------ #
-
     @override
     def SendBatch(
         self, request_iterator: Iterator["task_pb2.ReqTask"], context: ServicerContext
@@ -691,12 +606,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         先返回，而不是按提交顺序阻塞在慢请求上。
         """
         pool = self._batch_pool()
-        # 完成通知走队列而不是每提交一个就扫一遍 pending。
-        #
-        # 旧写法是 `done = [f for f in pending if f.done()]`，放在提交循环里——
-        # 每提交一个任务就把**全部**在途 future 扫一遍，总代价 O(N²)。批量一千个
-        # 任务就是五十万次 done() 调用，全压在推任务的那个线程上，反而拖慢了提交
-        # 本身。add_done_callback 让完成方自己来报到，两边都是 O(1)。
         finished: queue.Queue[Future[task_pb2.TaskResp]] = queue.Queue()
         in_flight = 0
         submitted = 0
@@ -710,8 +619,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             in_flight += 1
             submitted += 1
 
-            # 边收边发：不等客户端把所有任务推完再开始返回结果，
-            # 否则一个超长的批次会让首个结果迟迟不到。
             while True:
                 try:
                     done = finished.get_nowait()
@@ -760,13 +667,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         **整条批量流**标记成 PERMISSION_DENIED，其余任务的结果全部丢失。
         每个任务的失败信息已经在它自己的 TaskResp.error_message 里了。
         """
-        # _IsolatedContext 只实现了 Send 实际用到的三个方法，
-        # 不是完整的 ServicerContext，这里显式 cast。
         return self.Send(request, cast(ServicerContext, cast(object, _IsolatedContext(metadata))))
-
-    # ------------------------------------------------------------------ #
-    # 探测
-    # ------------------------------------------------------------------ #
 
     @override
     def Ping(self, request: "task_pb2.PingReq", context: ServicerContext) -> "task_pb2.PingResp":
@@ -789,10 +690,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             uptime_seconds=int(time.monotonic() - self._started_at),
             in_flight=self._recorder.counters.in_flight,
         )
-
-    # ------------------------------------------------------------------ #
-    # 远程组件管理
-    # ------------------------------------------------------------------ #
 
     @property
     def remote_install_allowed(self) -> bool:
@@ -893,8 +790,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             status=str(current.get("status", "")),
             returncode=int(current.get("returncode") or 0),
             elapsed_seconds=int(current.get("elapsed") or 0),
-            # -1 表示"量不出来"。proto3 的 double 没有 null，用一个不可能的负数
-            # 表达它，前端据此画不确定态的条而不是一个 0% 的假进度。
             percent=float(percent) if percent is not None else -1.0,
             done_bytes=int(progress.get("done_bytes") or 0),
             speed_bytes=float(progress.get("speed") or 0.0),
@@ -920,10 +815,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         """本节点是否开着服务端转发。基类恒为 False，转发子类覆盖。"""
         return False
 
-    # ------------------------------------------------------------------ #
-    # 生命周期
-    # ------------------------------------------------------------------ #
-
     def cleanup(self) -> None:
         """
         清理资源
@@ -932,7 +823,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         """
         log.info("Cleaning up TaskService resources...")
 
-        # 批量线程池是共用的，进程收尾时要显式关掉——否则那些线程会一直挂着
         pool, self._batch_executor = self._batch_executor, None
         if pool is not None:
             pool.shutdown(wait=False)
@@ -946,8 +836,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                     log.warning(f"Error closing adapter {name}: {e}")
             self._adapter_cache.clear()
 
-        # 注意：不要清空 registry.ADAPTER_CLASSES。那是模块级的类型注册表，
-        # 清掉之后同一进程内再也造不出任何适配器（例如测试里起第二个服务）。
         log.info("TaskService cleanup completed")
 
 

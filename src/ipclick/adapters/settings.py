@@ -11,11 +11,8 @@ from dataclasses import dataclass
 from typing import Any
 
 
-# 默认触发重试的状态码（连接层异常总是会重试，与此无关）
 DEFAULT_RETRY_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
-# 单次重试等待的硬上限（秒）。服务端每个请求占一个 gRPC worker 线程，
-# 退避时间过长会把线程池拖垮，因此即使配置写得更大也按此封顶。
 HARD_MAX_BACKOFF = 300.0
 
 
@@ -39,22 +36,18 @@ def _as_int(value: Any, default: int, *, minimum: int = 0) -> int:
 class AdapterSettings:
     """适配器的默认行为。请求级参数优先于这里的值。"""
 
-    # 超时
     connect_timeout: float = 10.0
     download_timeout: float = 300.0
 
-    # 重试：sleep = min(initial_backoff * exponent**attempt, max_backoff) * 抖动
     max_attempts: int = 3
     backoff_exponent: float = 2.0
     initial_backoff: float = 1.0
     max_backoff: float = 30.0
     retry_codes: frozenset[int] = DEFAULT_RETRY_STATUS_CODES
 
-    # 连接池
     max_connections: int = 100
     max_keepalive_connections: int = 20
 
-    # 是否读取环境变量里的代理设置
     trust_env: bool = False
 
     @classmethod

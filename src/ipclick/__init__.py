@@ -29,18 +29,16 @@ try:
     __version__ = importlib.metadata.version("ipclick")
     __author__ = importlib.metadata.metadata("ipclick")["Author"]
 except importlib.metadata.PackageNotFoundError:  # pragma: no cover - 仅在未安装时走到
-    __version__ = "0.7.0"
+    __version__ = "1.0.0"
     __author__ = "元气码农少女酱"
 
 
 __all__ = [  # noqa: RUF022 - 按用途分组比字母序更易读
-    # 客户端
     "Downloader",
     "get_downloader",
     "close_all_downloaders",
     "downloader",
     "create_client",
-    # 数据模型
     "DownloadTask",
     "DownloadResponse",
     "ResponseTrace",
@@ -48,7 +46,6 @@ __all__ = [  # noqa: RUF022 - 按用途分组比字母序更易读
     "HttpMethod",
     "IPClickAdapter",
     "ProxyConfig",
-    # 异常
     "IPClickError",
     "ConfigError",
     "AdapterError",
@@ -59,7 +56,6 @@ __all__ = [  # noqa: RUF022 - 按用途分组比字母序更易读
     "ValidationError",
     "URLNotAllowedError",
     "HostLimitTimeout",
-    # 元数据
     "__version__",
     "__author__",
 ]

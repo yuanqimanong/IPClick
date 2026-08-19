@@ -23,20 +23,16 @@ class Response:
     raw_response: Any | None = None
     exception: Exception | None = None
     elapsed_ms: int = 0
-    #: 实际发起了几次（1 = 一次成功，没重试）。由 @retry 装饰器填写，
-    #: 服务端把它放进 TaskResp.trace，让调用方能看出"慢是因为重试了 3 次"。
     attempts: int = 1
 
     def __post_init__(self):
         """初始化后处理"""
-        # 如果没有text但有content，尝试解码
         if self.text is None and self.content is not None:
             try:
                 self.text = self.content.decode("utf-8", errors="ignore")
             except (AttributeError, UnicodeDecodeError):
                 self.text = str(self.content)
 
-        # 确保headers是字典
         if self.headers is None:
             self.headers = {}
 

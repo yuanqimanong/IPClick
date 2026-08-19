@@ -31,16 +31,12 @@ from ipclick.trace import get_recorder
 from ipclick.utils.log_util import log
 
 
-#: metadata 中携带令牌的键。gRPC 要求 metadata 键为小写。
 AUTH_METADATA_KEY = "authorization"
 
-#: 令牌前缀，遵循 RFC 6750
 BEARER_PREFIX = "Bearer "
 
-#: 覆盖配置文件的环境变量
 AUTH_TOKEN_ENV = "IPCLICK_AUTH_TOKEN"
 
-#: 免鉴权的方法前缀。健康检查要供编排系统探活，通常拿不到密钥。
 _EXEMPT_METHOD_PREFIXES: tuple[str, ...] = (
     "/grpc.health.v1.Health/",
     "/grpc.reflection.",
@@ -69,7 +65,6 @@ def load_tokens(security_config: dict[str, Any] | None = None) -> tuple[str, ...
     elif isinstance(configured, (list, tuple)):
         tokens.extend(str(t).strip() for t in configured if str(t).strip())
 
-    # 去重但保持顺序
     return tuple(dict.fromkeys(tokens))
 
 
@@ -94,8 +89,6 @@ def extract_token(metadata: Sequence[tuple[str, Any]] | None) -> str | None:
         if not raw:
             return None
 
-        # 按空白切成两段。不能先 strip 再判断 "Bearer " 前缀——"Bearer   "
-        # 去掉尾部空白后就不含那个空格了，会被当成裸令牌返回字面量 "Bearer"。
         head, _, rest = raw.partition(" ")
         if head.lower() == BEARER_PREFIX.strip().lower():
             return rest.strip() or None
@@ -172,7 +165,6 @@ class TokenAuthInterceptor(grpc.ServerInterceptor):
         if token_matches(token, self._tokens):
             return continuation(handler_call_details)
 
-        # 只记方法名，绝不记令牌本身（哪怕是错误的那个）
         log.warning(f"拒绝未通过鉴权的调用: {method}")
         get_recorder().record_rejected("unauthenticated")
         return self._deny

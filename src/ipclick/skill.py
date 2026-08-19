@@ -25,16 +25,12 @@ from pathlib import Path
 from typing import final
 
 
-#: 技能名。同时是安装目录名与 Claude Code 里的调用名。
 SKILL_NAME = "ipclick"
 
-#: 包内技能目录。``src/ipclick/skills/ipclick/SKILL.md``
 SKILL_ROOT = Path(__file__).parent / "skills" / SKILL_NAME
 
-#: 技能正文文件
 SKILL_FILE = SKILL_ROOT / "SKILL.md"
 
-#: 默认安装位置（相对于项目根）。Claude Code 从这里发现项目级技能。
 DEFAULT_INSTALL_DIR = Path(".claude") / "skills"
 
 
@@ -45,7 +41,6 @@ class InstallResult:
 
     path: Path
     written: bool
-    #: 已存在且内容一致时为真——这时"没写"不是失败，是本来就对
     unchanged: bool = False
 
     @property

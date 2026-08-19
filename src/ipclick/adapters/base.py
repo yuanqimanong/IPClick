@@ -16,13 +16,8 @@ from ipclick.trace import get_recorder
 from ipclick.utils.log_util import log
 
 
-#: 流式传输的默认分片大小（字节）。64KB 是吞吐与 gRPC 消息开销之间的常见折中。
 DEFAULT_CHUNK_SIZE = 64 * 1024
 
-#: 预生成的 User-Agent 池大小。
-#: fake_useragent 取一次要 2.82ms（纯 Python，持有 GIL），放在每请求的热路径上
-#: 实测让吞吐掉到 1/4.4。池化之后每请求只剩一次 list 索引，而轮换 UA 的效果
-#: 依然存在。32 个的多样性对反检测足够，一次性构建成本约 90ms 且是惰性的。
 UA_POOL_SIZE = 32
 
 
@@ -34,17 +29,12 @@ class StreamHeader:
     status_code: int
     headers: dict[str, str] = field(default_factory=dict)
     error: str | None = None
-    #: 服务端声明的总长度；未知时为 -1
     content_length: int = -1
 
 
-#: 流式迭代产出的元素：首个是 StreamHeader，之后都是 bytes 分片。
 StreamEvent = StreamHeader | bytes
 
 
-# 单次重试等待的上限（秒）。服务端每个请求占用一个 gRPC worker 线程，
-# 原来的 min(2**attempt, 600) 在 max_retries 稍大时会让线程睡上十分钟。
-# 现在可由 [DOWNLOADER.retry].max_backoff 覆盖，此处仅作为未配置时的默认值。
 MAX_RETRY_DELAY = AdapterSettings().max_backoff
 
 
@@ -86,8 +76,6 @@ def retry(
     def decorator(func: Callable[..., Response]) -> Callable[..., Response]:
         @functools.wraps(func)
         def wrapper(self: Any, *args: Any, **kwargs: Any) -> Response:
-            # 用 `is None` 判断而不是 `or`：max_retries=0 / retry_delay=0
-            # 是合法取值（表示"不重试"/"不等待"），用 `or` 会被当成未传而回落到默认值。
             requested_retries = kwargs.get("max_retries")
             max_retries = (
                 int(requested_retries) if requested_retries is not None else getattr(self, max_retries_attr, 3)
@@ -103,8 +91,6 @@ def retry(
             url = args[0] if args else kwargs.get("url", "unknown")
             allowed = kwargs.get("allowed_status_codes") or None
 
-            # 退避参数取自适配器的 settings（来自 [DOWNLOADER.retry]），
-            # 没有 settings 的适配器（如测试里的假实现）回落到模块默认值。
             settings: AdapterSettings | None = getattr(self, "settings", None)
             retry_codes = settings.retry_codes if settings else DEFAULT_RETRY_STATUS_CODES
             exponent = settings.backoff_exponent if settings else 2.0
@@ -120,13 +106,9 @@ def retry(
                     if hasattr(result, "elapsed_ms") and result.elapsed_ms == 0:
                         result.elapsed_ms = int((time.monotonic() - start_time) * 1000)
 
-                    # 记下这是第几次尝试。适配器返回的对象大多是 Response，
-                    # 但测试里也有别的假实现，所以先确认属性存在。
                     if hasattr(result, "attempts"):
                         result.attempts = attempt + 1
 
-                    # 状态码级重试：allowed_status_codes 给出的是"可接受"的状态码，
-                    # 其余落在重试名单里的（429/5xx）值得再试一次。
                     status = getattr(result, "status_code", None)
                     if (
                         attempt < max_retries
@@ -146,20 +128,9 @@ def retry(
                     return result
 
                 except ValidationError:
-                    # 参数错误重试多少次都是同样的结果，纯属浪费——默认配置下
-                    # 一个"不支持的方法"要先睡够 1+2+4 秒才返回。而且吞成 -1
-                    # 响应等于把调用方的用法错误伪装成一次网络故障；
-                    # TaskService 那边本来就会把它映射成 INVALID_ARGUMENT。
                     raise
 
                 except AdapterError:
-                    # 同理：AdapterError 的含义是"本服务端做不到"——依赖没装、
-                    # 浏览器本体没下、渲染被关掉、浏览器起不来或超时。重试改变不了
-                    # 其中任何一条。
-                    #
-                    # 代价还特别大：浏览器请求一次的预算本身就是几十上百秒，
-                    # 被这里重试 3 次就变成四倍。实测一次「试一试」点击因此挂了
-                    # 296 秒，而用户在页面上什么提示都看不到。
                     raise
 
                 except Exception as e:
@@ -170,8 +141,6 @@ def retry(
 
                     sleep_time = _backoff(attempt, base_delay, exponent, max_backoff)
                     get_recorder().record_retry(getattr(self, "adapter_name", "unknown"), "exception")
-                    # 原来这行日志裹在 `if hasattr(self, "logger")` 里，而适配器
-                    # 从来没有 logger 属性，等于重试全程静默。
                     log.warning(
                         f"Download {url} failed, retrying {attempt + 1}/{max_retries} "
                         f"in {sleep_time:.1f}s... Error: {e}"
@@ -286,13 +255,9 @@ def _backoff(
     return delay * uniform(0.8, 1.2)
 
 
-#: JS 引擎在脚本本身写错时用的错误名。这些名字由 ECMAScript 规范定义，
-#: Playwright 与 CDP 都原样带出来，所以按文本判断比按异常类型判断可靠
-#: （两条路径抛的异常类型不同，但错误文本里的 ``SyntaxError:`` 是一样的）。
 _JS_AUTHOR_ERRORS = ("SyntaxError", "ReferenceError", "TypeError: ")
 
 
-#: 已经是函数形式的脚本的开头。这类原样交给 evaluate。
 _JS_FUNCTION_PREFIXES = ("function", "async", "(", "=>")
 
 
@@ -320,17 +285,13 @@ def normalize_js(script: str) -> str:
         return text
     if text.startswith(_JS_FUNCTION_PREFIXES):
         return text
-    # 用词边界匹配，避免把 `returnValue` 这种标识符误判成 return 语句
     if re.search(r"\breturn\b", text):
         return f"() => {{ {text} }}"
     return f"() => ({text})"
 
 
-#: 浏览器导航的**永久性**失败。重试它们改变不了结果——URL 本身或目标就是这样。
-#:
-#: 与之相对，ERR_CONNECTION_REFUSED / ERR_TIMED_OUT 这类是瞬时的，照常重试。
 _PERMANENT_NAV_ERRORS = (
-    "ERR_UNSAFE_PORT",  # Chromium 拒绝连的端口（1、7、25 等），换多少次都一样
+    "ERR_UNSAFE_PORT",
     "ERR_UNKNOWN_URL_SCHEME",
     "ERR_INVALID_URL",
     "ERR_DISALLOWED_URL_SCHEME",
@@ -379,20 +340,16 @@ class DownloaderAdapter(ABC):
                 请求级参数（timeout / max_retries / ...）优先于这里的值。
         """
         self.settings: AdapterSettings = settings or AdapterSettings()
-        #: 保护 UA 池的惰性构建（适配器实例在多个 worker 线程间共享）
         self._ua_lock: threading.Lock = threading.Lock()
-        #: 预生成的 UA 池，None 表示还没建。见 _get_user_agent 的说明。
         self._ua_pool_cache: list[str] | None = None
 
         self.proxy: str | None = None
-        # 这几个属性是 retry 装饰器和各适配器读取的"未显式传参时的默认值"
         self.max_retries: int = self.settings.max_attempts
         self.retry_delay: float = self.settings.initial_backoff
         self.timeout: float = self.settings.download_timeout
         self.connect_timeout: float = self.settings.connect_timeout
         self.verify_ssl: bool = True
         self.trust_env: bool = self.settings.trust_env
-        # 兜底 UA：fake_useragent 不可用或抛错时使用
         self.user_agent: str = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -403,7 +360,6 @@ class DownloaderAdapter(ABC):
         self,
         url: str,
         *,
-        # 协议
         method: str = "GET",
         headers: dict[str, Any] | None = None,
         cookies: dict[str, Any] | str | None = None,
@@ -419,7 +375,6 @@ class DownloaderAdapter(ABC):
         allow_redirects: bool = True,
         stream: bool = False,
         impersonate: str | None = None,
-        # 渲染
         automation_config: str | None = None,
         automation_script: str | None = None,
         allowed_status_codes: list[Any] | None = None,
@@ -456,13 +411,6 @@ class DownloaderAdapter(ABC):
         """
         raise NotImplementedError
 
-    #: 这个适配器有没有自己的异步实现。
-    #:
-    #: 服务端的异步模式据此决定走哪条路：True 就 await adownload()，
-    #: False 就把同步的 download() 丢进线程池。**默认 False**——这一条是
-    #: 整套异步化能做成"加法"而不是破坏性变更的关键：项目支持注册自定义
-    #: 适配器（见 README），它们只实现了同步 download()，不该因为服务端换了
-    #: 并发模型就集体失效。
     supports_async: bool = False
 
     async def adownload(self, url: str, **kwargs: Any) -> Response:
@@ -592,7 +540,6 @@ class DownloaderAdapter(ABC):
         if cached is not None:
             return cached
         with self._ua_lock:
-            # 双检：等锁期间可能已经有别的线程建好了
             if self._ua_pool_cache is not None:
                 return self._ua_pool_cache
             generator = getattr(self, "ua_generator", None)
@@ -604,7 +551,6 @@ class DownloaderAdapter(ABC):
                     except Exception:
                         log.debug("fake_useragent 取值失败，使用内置 User-Agent")
                         break
-            # 去重后仍然为空就退回内置 UA，调用方永远拿得到一个可用的值
             self._ua_pool_cache = sorted(set(pool)) or [self.user_agent]
             return self._ua_pool_cache
 

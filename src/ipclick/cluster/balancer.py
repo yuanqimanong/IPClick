@@ -79,7 +79,6 @@ _BALANCERS: dict[str, type[LoadBalancer]] = {
     RoundRobinBalancer.name: RoundRobinBalancer,
     RandomBalancer.name: RandomBalancer,
     WeightedBalancer.name: WeightedBalancer,
-    # 常见别名
     "weighted": WeightedBalancer,
     "rr": RoundRobinBalancer,
 }

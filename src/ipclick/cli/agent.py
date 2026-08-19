@@ -39,11 +39,6 @@ from ipclick.ports import DEFAULT_GRPC_PORT, DEFAULT_WEB_PORT
 from ipclick.utils.config_util import Settings
 
 
-# --------------------------------------------------------------------------- #
-# 公共选项
-# --------------------------------------------------------------------------- #
-
-
 def config_option(func: Any) -> Any:
     return click.option(
         "--config",
@@ -105,11 +100,6 @@ def _server_port(config: Settings, port: int | None) -> int:
         return int(dict(config.get("SERVER", {})).get("port", DEFAULT_GRPC_PORT))
     except (TypeError, ValueError):
         return DEFAULT_GRPC_PORT
-
-
-# --------------------------------------------------------------------------- #
-# fetch
-# --------------------------------------------------------------------------- #
 
 
 def _parse_pairs(values: tuple[str, ...], separator: str, what: str) -> dict[str, str]:
@@ -251,8 +241,6 @@ def fetch(
     from ipclick.sdk import Downloader
 
     _quiet_logs()
-    # 配置读一遍只为"写错了要早点报"：Downloader 自己也会读，但它在构造函数里
-    # 出错时抛的是原始异常，落到用户眼里是个 traceback。
     _ = _load(config, as_json)
 
     try:
@@ -265,13 +253,6 @@ def fetch(
         try:
             resolved_adapter = IPClickAdapter.from_str(adapter)
         except ValueError as e:
-            # 退出码仍是 2：这个名字是**本地**校验掉的，压根没联系服务端，
-            # 属于"命令行参数写错了"。（5 留给"适配器存在但没装"，那是服务端
-            # 回的 FAILED_PRECONDITION。）
-            #
-            # 但不能用 click.UsageError——click 会直接把错误打到 stderr 并退出，
-            # stdout 上一个 JSON 都没有，而 --json 承诺的是"成功失败都有且只有
-            # 一个 JSON 文档"。调用方（尤其是 AI）拿到空 stdout 只能靠猜。
             fail(str(e), Exit.USAGE, as_json=as_json)
 
     payload: Any = None
@@ -302,9 +283,6 @@ def fetch(
             params=_parse_pairs(params, "=", "查询参数") or None,
             data=payload,
             json=parsed_json,
-            # proxy=True 的语义是"用配置文件里的 [PROXY]"。命令行上没法传布尔，
-            # 所以约定一个字面量 config —— 比再加一个 --use-config-proxy 标志少
-            # 一个概念，而 "config" 不可能是一个真实的代理 URL。
             proxy=True if proxy == "config" else proxy,
             timeout=timeout,
             max_retries=retries,
@@ -326,12 +304,7 @@ def fetch(
         except OSError as e:
             fail(f"写文件失败：{e}", Exit.FAILED, as_json=as_json)
 
-    # status_code == -1 有两种完全不同的成因，退出码必须分开：
-    #   * 没连上 IPClick 服务端 —— 请求根本没发出去，该查进程和端口（3）；
-    #   * 服务端连不上**目标站点** —— IPClick 一切正常，该查那个 URL（1）。
-    # 区分靠 trace.node_id：只有真正处理过这个请求的节点才会填它。
     reached_server = response.status_code >= 0 or bool(response.trace.node_id) or bool(response.request_uuid)
-    # 抓取本身算不算失败：没拿到响应、带了错误，或状态码 >= 400（除非说了不判）
     attempt_failed = (
         response.status_code < 0 or bool(response.error) or (response.status_code >= 400 and not ignore_status)
     )
@@ -364,14 +337,11 @@ def fetch(
     }
     if output is not None:
         result["saved_to"] = str(output)
-    # 已经用 -o 写了完整文件时不再限制 JSON 里那份——两边都截断等于哪儿都拿不到全文
     result.update(_body_payload(response.content, 0 if output is not None else max(0, max_body)))
 
     if as_json:
         emit(result, as_json=True)
     else:
-        # 元信息走 stderr、响应体走 stdout —— 于是 `ipclick fetch URL > page.html`
-        # 拿到的是干净的页面，而屏幕上仍然看得见状态码和链路。
         note(f"{response.status_code} {response.url or url}  {response.elapsed_ms}ms  {len(response.content)}B")
         if response.trace.node_id or response.trace.attempts > 1:
             note(
@@ -388,11 +358,6 @@ def fetch(
 
     if code is not Exit.OK:
         raise SystemExit(int(code))
-
-
-# --------------------------------------------------------------------------- #
-# status
-# --------------------------------------------------------------------------- #
 
 
 @click.command()
@@ -457,18 +422,9 @@ def status(
             "healthy": healthy,
             "detail": health_detail,
             "mode": mode,
-            # 两个端口分开报。调用方（含 AI）拿到 target 只知道 gRPC 那一个，
-            # 想告诉人"管理界面在哪"时无从可查，于是只能去猜默认值——而这台机器
-            # 未必用的是默认值。
             "grpc_port": resolved_port,
             "web_port": web_port,
-            # 名字里带 _in_config 是必须的：这条命令是**另一个进程**，只看得到
-            # 文件。`ipclick run -w` 用命令行打开 Web 端时并不改文件，那时文件里
-            # 写着 false 而 Web 端正开着。叫 web_enabled 会让人（和 AI）以为这是
-            # 运行状态，进而得出"Web 端没开"的错误结论。
             "web_enabled_in_config": bool(dict(config_data.get("WEB", {})).get("enabled", False)),
-            # 这一条才是运行状态：直接连一下那个端口。文件怎么写不重要，
-            # 端口上有没有人听才是人真正想知道的。
             "web_reachable": _port_open(host or "127.0.0.1", web_port),
         },
         "security": {
@@ -482,9 +438,6 @@ def status(
             "components": components,
             "browser_enabled": browser.enabled,
             "browser_engine": browser.engine,
-            # 探的是**本机磁盘**，不是服务端进程此刻的注册表。两者只在一种情况下
-            # 不一致：服务端启动之后才从命令行装的组件——那时这里说"就绪"，而
-            # fetch 会收到"需要额外依赖"。说清楚比让人去猜便宜得多。
             "note": "以本机磁盘为准；服务端进程启动之后才装的组件，要重启它才认得",
         },
         "trace": {
@@ -519,11 +472,6 @@ def status(
 
     if not healthy:
         raise SystemExit(int(Exit.UNREACHABLE))
-
-
-# --------------------------------------------------------------------------- #
-# trace
-# --------------------------------------------------------------------------- #
 
 
 @click.group()
@@ -688,11 +636,6 @@ def trace_stats(config: Path | None, port: int | None, days: int, top: int, as_j
             click.echo(f"    {entry['host']:<32} {entry['total']:>7} 次 · 失败 {entry['failed']:>5}")
 
 
-# --------------------------------------------------------------------------- #
-# node
-# --------------------------------------------------------------------------- #
-
-
 @click.group()
 def node() -> None:
     """集群节点：看列表、探连通性与鉴权。"""
@@ -833,11 +776,6 @@ def node_probe(config: Path | None, node_id: str, address: str, timeout: float, 
         raise SystemExit(int(Exit.FAILED))
 
 
-# --------------------------------------------------------------------------- #
-# component
-# --------------------------------------------------------------------------- #
-
-
 @click.group()
 def component() -> None:
     """可选组件（五个 extras）：看状态、装、卸、下浏览器本体。
@@ -902,8 +840,6 @@ def _run_plan(op: str, extra: str, browser_kind: str, as_json: bool, dry_run: bo
     def sink(line: str) -> None:
         lines.append(line)
         if not as_json:
-            # 装包可能要几分钟（camoufox 本体约 1 GB）。不实时回显的话，调用方
-            # 只能对着一个没有任何输出的进程等——那和卡死在观感上没有区别。
             click.echo(line, err=True)
 
     if prepared.note:
@@ -911,13 +847,6 @@ def _run_plan(op: str, extra: str, browser_kind: str, as_json: bool, dry_run: bo
     returncode = execute(prepared.command, sink)
     ok = returncode == 0
 
-    # 装完要重启服务端，而且这一条必须说出来。
-    #
-    # Web 端装完会自己刷新适配器注册表（装的就是它那个进程），所以那边不需要重启。
-    # 从 CLI 装是**另一个进程**——磁盘上有了，正在跑的服务端却仍然按启动时那份
-    # 注册表工作。症状极具迷惑性：`ipclick status` 说 niquests 就绪（它探的是磁盘），
-    # 而 `ipclick fetch -a niquests` 收到"需要额外依赖"。不明写出来，调用方会去
-    # 反复重装那个已经装好的包。
     restart_required = ok and op in ("install", "uninstall")
     hint = (
         "正在跑的服务端进程还不认识它——重启 `ipclick run` 才生效"
@@ -989,11 +918,6 @@ def component_browser(extra: str, kind: str, dry_run: bool, as_json: bool) -> No
     _run_plan("browser", extra, kind, as_json, dry_run)
 
 
-# --------------------------------------------------------------------------- #
-# config
-# --------------------------------------------------------------------------- #
-
-
 @click.group("config")
 def config_group() -> None:
     """读生效配置。机密一律脱敏，只报"有没有"。
@@ -1002,8 +926,6 @@ def config_group() -> None:
     """
 
 
-#: 脱敏的键名（小写子串匹配）。宁可多脱一个不该脱的，也不要漏一个真机密——
-#: 这条命令的输出很可能被原样贴进日志、issue 或者一个模型的上下文里。
 _SECRET_HINTS = ("token", "secret", "password", "auth_key", "passwd", "credential")
 
 

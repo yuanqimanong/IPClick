@@ -29,13 +29,10 @@ from typing import Any
 from ipclick.utils.log_util import log
 
 
-#: 集群共享密钥的环境变量名。所有节点必须一致。
 CLUSTER_SECRET_ENV = "IPCLICK_CLUSTER_SECRET"
 
-#: 派生时混入的用途标签。防止同一密钥在别处（如 Web 会话签名）派生出相同的值。
 _PURPOSE = "ipclick-node:"
 
-#: 派生令牌的字节数。24 字节 = 192 位，base64url 后 32 个字符，够长且不啰嗦。
 _TOKEN_BYTES = 24
 
 

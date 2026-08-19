@@ -34,8 +34,6 @@ class Node:
     region: str = ""
     zone: str = ""
     tags: tuple[str, ...] = ()
-    #: 调用该节点时使用的令牌。留空则由 [CLUSTER].secret 派生
-    #: （见 :mod:`ipclick.cluster.tokens`），这样加节点不需要发放新凭据。
     token: str = ""
 
     @property
@@ -72,7 +70,7 @@ class Node:
 
         return cls(
             id=str(entry.get("id") or address),
-            host=host.strip("[]"),  # 兼容 IPv6 字面量写法 [::1]:9527
+            host=host.strip("[]"),
             port=port,
             weight=weight,
             region=str(entry.get("region", "")),
@@ -100,10 +98,6 @@ class NodeState:
         self._last_error: str = ""
         self._total_requests: int = 0
         self._total_failures: int = 0
-
-    # ---------------------------------------------------------------- #
-    # 读
-    # ---------------------------------------------------------------- #
 
     @property
     def status(self) -> NodeStatus:
@@ -134,10 +128,6 @@ class NodeState:
                 "total_requests": self._total_requests,
                 "total_failures": self._total_failures,
             }
-
-    # ---------------------------------------------------------------- #
-    # 写
-    # ---------------------------------------------------------------- #
 
     def record_probe(self, healthy: bool, detail: str, *, failure_threshold: int, recovery_threshold: int) -> bool:
         """记录一次健康探测结果。
@@ -197,23 +187,14 @@ class ClusterConfig:
 
     nodes: tuple[Node, ...] = ()
     strategy: str = "round_robin"
-    #: 连续探测失败多少次才摘除节点
     failure_threshold: int = 2
-    #: 连续探测成功多少次才把节点加回来
     recovery_threshold: int = 2
-    #: 探活间隔（秒）
     probe_interval: float = 10.0
-    #: 单次探活超时（秒）
     probe_timeout: float = 3.0
-    #: 一次请求最多换几个节点重试
     max_failover: int = 2
-    #: 服务端转发开关。见 :data:`FORWARD_MODES`。
     forward: str = "off"
-    #: 本节点在 nodes 里的 id。留空则按 [SERVER] 的监听地址自动识别。
     self_id: str = ""
-    #: 转发一次请求的超时（秒）。0 = 按任务自身超时 + 余量自动推算。
     forward_timeout: float = 0.0
-    #: 集群共享密钥（机密，正规位置是 .env 的 IPCLICK_CLUSTER_SECRET）
     secret: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -274,7 +255,6 @@ class ClusterConfig:
             max_failover=_count("max_failover", defaults.max_failover),
             forward=forward,
             self_id=str(config.get("self_id", "") or ""),
-            # 这个可以是 0（表示自动推算），所以不能用 _num（它把 0 当非法）
             forward_timeout=max(0.0, _as_float(config.get("forward_timeout"), defaults.forward_timeout)),
             secret=str(config.get("secret", "") or ""),
             extra={k: v for k, v in config.items() if k not in _KNOWN_KEYS},
@@ -288,12 +268,6 @@ def _as_float(value: Any, fallback: float) -> float:
         return fallback
 
 
-#: ``[CLUSTER].forward`` 的取值。
-#:
-#: * ``off``（默认）——服务端不转发。任务由谁收到就由谁执行；分发交给客户端侧的
-#:   :class:`~ipclick.cluster.client.ClusterDownloader`。
-#: * ``on`` ——服务端转发。入口节点按策略挑一个节点，挑到自己就本地执行、挑到
-#:   别人就把 ReqTask 原样转过去。调用方只需要知道一个地址。
 FORWARD_MODES = frozenset({"off", "on"})
 
 

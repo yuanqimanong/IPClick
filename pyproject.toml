@@ -1,6 +1,6 @@
 [project]
 name = "ipclick"
-version = "0.7.0"
+version = "1.0.0"
 description = "IPClick Tool"
 authors = [
     { name = "元气码农少女酱", email = "1276162429@qq.com" }
@@ -70,30 +70,11 @@ dev = [
     "grpcio-tools>=1.83.0,<2.0.0",
     "ruff>=0.16.1",
     "twine>=6.2.0,<7.0.0",
-    "pytest>=9.1.1",
-    "pytest-cov>=7.0.0",
-    "pytest-asyncio>=1.0.0",
-    # 并行跑测试。整套串行 72 秒、-n 4 只要 25 秒（2.8×），而 CI 上测试这一步
-    # 本来就占整个 job 的 79%（177s / 223s）。
-    "pytest-xdist>=3.6.0",
-    # 测试里现生成自签名证书，用来做真实的 TLS/mTLS 握手
-    "cryptography>=42.0.0",
 ]
 
 [project.scripts]
 ipclick = "ipclick.__main__:main"
 
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
-addopts = "-q --strict-markers"
-markers = [
-    "network: 需要真实网络访问的测试（默认不运行：-m 'not network'）",
-]
-# 异步测试无需逐个加 @pytest.mark.asyncio
-asyncio_mode = "auto"
-asyncio_default_fixture_loop_scope = "function"
 
 
 [tool.pyright]
@@ -177,7 +158,6 @@ unfixable = []
 [tool.ruff.lint.per-file-ignores]
 # 特定文件的忽略规则
 "__init__.py" = ["F401"]  # 未使用的导入
-"tests/**/*.py" = ["F401"]
 "test_*.py" = ["F401"]
 
 [tool.ruff.lint.isort]

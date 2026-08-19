@@ -31,7 +31,6 @@ from ipclick.exceptions import TransportError, ValidationError
 from ipclick.utils.log_util import log
 
 
-#: 单次续传之间的退避基数（秒）
 _RETRY_BACKOFF = 1.0
 
 
@@ -48,9 +47,7 @@ class ResumeResult:
     path: Path
     total_bytes: int
     status_code: int
-    #: 实际发起了几次请求。>1 说明中途断过并续传了
     attempts: int = 1
-    #: 因为资源变化而放弃已下载内容、从头重来的次数
     restarts: int = 0
     headers: dict[str, str] = field(default_factory=dict)
 
@@ -118,7 +115,6 @@ def download_to_file(
     headers: dict[str, str] = {}
     last_error: str = ""
 
-    # "wb" 开一次，后续续传用 "ab" 追加。中途重来时重新 "wb" 截断。
     mode = "wb"
 
     while attempts < max_attempts:
@@ -128,8 +124,6 @@ def download_to_file(
             request_headers = dict(request_kwargs.get("headers") or {})
             request_headers["Range"] = f"bytes={downloaded}-"
             if validator:
-                # 没有这一行，资源变了就会把新内容接到旧内容后面，
-                # 拼出一个校验不出来的损坏文件
                 request_headers["If-Range"] = validator
             request_kwargs["headers"] = request_headers
 
@@ -139,7 +133,6 @@ def download_to_file(
                 headers = dict(response.headers)
 
                 if not (200 <= status_code < 300):
-                    # 4xx/5xx 不重试：换多少次也是同样的结果
                     return ResumeResult(
                         path=target,
                         total_bytes=downloaded,
@@ -150,8 +143,6 @@ def download_to_file(
                     )
 
                 if downloaded > 0 and status_code != 206:
-                    # 要么服务端不支持 Range，要么 If-Range 判定资源已变。
-                    # 两种情况都必须丢掉已下载的部分，否则就是拼接两个版本。
                     log.info(f"{url} 无法从 {downloaded} 字节处续传（状态码 {status_code}），从头重下")
                     downloaded = 0
                     restarts += 1
@@ -180,7 +171,6 @@ def download_to_file(
             last_error = str(e)
             mode = "ab" if downloaded > 0 and range_ok else "wb"
             if not range_ok and downloaded > 0:
-                # 不支持 Range，重来必须从零开始
                 downloaded = 0
                 restarts += 1
             if attempts >= max_attempts:
@@ -193,9 +183,7 @@ def download_to_file(
             time.sleep(sleep_for)
             continue
 
-        # 走到这里说明这一轮读完了流且没有 trailer 错误
         if expected >= 0 and downloaded < expected:
-            # 服务端声明了长度但给的字节数不够——流被截断了，当作中断处理
             last_error = f"响应体不完整：已收到 {downloaded} / {expected} 字节"
             if attempts >= max_attempts:
                 break
@@ -238,8 +226,6 @@ def iter_resumable(
     range_ok = False
     attempts = 0
     last_error = ""
-    #: 不可重试的失败。分片已经交给调用方了，收不回来——继续重发只会让它
-    #: 拿到两个版本的混合体，所以这类错误必须原样上抛，不走下面的续传分支。
     fatal: TransportError | None = None
 
     while attempts < max_attempts:

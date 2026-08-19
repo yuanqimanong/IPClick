@@ -35,9 +35,6 @@ import importlib.util
 import threading
 
 
-#: 探测结果缓存。``find_spec`` 每次都要走一遍 sys.path 上的 finder，
-#: 而这些结论在一次"安装/卸载"之间是不变的——热路径上（适配器构造、
-#: 每次渲染页面）重复付这个代价没有意义。
 _installed_cache: dict[str, bool] = {}
 _version_cache: dict[str, str | None] = {}
 _lock = threading.Lock()
@@ -54,7 +51,6 @@ def installed(module: str) -> bool:
         return cached
 
     with _lock:
-        # 双检：拿锁期间可能已经有别的线程填好了
         if module in _installed_cache:
             return _installed_cache[module]
         _installed_cache[module] = _find(module)
@@ -65,9 +61,6 @@ def _find(module: str) -> bool:
     try:
         return importlib.util.find_spec(module) is not None
     except (ImportError, AttributeError, ValueError):
-        # ImportError/ModuleNotFoundError：父包缺失（本函数只收顶层名，理论上到不了）
-        # ValueError：模块已在 sys.modules 里但 __spec__ 是 None
-        # AttributeError：极少数自定义 finder 的残缺实现
         return False
 
 
@@ -83,8 +76,6 @@ def version(distribution: str) -> str | None:
         try:
             resolved: str | None = importlib.metadata.version(distribution)
         except Exception:
-            # PackageNotFoundError 是常态；损坏的 dist-info 会抛别的，
-            # 一个查版本号的调用不该把调用方带崩。
             resolved = None
         _version_cache[distribution] = resolved
         return resolved

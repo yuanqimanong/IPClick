@@ -30,46 +30,28 @@ import grpc
 from ipclick.utils.log_util import log
 
 
-#: 压缩模式。
-#:
-#: * ``auto``（默认）——够大且不像已压缩的二进制就压。
-#: * ``gzip`` ——一律压。链路带宽紧、CPU 富余时用。
-#: * ``none`` ——一律不压。同机通信或链路上已有压缩（如某些 service mesh）时用。
 MODES: Final = frozenset({"auto", "gzip", "none"})
 
-#: ``auto`` 的体积门槛（字节）。低于这个不压——一个普通 GET 请求约 200~400 字节，
-#: 压它省不下什么，还多两次内存拷贝。
 DEFAULT_THRESHOLD = 1024
 
-#: 判定"是不是已压缩的二进制"时采样多少字节。取前 512 字节足够区分文本和二进制，
-#: 而且与请求体大小无关——不能为了判断压不压而先把 50MB 全扫一遍。
 _SAMPLE_SIZE = 512
 
-#: 采样里控制字符的占比超过这个数就认为是二进制。
-#:
-#: 这个阈值曾经是 0.10，而均匀随机字节里"<0x20 且非 \t\n\r\f"的期望占比是
-#: 28/256 = 10.9% —— 正好压在阈值线上，于是对随机/加密数据的判定成了掷硬币
-#: （实测 400 次里有约 5% 判错）。而随机数据恰恰是最不该压的东西。
-#: 真实文本（JSON、表单、HTML、UTF-8）里这类控制字符的占比是 0，
-#: 所以把线放到 2% 对文本毫无风险，对二进制却是压倒性的区分。
 _BINARY_RATIO = 0.02
 
-#: 常见的已压缩 / 二进制格式的魔数。命中就直接判定不压，连采样都不用。
 _MAGIC_PREFIXES: Final = (
-    b"\x1f\x8b",  # gzip
-    b"\x50\x4b\x03\x04",  # zip / docx / xlsx
+    b"\x1f\x8b",
+    b"\x50\x4b\x03\x04",
     b"\x89PNG",
-    b"\xff\xd8\xff",  # jpeg
+    b"\xff\xd8\xff",
     b"GIF8",
-    b"RIFF",  # webp / wav
-    b"BZh",  # bzip2
-    b"\xfd7zXZ",  # xz
-    b"\x28\xb5\x2f\xfd",  # zstd
+    b"RIFF",
+    b"BZh",
+    b"\xfd7zXZ",
+    b"\x28\xb5\x2f\xfd",
     b"%PDF",
-    b"\x00\x00\x00",  # mp4 等 box 结构
+    b"\x00\x00\x00",
 )
 
-#: 文本里正常会出现的控制字符（制表、换行、回车、换页）。
 _TEXT_CONTROL = frozenset({0x09, 0x0A, 0x0C, 0x0D})
 
 
@@ -150,7 +132,6 @@ def choose(pb_request: Any, mode: str = "auto", threshold: int = DEFAULT_THRESHO
     if mode == "gzip":
         return grpc.Compression.Gzip
 
-    # ByteSize() 是 protobuf 自己缓存的序列化长度，不会真的序列化一遍
     try:
         size = int(pb_request.ByteSize())
     except Exception:  # pragma: no cover - 非 protobuf 对象
@@ -158,8 +139,6 @@ def choose(pb_request: Any, mode: str = "auto", threshold: int = DEFAULT_THRESHO
     if size < threshold:
         return None
 
-    # 体积主要来自二进制请求体时不压：压不动还费 CPU。
-    # 反过来说，脚本 / JSON / 表单这类文本请求体一定会走到 Gzip 分支。
     body: bytes = getattr(pb_request, "data", b"") or b""
     if body and len(body) * 2 > size and looks_incompressible(body):
         return None

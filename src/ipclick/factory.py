@@ -25,7 +25,6 @@ from ipclick.utils.log_util import log
 from ipclick.utils.secure_util import SecureUtil
 
 
-#: ``[GENERAL].mode`` 的合法取值
 CLIENT_MODES: frozenset[str] = frozenset({"standalone", "cluster", "auto"})
 
 
@@ -73,10 +72,8 @@ def create_client(config_path: str | None = None, **kwargs: Any) -> Any:
     mode = resolve_mode(config)
 
     if mode == "cluster":
-        # 延迟导入：cluster 依赖 sdk，顶层导入会形成循环
         from ipclick.cluster import ClusterDownloader
 
-        # host/port 在集群模式下没有意义，传了说明调用方误会了
         for key in ("host", "port"):
             if kwargs.pop(key, None) is not None:
                 log.warning(f"集群模式下忽略 {key} 参数——目标地址来自 [CLUSTER] 的节点池")
@@ -86,17 +83,6 @@ def create_client(config_path: str | None = None, **kwargs: Any) -> Any:
     return Downloader(config_path=config_path, **kwargs)
 
 
-# ---------------------------------------------------------------------- #
-# 缓存实例与全局代理
-#
-# 这几个原本在 sdk.py 里，但让 sdk 去解释 [GENERAL].mode 就得 import 本模块，
-# 而本模块要 import cluster、cluster 又 import sdk——形成导入环。放在这里，
-# 依赖方向就只剩单向的 factory -> {sdk, cluster}。
-# 公开路径 `from ipclick import downloader / get_downloader` 完全不变。
-# ---------------------------------------------------------------------- #
-
-#: 值可能是 Downloader 或 ClusterDownloader，取决于 [GENERAL].mode。
-#: 用普通 dict：defaultdict 会在任何一次误访问时凭空造出一个客户端。
 _downloader_cache: dict[str, Any] = {}
 _cache_lock = threading.Lock()
 
@@ -120,7 +106,6 @@ def get_downloader(config_path: str | None = None, host: str | None = None, port
     with _cache_lock:
         if key not in _downloader_cache:
             if host is not None or port is not None:
-                # 点名了地址就别再去解释 mode——调用方要的就是这个节点
                 from ipclick.sdk import Downloader
 
                 _downloader_cache[key] = Downloader(config_path=config_path, host=host, port=port)
@@ -155,7 +140,6 @@ class _LazyDownloader:
         return "<ipclick.downloader (lazy)>"
 
 
-#: 向后兼容的别名：downloader.get(...) 等用法保持不变
 downloader: Any = _LazyDownloader()
 
 

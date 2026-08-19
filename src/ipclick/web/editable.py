@@ -48,14 +48,11 @@ class Field:
     key: str
     label: str
     kind: FieldKind
-    #: 改完是否要重启才生效。要如实标出来——改完没反应会让人以为保存失败。
     restart: bool = True
     minimum: float | None = None
     maximum: float | None = None
     choices: tuple[str, ...] = ()
     hint: str = ""
-    #: 配置文件里没写这一项时展示什么。必须填**代码里真正的默认值**——
-    #: 展示成空白的话，用户一保存就把空值写进配置，等于悄悄改了行为。
     default: Any = None
 
     @property
@@ -89,10 +86,6 @@ class Field:
         return value
 
 
-#: 可编辑项，按展示分组。
-#:
-#: 组名前缀决定它落在配置页的哪个分页：``集群`` 开头的进「集群设置」，
-#: 其余进「基础设置」。见 :func:`groups_for`。
 GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
     (
         "服务端",
@@ -276,9 +269,6 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         ),
     ),
     (
-        # 和「按 host 限流」分开：这一组是**总量**（整个进程对外开多少连接），
-        # 那一组是**单个 host** 的配额。混在一起时人会以为 max_connections 是
-        # "每个站点最多 100 条"。
         "连接池",
         (
             Field(
@@ -370,8 +360,6 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
             Field("BROWSER", "enabled", "启用浏览器适配器", "bool"),
             Field("BROWSER", "engine", "渲染引擎", "choice", choices=("auto", *sorted(ENGINE_NAMES))),
             Field("BROWSER", "headless", "无头模式", "bool"),
-            # minimum=0 而不是 1：0 是"按可用内存自动推导"的开关，不是非法小值。
-            # 写成 1 的话这个特性从 Web 控制台根本填不进去。
             Field(
                 "BROWSER",
                 "max_pages",
@@ -380,11 +368,8 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
                 minimum=0,
                 maximum=200,
             ),
-            # 这一项在配置里是 [BROWSER.timeout].page_load，不是 [BROWSER].page_timeout
             Field("BROWSER.timeout", "page_load", "页面加载超时（秒）", "float", minimum=1, maximum=600, default=30),
             Field("BROWSER.timeout", "script_exec", "脚本执行超时（秒）", "float", minimum=1, maximum=600, default=60),
-            # 配置键叫 browser，BrowserSettings 里的属性叫 kind。这里必须写配置键——
-            # 按属性名写会生成一个 [BROWSER].kind，谁都不读，而页面上看着像生效了。
             Field(
                 "BROWSER",
                 "browser",
@@ -438,9 +423,6 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         ),
     ),
     (
-        # [PROXY] 是给 HTTP 适配器用的"配置级代理"，也就是请求里写 proxy=true
-        # 和「试一试」里选「用配置里的 [PROXY]」时走的那一份。
-        # 和 [BROWSER.proxy] 不是一回事，后者只管浏览器渲染。
         "代理",
         (
             Field("PROXY", "host", "代理主机", "str", hint="留空表示不配置级代理"),
@@ -462,8 +444,6 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
                 hint="用三方隧道代理时填它，填了就不用上面的主机+端口。下面三项是它的参数",
             ),
             Field("PROXY", "channel_name", "隧道通道名", "str"),
-            # toml 里默认是空字符串、ProxyConfig 声明的是 int|None。用 str 才能
-            # 保住"留空"这个状态——用 int 会被迫写一个 0 进去，那是另一个意思。
             Field("PROXY", "session_ttl", "会话保持时长", "str", hint="留空表示不指定"),
             Field("PROXY", "country_code", "出口国家", "str", hint="隧道代理支持时才有意义，例如 US"),
         ),
@@ -499,10 +479,6 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         ),
     ),
     (
-        # 注意：``forward`` **不在**这里。它在集群设置页顶部单独一个开关——
-        # 那一项决定了下面的节点参不参与路由，摊在 fieldset 中间会被当成一个
-        # 普通选项划过去。同一个配置项在一页上出现两次则更糟：两个控件显示的是
-        # 同一个值，用户改了其中一个、另一个没跟着变，保存时以谁为准就成了谜。
         "集群",
         (
             Field("CLUSTER", "self_id", "本节点 id", "str", hint="留空则按监听地址自动识别"),
@@ -536,8 +512,6 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         ),
     ),
     (
-        # [WEB] 里只有这一项可编辑。用户名密码仍然只能改文件（见模块开头），
-        # 而主题是纯外观、改错了最坏结果是"页面颜色不对"，没有安全后果。
         "Web 管理端",
         (
             Field(
@@ -569,10 +543,8 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
     ),
 )
 
-#: 按表单字段名索引。
 FIELDS: dict[str, Field] = {f.name: f for _, fields in GROUPS for f in fields}
 
-#: 归到「集群设置」那一页的组名。其余全在「基础设置」。
 CLUSTER_GROUPS: frozenset[str] = frozenset({"集群"})
 
 
@@ -618,9 +590,6 @@ def parse_form(form: dict[str, str]) -> tuple[dict[str, dict[str, Any]], list[st
 
     for name, field in FIELDS.items():
         if field.kind == "bool":
-            # 复选框未勾选时浏览器不会提交这个键，所以要靠一个同名的隐藏标记
-            # 判断"这一项到底在不在本次表单里"，否则每次保存都会把未展示的
-            # 复选框写成 false。
             if f"__present__{name}" not in form:
                 continue
             value: Any = name in form
@@ -656,7 +625,7 @@ def parse_nodes(form: dict[str, str]) -> list[dict[str, Any]]:
     for index in sorted(indexes):
         address = form.get(f"node_address_{index}", "").strip()
         if not address:
-            continue  # 清空地址 = 删除这一行
+            continue
         node_id = form.get(f"node_id_{index}", "").strip() or address
         try:
             weight = max(1, int(form.get(f"node_weight_{index}", "100") or 100))
@@ -664,7 +633,6 @@ def parse_nodes(form: dict[str, str]) -> list[dict[str, Any]]:
             weight = 100
         nodes.append({"id": node_id, "address": address, "weight": weight})
 
-    # 新增行
     new_address = form.get("new_node_address", "").strip()
     if new_address:
         new_id = form.get("new_node_id", "").strip() or new_address
@@ -690,7 +658,6 @@ def validate_nodes(nodes: list[dict[str, Any]]) -> list[str]:
             errors.append(f"第 {index + 1} 行：{e}")
             continue
         if entry["id"] in seen:
-            # 重复 id 会让轮询与健康状态错乱：两台机器共用一份状态
             errors.append(f"节点 id {entry['id']!r} 重复")
         seen.add(entry["id"])
     return errors
