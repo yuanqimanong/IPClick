@@ -72,10 +72,9 @@ def _serve(tokens: tuple[str, ...], monkeypatch: pytest.MonkeyPatch):
                 reuseport=False,
             )
 
-        try:
+        with contextlib.suppress(Exception):
+            # 循环被 stop() 打断时会抛，线程正常退出即可
             loop.run_until_complete(main())
-        except Exception:
-            pass
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
