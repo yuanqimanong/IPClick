@@ -34,6 +34,30 @@ def _pretend_missing(monkeypatch: pytest.MonkeyPatch, *engines: str) -> None:
     monkeypatch.setattr(be.module_probe, "installed", lambda name: name not in missing)
 
 
+# 需要真装了浏览器内核才能跑的用例，统一用这个跳过。
+#
+# 项目里 test_niquests_adapter.py / test_drission_adapter.py 早就是这么做的
+# （模块级 pytestmark + skipif），但这个文件一直没跟上：没装 extras 时它会
+# **硬失败**而不是跳过。后果是任何没装浏览器内核的贡献者一跑测试就看到一片
+# 红色 FAILED，分不清是自己改坏了还是环境缺包——而后者才是真相。
+#
+# 这里不用模块级 pytestmark：本文件 57 个用例里只有 7 个真的需要内核，
+# 其余（引擎选择、配置解析、安装提示文案）纯逻辑，装不装都该跑。
+def _engine_installed(module: str) -> bool:
+    from ipclick.utils import module_probe
+
+    return module_probe.installed(module)
+
+
+needs_playwright = pytest.mark.skipif(
+    not _engine_installed("playwright"), reason="playwright 未安装（CI 装了 --all-extras）"
+)
+needs_patchright = pytest.mark.skipif(
+    not _engine_installed("patchright"), reason="patchright 未安装（CI 装了 --all-extras）"
+)
+needs_camoufox = pytest.mark.skipif(not _engine_installed("camoufox"), reason="camoufox 未安装（CI 装了 --all-extras）")
+
+
 class TestPlatformDefault:
     def test_windows_uses_drissionpage(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(sys, "platform", "win32")
@@ -92,6 +116,7 @@ class TestGenericBrowserAdapter:
     def test_none_settings_still_resolves(self):
         assert resolve_browser_adapter_name(None) in {"camoufox", "DrissionPage"}
 
+    @needs_playwright
     def test_get_adapter_honours_generic_name(self):
         settings = BrowserSettings(engine="playwright", executable_path="/usr/bin/chromium", no_sandbox=True)
         adapter = get_adapter(GENERIC_BROWSER_NAME, None, settings)
@@ -122,6 +147,7 @@ class TestEngineAdapters:
         if cls is not DrissionPageAdapter:
             assert cls.engine == engine
 
+    @needs_playwright
     def test_pinned_engine_ignores_config(self):
         """点名 playwright 就得是 playwright，不能被 [BROWSER].engine 改掉——
         否则客户端指定引擎这件事就没意义了。"""
@@ -132,6 +158,7 @@ class TestEngineAdapters:
         finally:
             adapter.close()
 
+    @needs_playwright
     def test_disabled_blocks_every_engine(self):
         for cls in (PlaywrightAdapter, PatchrightAdapter, CamoufoxAdapter, DrissionPageAdapter):
             with pytest.raises(AdapterError, match="enabled = false"):
@@ -163,6 +190,7 @@ class TestFingerprintManaged:
     def test_plain_playwright_is_not(self):
         assert "playwright" not in be.FINGERPRINT_MANAGED
 
+    @needs_camoufox
     def test_managed_engines_skip_viewport_and_ua(self):
         """camoufox 自己生成一整套自洽指纹。再盖一层 viewport / UA 只会自相矛盾，
         反而比不伪装更容易被认出来。"""
@@ -185,6 +213,7 @@ class TestFingerprintManaged:
         finally:
             adapter.close()
 
+    @needs_playwright
     def test_unmanaged_engines_still_set_them(self):
         settings = BrowserSettings(engine="playwright", user_agent="Custom/1.0")
         adapter = PlaywrightAdapter(browser_settings=settings)
@@ -410,6 +439,7 @@ class TestNoSilentDownload:
         assert called == [], "拦不住就意味着会去下载"
 
 
+@needs_camoufox
 class TestCamoufoxNeverDownloadsOnDemand:
     """camoufox 缺本体时的默认行为是当场下载（本机实测 2 分钟下了 440 MB）。
 

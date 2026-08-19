@@ -23,7 +23,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        # ⚠️ 只测最新版，而 pyproject 里声明的是 requires-python = ">=3.11"。
+        # 也就是说 3.11 / 3.12 / 3.13 是**声称支持但不做验证**的——在那几个版本上
+        # 装不上或跑挂，CI 不会告诉你。这是有意的取舍（换 CI 时间），不是遗漏；
+        # 哪天想收回这个取舍，把它们加回这个数组即可，别的都不用动。
+        #
+        # 另外注意别写成 "3.14t"：自由线程版的 SOABI 是 cpython-314t，
+        # grpcio / orjson 都没发对应轮子，会退化成源码编译并卡在 Rust 工具链上。
+        python-version: ["3.14"]
 
     steps:
       - uses: actions/checkout@v4

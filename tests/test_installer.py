@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import io
 
+import pytest
+
+from ipclick.utils import module_probe
 from ipclick.web.installer import (
     Job,
     Plan,
@@ -15,6 +18,14 @@ from ipclick.web.installer import (
     _parse_percent,  # pyright: ignore[reportPrivateUsage]
     _parse_phase,  # pyright: ignore[reportPrivateUsage]
     strip_ansi,
+)
+
+
+# 这个用例要真的存在 playwright 的浏览器目录才有意义。没装时它此前是**硬失败**，
+# 让没装浏览器内核的贡献者一跑测试就看到红色 FAILED，分不清是自己改坏了还是缺包。
+# CI 装了 --all-extras，覆盖率不受影响。
+needs_playwright = pytest.mark.skipif(
+    not module_probe.installed("playwright"), reason="playwright 未安装（CI 装了 --all-extras）"
 )
 
 
@@ -120,6 +131,7 @@ class TestChildEnv:
 
 
 class TestRevisions:
+    @needs_playwright
     def test_playwright_and_patchright_are_counted_separately(self, tmp_path, monkeypatch):
         """两者共用 ms-playwright 目录，但钉的 chromium revision 不同。
         对它们报整个目录的大小是错的——两个组件会显示同一个数。"""
