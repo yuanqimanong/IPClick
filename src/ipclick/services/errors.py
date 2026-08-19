@@ -1,3 +1,5 @@
+"""将服务层异常统一映射为 gRPC 状态、响应消息和追踪标签。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -19,12 +21,16 @@ INTERNAL_ERROR_LABEL = "internal_error"
 
 
 class CallerGone(Exception):
+    """任务执行前发现调用方已断开。"""
+
     pass
 
 
 @final
 @dataclass(frozen=True)
 class Failure:
+    """对外安全的失败描述及其观测属性。"""
+
     message: str
     code: grpc.StatusCode | None = None
     label: str = ""
@@ -52,6 +58,7 @@ _RULES: tuple[_Rule, ...] = (
 
 
 def classify(error: Exception) -> Failure:
+    """按最具体规则分类异常，未知异常不泄露原始文本。"""
     for rule in _RULES:
         if isinstance(error, rule.error):
             message = CALLER_GONE_MESSAGE if isinstance(error, CallerGone) else str(error)
@@ -72,6 +79,7 @@ def report(
     recorder: TraceRecorder,
     context: object,
 ) -> None:
+    """设置 gRPC 状态、记录拒绝计数，并按严重度写日志。"""
     if failure.label:
         recorder.record_rejected(failure.label)
 

@@ -1,3 +1,5 @@
+"""执行 URL 准入检查并合并查询参数。"""
+
 from dataclasses import dataclass, field
 import ipaddress
 import socket
@@ -5,6 +7,7 @@ from typing import Any
 from urllib.parse import urlencode, urlparse, urlsplit, urlunparse
 
 from ipclick.exceptions import URLNotAllowedError
+from ipclick.utils.coerce import as_bool
 
 
 DEFAULT_ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
@@ -19,10 +22,13 @@ _METADATA_ADDRESSES: frozenset[str] = frozenset(
 
 
 def _is_metadata_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return str(ip) in _METADATA_ADDRESSES
+    """判断地址是否为已知云厂商元数据端点。"""
+    candidate = ip.ipv4_mapped if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped else ip
+    return str(candidate) in _METADATA_ADDRESSES
 
 
 def _is_private_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """判断地址是否属于不应从代理访问的非公网范围。"""
     return bool(
         ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified
     )
@@ -30,6 +36,8 @@ def _is_private_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bo
 
 @dataclass(frozen=True)
 class URLPolicy:
+    """SSRF 准入策略，包括协议、元数据、内网和主机白名单。"""
+
     allowed_schemes: frozenset[str] = DEFAULT_ALLOWED_SCHEMES
     block_metadata_endpoints: bool = True
     block_private_networks: bool = False
@@ -37,6 +45,7 @@ class URLPolicy:
 
     @classmethod
     def from_config(cls, security_config: dict[str, object] | None) -> "URLPolicy":
+        """从 ``[SECURITY]`` 配置构造不可变策略。"""
         config = dict(security_config or {})
 
         schemes = config.get("allowed_schemes")
@@ -55,13 +64,14 @@ class URLPolicy:
 
         return cls(
             allowed_schemes=allowed_schemes,
-            block_metadata_endpoints=bool(config.get("block_metadata_endpoints", True)),
-            block_private_networks=bool(config.get("block_private_networks", False)),
+            block_metadata_endpoints=as_bool(config.get("block_metadata_endpoints"), True),
+            block_private_networks=as_bool(config.get("block_private_networks"), False),
             allowlist=allowlist,
         )
 
 
 def _resolve_host(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """解析主机的全部可见地址；字面量 IP 不经过 DNS。"""
     try:
         return [ipaddress.ip_address(host)]
     except ValueError:
@@ -83,6 +93,7 @@ def _resolve_host(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Addre
 
 
 def validate_url(url: str, policy: URLPolicy | None = None) -> None:
+    """按策略验证 URL；拒绝时抛出 ``URLNotAllowedError``。"""
     policy = policy or URLPolicy()
 
     try:
@@ -104,12 +115,19 @@ def validate_url(url: str, policy: URLPolicy | None = None) -> None:
         raise URLNotAllowedError("URL 缺少主机名")
 
     if host.lower() in policy.allowlist:
+        # 白名单代表明确授权，必须先于元数据和内网地址检查。
         return
 
     if not (policy.block_metadata_endpoints or policy.block_private_networks):
         return
 
-    for ip in _resolve_host(host):
+    resolved = _resolve_host(host)
+    if not resolved:
+        # 安全开关开启时不能因 DNS 临时失败而跳过检查，随后由适配器再次解析并访问。
+        raise URLNotAllowedError(f"无法解析主机 {host!r}，为避免绕过 SSRF 准入已拒绝请求")
+
+    # 任一 A/AAAA 记录落入禁区就拒绝，避免多地址主机绕过准入。
+    for ip in resolved:
         if policy.block_metadata_endpoints and _is_metadata_address(ip):
             raise URLNotAllowedError(f"禁止访问云元数据地址: {host} -> {ip}")
         if policy.block_private_networks and _is_private_address(ip):
@@ -119,10 +137,13 @@ def validate_url(url: str, policy: URLPolicy | None = None) -> None:
 
 
 def merge_query_params(url: str, params: dict[str, Any] | None) -> str:
+    """在保留原查询串的情况下追加非 ``None`` 参数。"""
     if not params:
         return url
     parsed = urlparse(url)
     extra = urlencode({k: v for k, v in params.items() if v is not None}, doseq=True)
+    if not extra:
+        return url
     query = f"{parsed.query}&{extra}" if parsed.query else extra
     return urlunparse(parsed._replace(query=query))
 

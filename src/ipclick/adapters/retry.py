@@ -1,14 +1,17 @@
+"""适配器级同步/异步指数退避重试策略与装饰器。"""
+
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 import functools
+import math
 from random import uniform
 import time
 from typing import Any, Protocol, final
 
-from ipclick.adapters.settings import DEFAULT_RETRY_STATUS_CODES, AdapterSettings
+from ipclick.adapters.settings import DEFAULT_RETRY_STATUS_CODES, HARD_MAX_RETRIES, AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError
 from ipclick.trace import get_recorder
@@ -27,6 +30,8 @@ _UNKNOWN_ADAPTER = "unknown"
 
 
 class RetryHost(Protocol):
+    """重试装饰器从适配器宿主读取的最小属性集合。"""
+
     adapter_name: str
     settings: AdapterSettings
     max_retries: int
@@ -40,8 +45,10 @@ def _delay_from(value: Any, default: float) -> float:
         if isinstance(value, (tuple, list)):
             if len(value) != 2:
                 return default
-            return uniform(float(value[0]), float(value[1]))
-        return float(value)
+            delay = uniform(float(value[0]), float(value[1]))
+        else:
+            delay = float(value)
+        return delay if math.isfinite(delay) and delay >= 0 else default
     except (TypeError, ValueError):
         return default
 
@@ -49,6 +56,8 @@ def _delay_from(value: Any, default: float) -> float:
 @final
 @dataclass(frozen=True)
 class RetryPolicy:
+    """一次调用解析后的不可变重试策略。"""
+
     max_retries: int = DEFAULT_MAX_RETRIES
     base_delay: float = DEFAULT_BASE_DELAY
     exponent: float = 2.0
@@ -58,6 +67,7 @@ class RetryPolicy:
 
     @classmethod
     def resolve(cls, host: object, call_kwargs: dict[str, Any]) -> RetryPolicy:
+        """合并调用参数、适配器属性和全局设置。"""
         settings: AdapterSettings | None = getattr(host, "settings", None)
         defaults = cls()
 
@@ -65,8 +75,10 @@ class RetryPolicy:
         if requested_retries is None:
             requested_retries = getattr(host, "max_retries", defaults.max_retries)
         try:
-            max_retries = max(0, int(requested_retries))
-        except (TypeError, ValueError):
+            # 直接调用适配器也可能绕过 DTO 和 RPC 校验，这里保留最后一道
+            # 防御性硬上限，避免构造近乎无限的重试循环。
+            max_retries = min(max(0, int(requested_retries)), HARD_MAX_RETRIES)
+        except (TypeError, ValueError, OverflowError):
             max_retries = defaults.max_retries
 
         requested_delay = call_kwargs.get("retry_delay")
@@ -86,37 +98,46 @@ class RetryPolicy:
 
     @property
     def total_attempts(self) -> int:
+        """返回首次调用加重试次数。"""
         return self.max_retries + 1
 
     def retries_status(self, status: int | None) -> bool:
+        """判断 HTTP 状态是否需要重试且未被调用方显式允许。"""
         if not isinstance(status, int):
             return False
         return status in self.retry_codes and status not in self.allowed_status_codes
 
     def delay_for(self, attempt: int) -> float:
+        """计算带随机抖动且受上限约束的退避时间。"""
         capped = min(self.base_delay * (self.exponent**attempt), self.max_backoff)
         return capped * uniform(*JITTER_RANGE)
 
 
 @final
 class RetryLoop:
+    """记录单次逻辑请求的尝试次数、最后错误和追踪事件。"""
+
     def __init__(self, policy: RetryPolicy, url: str, adapter_name: str) -> None:
+        """绑定策略及用于日志和追踪的请求身份。"""
         self.policy: RetryPolicy = policy
         self.url: str = url
         self.adapter_name: str = adapter_name
         self.last_error: Exception | None = None
 
     def attempts(self) -> Iterator[int]:
+        """依次产出从零开始的尝试序号。"""
         return iter(range(self.policy.total_attempts))
 
     @staticmethod
     def stamp(result: Response, attempt: int, started: float) -> Response:
+        """补齐响应耗时和实际尝试次数。"""
         if result.elapsed_ms == 0:
             result.elapsed_ms = int((time.monotonic() - started) * 1000)
         result.attempts = attempt + 1
         return result
 
     def on_result(self, attempt: int, result: Response) -> float | None:
+        """处理可重试状态码，返回等待时间或 ``None``。"""
         if attempt >= self.policy.max_retries or not self.policy.retries_status(result.status_code):
             return None
         delay = self.policy.delay_for(attempt)
@@ -128,6 +149,7 @@ class RetryLoop:
         return delay
 
     def on_error(self, attempt: int, error: Exception) -> float | None:
+        """记录传输异常，返回等待时间或 ``None``。"""
         self.last_error = error
         if attempt >= self.policy.max_retries:
             return None
@@ -140,6 +162,7 @@ class RetryLoop:
         return delay
 
     def give_up(self, attempt: int) -> Response:
+        """把最后异常转换成稳定的错误响应。"""
         error = self.last_error or Exception("Max retries exceeded")
         return Response.error_response(self.url, error, attempts=attempt + 1)
 
@@ -151,6 +174,8 @@ def _loop_for(host: object, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Re
 
 
 def retry() -> Callable[[Callable[..., Response]], Callable[..., Response]]:
+    """装饰同步适配器方法，使异常和指定状态码按策略重试。"""
+
     def decorator(func: Callable[..., Response]) -> Callable[..., Response]:
         @functools.wraps(func)
         def wrapper(self: Any, *args: Any, **kwargs: Any) -> Response:
@@ -181,6 +206,8 @@ def retry() -> Callable[[Callable[..., Response]], Callable[..., Response]]:
 
 
 def aretry() -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """异步版本的适配器重试装饰器。"""
+
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(func)
         async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Response:

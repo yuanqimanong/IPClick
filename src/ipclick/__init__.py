@@ -1,3 +1,8 @@
+"""IPClick 公共 API。
+
+应用侧通常只需从本模块导入同步客户端、请求/响应模型和公共异常。
+"""
+
 import importlib.metadata
 
 from ipclick.dto.models import (

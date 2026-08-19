@@ -6,6 +6,7 @@ import pytest
 
 from ipclick.config_loader import loader
 from ipclick.config_loader.loader import candidate_names, example_config, load_config
+from ipclick.exceptions import ConfigError
 
 
 def test_candidate_names_prefers_the_port_specific_file() -> None:
@@ -66,10 +67,16 @@ def test_empty_environment_override_is_ignored(monkeypatch: pytest.MonkeyPatch) 
     assert load_config()["SERVER"]["port"] == 9528
 
 
-def test_broken_toml_does_not_take_down_the_loader(tmp_path: Path) -> None:
+def test_broken_toml_is_rejected_instead_of_silently_using_defaults(tmp_path: Path) -> None:
     (tmp_path / "ipclick.toml").write_text("this is not = = toml", encoding="utf-8")
 
-    assert load_config()["SERVER"]["port"] == 9528
+    with pytest.raises(ConfigError, match="不是合法 TOML"):
+        load_config()
+
+
+def test_missing_explicit_config_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="不存在"):
+        load_config(tmp_path / "missing.toml")
 
 
 def test_example_config_is_the_shipped_default() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
 import grpc
@@ -129,3 +130,23 @@ def test_snapshot_is_json(service: ComponentService) -> None:
     parsed = json.loads(service.snapshot_json())
     assert isinstance(parsed, list)
     assert all("name" in item for item in parsed)
+
+
+def test_installer_is_created_once_under_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
+    import ipclick.web.installer as installer_module
+
+    created: list[FakeInstaller] = []
+
+    def build() -> FakeInstaller:
+        manager = FakeInstaller()
+        created.append(manager)
+        return manager
+
+    monkeypatch.setattr(installer_module, "InstallManager", build)
+    component_service = ComponentService(Settings({"CLUSTER": {"allow_remote_install": True}}))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        managers = list(pool.map(lambda _index: component_service.installer(), range(32)))
+
+    assert len(created) == 1
+    assert all(manager is created[0] for manager in managers)

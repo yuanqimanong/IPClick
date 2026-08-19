@@ -1,3 +1,5 @@
+"""面向运维诊断的节点连通性与内部鉴权探测。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,6 +24,8 @@ DEFAULT_PROBE_TIMEOUT = 5.0
 @final
 @dataclass(frozen=True)
 class ProbeResult:
+    """一次节点探测的结构化结果。"""
+
     node_id: str
     address: str
     reachable: bool
@@ -36,9 +40,11 @@ class ProbeResult:
 
     @property
     def ok(self) -> bool:
+        """节点可达且未明确鉴权失败时视为可用。"""
         return self.reachable and self.authenticated is not False
 
     def snapshot(self) -> dict[str, Any]:
+        """返回可直接输出为 JSON 的诊断数据。"""
         return {
             "node_id": self.node_id,
             "address": self.address,
@@ -63,6 +69,7 @@ def probe_node(
     timeout: float = DEFAULT_PROBE_TIMEOUT,
     from_node: str = "",
 ) -> ProbeResult:
+    """先走免鉴权健康检查，再用节点令牌调用 Ping 验证身份。"""
     settings = tls or TLSSettings()
     started = time.monotonic()
 
@@ -99,6 +106,7 @@ def _ping(
     started: float,
     from_node: str,
 ) -> ProbeResult:
+    """调用需要鉴权的 Ping，确认健康端点背后确为目标节点。"""
     target = node.address
     channel = open_channel_for(target, tls)
     try:

@@ -1,3 +1,5 @@
+"""集中定义客户端与服务端必须对齐的 gRPC channel 参数。"""
+
 from __future__ import annotations
 
 from typing import Any, Final
@@ -37,6 +39,7 @@ def _keepalive() -> list[tuple[str, Any]]:
 
 
 def client_options(tls: TLSSettings | None = None) -> list[tuple[str, Any]]:
+    """返回客户端消息上限、keepalive、代理和 TLS 选项。"""
     return [
         *_message_limits(),
         *_keepalive(),
@@ -46,6 +49,7 @@ def client_options(tls: TLSSettings | None = None) -> list[tuple[str, Any]]:
 
 
 def server_options(*, max_concurrent_streams: int, reuseport: bool = False) -> list[tuple[str, Any]]:
+    """返回与客户端 keepalive 契约兼容的服务端选项。"""
     return [
         *_message_limits(),
         *_keepalive(),

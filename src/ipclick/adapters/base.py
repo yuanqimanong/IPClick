@@ -1,3 +1,5 @@
+"""下载适配器抽象接口、流事件和浏览器脚本校验辅助函数。"""
+
 from abc import ABC, abstractmethod
 import asyncio
 from collections.abc import AsyncIterator, Iterator
@@ -21,6 +23,8 @@ UA_POOL_SIZE = 32
 
 @dataclass
 class StreamHeader:
+    """适配器流的第一条事件，描述响应元数据或建立流时的错误。"""
+
     url: str
     status_code: int
     headers: dict[str, str] = field(default_factory=dict)
@@ -38,6 +42,7 @@ _JS_FUNCTION_PREFIXES = ("function", "async", "(", "=>")
 
 
 def normalize_js(script: str) -> str:
+    """将表达式或函数体规范化为页面 ``evaluate`` 可执行的函数。"""
     text = script.strip()
     if not text:
         return text
@@ -58,6 +63,7 @@ _PERMANENT_NAV_ERRORS = (
 
 
 def raise_if_permanent_navigation_error(error: Exception) -> None:
+    """将无需重试的浏览器导航错误转换为参数校验错误。"""
     text = str(error)
     for marker in _PERMANENT_NAV_ERRORS:
         if marker in text:
@@ -65,6 +71,7 @@ def raise_if_permanent_navigation_error(error: Exception) -> None:
 
 
 def raise_if_script_error(error: Exception, script: str | None) -> None:
+    """将明确的用户脚本语法/运行错误转换为参数校验错误。"""
     if not script:
         return
     text = str(error)
@@ -75,9 +82,12 @@ def raise_if_script_error(error: Exception, script: str | None) -> None:
 
 
 class DownloaderAdapter(ABC):
+    """所有本地 HTTP/浏览器下载适配器的统一接口。"""
+
     adapter_name: str = "base_downloader_adapter"
 
     def __init__(self, settings: AdapterSettings | None = None):
+        """应用通用超时、重试、环境代理和 User-Agent 设置。"""
         self.settings: AdapterSettings = settings or AdapterSettings()
         self._ua_lock: threading.Lock = threading.Lock()
         self._ua_pool_cache: list[str] | None = None
@@ -119,15 +129,18 @@ class DownloaderAdapter(ABC):
         allowed_status_codes: list[Any] | None = None,
         kwargs: str | None = None,
     ) -> Response:
+        """执行一次逻辑下载；具体传输由子类实现。"""
         raise NotImplementedError
 
     supports_async: bool = False
 
     async def adownload(self, url: str, **kwargs: Any) -> Response:
+        """在线程池中调用同步实现，供不支持原生异步的适配器兜底。"""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, functools.partial(self.download, url, **kwargs))
 
     async def adownload_stream(self, url: str, **kwargs: Any) -> "AsyncIterator[StreamEvent]":
+        """在线程池中逐项推进同步流，避免阻塞事件循环。"""
         loop = asyncio.get_running_loop()
         iterator = await loop.run_in_executor(None, functools.partial(self.download_stream, url, **kwargs))
         sentinel = object()
@@ -144,6 +157,7 @@ class DownloaderAdapter(ABC):
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         **kwargs: Any,
     ) -> "Iterator[StreamEvent]":
+        """把非流式响应按固定大小切块，作为默认流式实现。"""
         response = self.download(url, **kwargs)
         yield StreamHeader(
             url=response.url,
@@ -157,6 +171,7 @@ class DownloaderAdapter(ABC):
             yield content[start : start + chunk_size]
 
     def reject_impersonate(self, impersonate: str | None) -> None:
+        """拒绝当前适配器无法实现的 TLS/浏览器指纹伪装。"""
         if impersonate:
             raise ValidationError(
                 f"{self.adapter_name} 不支持浏览器指纹伪装（impersonate={impersonate!r}）。"
@@ -165,6 +180,7 @@ class DownloaderAdapter(ABC):
 
     @staticmethod
     def parse_extra_kwargs(raw: str | None) -> dict[str, Any]:
+        """解析受控透传参数 JSON；格式错误时记录告警并返回空字典。"""
         if not raw:
             return {}
         try:
@@ -203,27 +219,35 @@ class DownloaderAdapter(ABC):
             return self._ua_pool_cache
 
     def get(self, url: str, **kwargs: Any) -> Response:
+        """发送 GET 请求。"""
         return self.download(url, method="GET", **kwargs)
 
     def post(self, url: str, **kwargs: Any) -> Response:
+        """发送 POST 请求。"""
         return self.download(url, method="POST", **kwargs)
 
     def put(self, url: str, **kwargs: Any) -> Response:
+        """发送 PUT 请求。"""
         return self.download(url, method="PUT", **kwargs)
 
     def delete(self, url: str, **kwargs: Any) -> Response:
+        """发送 DELETE 请求。"""
         return self.download(url, method="DELETE", **kwargs)
 
     def head(self, url: str, **kwargs: Any) -> Response:
+        """发送 HEAD 请求。"""
         return self.download(url, method="HEAD", **kwargs)
 
     def options(self, url: str, **kwargs: Any) -> Response:
+        """发送 OPTIONS 请求。"""
         return self.download(url, method="OPTIONS", **kwargs)
 
     def close(self) -> None:
+        """释放适配器资源；无状态适配器默认无需处理。"""
         return None
 
     async def aclose(self) -> None:
+        """异步释放适配器资源，默认委托同步关闭。"""
         self.close()
 
     def __enter__(self) -> "DownloaderAdapter":

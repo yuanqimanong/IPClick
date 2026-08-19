@@ -1,3 +1,5 @@
+"""浏览器引擎选择、安装探测和启动生命周期管理。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -97,10 +99,12 @@ FINGERPRINT_MANAGED: frozenset[str] = frozenset({"camoufox"})
 
 
 def default_engine() -> str:
+    """返回当前平台优先使用的浏览器引擎。"""
     return "drissionpage" if sys.platform == "win32" else "camoufox"
 
 
 def resolve_engine(name: str | None) -> str:
+    """解析 auto/空值并校验显式引擎名。"""
     engine = (name or "auto").strip().lower()
     if engine in ("", "auto"):
         return default_engine()
@@ -110,6 +114,7 @@ def resolve_engine(name: str | None) -> str:
 
 
 def package_installed(engine: str) -> bool:
+    """检查引擎所需的全部 Python 模块是否可导入。"""
     modules = ENGINE_MODULES.get(engine)
     if not modules:
         return False
@@ -117,8 +122,15 @@ def package_installed(engine: str) -> bool:
 
 
 def refresh() -> None:
+    """清除模块与浏览器本体探测缓存。"""
+    global _playwright_api, _patchright_api, _camoufox_new_browser, _camoufox_not_installed
     module_probe.invalidate()
     with _browser_ready_lock:
+        # 支持进程运行期间安装可选依赖后重新探测，不能保留先前的 ImportError。
+        _playwright_api = _UNPROBED
+        _patchright_api = _UNPROBED
+        _camoufox_new_browser = _UNPROBED
+        _camoufox_not_installed = _UNPROBED
         _browser_ready_cache.clear()
 
 
@@ -127,6 +139,7 @@ _browser_ready_lock = threading.Lock()
 
 
 def browser_ready(engine: str, settings: BrowserSettings | None = None) -> tuple[bool | None, str]:
+    """探测浏览器本体是否可启动，并返回状态与诊断详情。"""
     resolved = settings or BrowserSettings()
     key = (
         engine,
@@ -138,6 +151,7 @@ def browser_ready(engine: str, settings: BrowserSettings | None = None) -> tuple
     if cached is not None:
         return cached
 
+    # 文件系统探测可能较慢，且结果取决于执行路径和浏览器缓存目录。
     result = _probe_browser(engine, resolved)
     with _browser_ready_lock:
         _browser_ready_cache[key] = result
@@ -180,6 +194,7 @@ def _camoufox_browser_ready() -> tuple[bool | None, str]:
 
 
 def playwright_registry_dir(engine: str) -> Path | None:
+    """按 Playwright 环境变量和平台约定定位浏览器注册目录。"""
     env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
     if env == "0":
         try:
@@ -245,6 +260,8 @@ def _system_chrome_ready() -> tuple[bool | None, str]:
 @final
 @dataclass(frozen=True)
 class EngineStatus:
+    """浏览器引擎 Python 包与浏览器本体的联合就绪状态。"""
+
     engine: str
     package: bool
     browser: bool | None
@@ -252,10 +269,12 @@ class EngineStatus:
 
     @property
     def ready(self) -> bool:
+        """返回引擎是否可尝试启动。"""
         return self.package and self.browser is not False
 
     @property
     def label(self) -> str:
+        """返回面向用户的简短状态文本。"""
         if not self.package:
             return "包未安装"
         if self.browser is False:
@@ -266,6 +285,7 @@ class EngineStatus:
 
 
 def engine_status(engine: str, settings: BrowserSettings | None = None) -> EngineStatus:
+    """汇总指定引擎的依赖包和浏览器本体状态。"""
     package = package_installed(engine)
     if not package:
         return EngineStatus(engine=engine, package=False, browser=None, detail=INSTALL_HINTS.get(engine, "缺少依赖"))
@@ -274,15 +294,19 @@ def engine_status(engine: str, settings: BrowserSettings | None = None) -> Engin
 
 
 def is_available(engine: str, settings: BrowserSettings | None = None) -> bool:
+    """返回引擎是否具备启动条件。"""
     return engine_status(engine, settings).ready
 
 
 def available_engines(settings: BrowserSettings | None = None) -> list[str]:
+    """返回当前环境中可用的引擎名称。"""
     return sorted(e for e in ENGINE_NAMES if is_available(e, settings))
 
 
 @dataclass(frozen=True)
 class LaunchedBrowser:
+    """成对保存驱动生命周期对象和已启动浏览器。"""
+
     driver: Any
     browser: Any
 
@@ -302,6 +326,7 @@ def _chromium_launch_options(settings: BrowserSettings) -> dict[str, Any]:
 
 
 async def launch(engine: str, settings: BrowserSettings) -> LaunchedBrowser:
+    """校验就绪状态并按引擎启动 Playwright 家族浏览器。"""
     status = engine_status(engine, settings)
     if not status.ready:
         raise AdapterError(
@@ -311,6 +336,7 @@ async def launch(engine: str, settings: BrowserSettings) -> LaunchedBrowser:
         )
 
     if engine == "camoufox":
+        # 各引擎启动签名不同，统一收敛为 LaunchedBrowser 供 worker 回收。
         return await _launch_camoufox(settings)
     if engine == "patchright":
         return await _launch_playwright_like(_patchright_async_api(), "patchright", settings)

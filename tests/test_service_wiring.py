@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import grpc
+from grpc import ServicerContext
 import pytest
+from typing_extensions import override
 
 from ipclick.adapters import registry
 from ipclick.async_limiter import AsyncHostLimiter
 from ipclick.cluster.async_forwarder import AsyncForwardingTaskService
 from ipclick.cluster.forwarder import ForwardingTaskService
-from ipclick.cluster.node import ClusterConfig
+from ipclick.cluster.node import ClusterConfig, NodeState
 from ipclick.cluster.pool import NodePool
+from ipclick.dto.proto import task_pb2
 from ipclick.exceptions import AdapterError, URLNotAllowedError, ValidationError
 from ipclick.limiter import HostLimitTimeout
 from ipclick.services.async_task_service import AsyncTaskService
@@ -16,7 +21,7 @@ from ipclick.services.errors import CALLER_GONE_MESSAGE, CallerGone, classify
 from ipclick.services.task_service import TaskService
 from ipclick.utils.config_util import Settings
 
-from .helpers import StubAdapter
+from .helpers import RecordingContext, StubAdapter
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +40,37 @@ def _cluster_settings() -> Settings:
             "TRACE": {"sqlite_enabled": False},
         }
     )
+
+
+def _gateway_settings() -> Settings:
+    return Settings(
+        {
+            "SERVER": {"host": "127.0.0.1", "port": 19528, "max_workers": 2},
+            "SECURITY": {},
+            "DOWNLOADER": {},
+            "BROWSER": {"enabled": False},
+            "CLUSTER": {
+                "forward": "on",
+                "self_id": "gateway",
+                "max_failover": 1,
+                "nodes": [
+                    {"id": "n1", "address": "127.0.0.1:19601"},
+                    {"id": "n2", "address": "127.0.0.1:19602"},
+                ],
+            },
+            "TRACE": {"sqlite_enabled": False},
+        }
+    )
+
+
+class _AmbiguousNodeFault(grpc.RpcError):
+    @override
+    def code(self) -> grpc.StatusCode:
+        return grpc.StatusCode.DEADLINE_EXCEEDED
+
+    @override
+    def details(self) -> str:
+        return "response deadline expired"
 
 
 def test_async_service_owns_its_limiter(settings: Settings) -> None:
@@ -72,6 +108,118 @@ def test_forwarding_service_reports_itself_as_forwarding() -> None:
     finally:
         service.cleanup()
         pool.stop()
+
+
+@pytest.mark.parametrize(
+    "method",
+    [task_pb2.POST, task_pb2.PUT, task_pb2.PATCH, task_pb2.DELETE],
+)
+def test_sync_forwarder_does_not_repeat_non_idempotent_requests(method: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _gateway_settings()
+    cluster = ClusterConfig.from_config(config["CLUSTER"])
+    pool = NodePool(cluster, start_probing=False)
+    service = ForwardingTaskService(config, cluster, pool=pool, server_host="127.0.0.1", server_port=19528)
+    calls: list[str] = []
+
+    def fail(state: NodeState, _request: task_pb2.ReqTask) -> task_pb2.TaskResp:
+        calls.append(state.node.id)
+        raise _AmbiguousNodeFault
+
+    monkeypatch.setattr(service, "_forward", fail)
+    recording = RecordingContext()
+    try:
+        response = service.Send(
+            task_pb2.ReqTask(uuid="unsafe", method=cast(Any, method), url="https://example.com/action"),
+            cast(ServicerContext, cast(object, recording)),
+        )
+        assert len(calls) == 1
+        assert recording.code is grpc.StatusCode.DEADLINE_EXCEEDED
+        assert response.status_code == -1
+    finally:
+        service.cleanup()
+
+
+def test_sync_forwarder_keeps_failover_for_safe_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _gateway_settings()
+    cluster = ClusterConfig.from_config(config["CLUSTER"])
+    pool = NodePool(cluster, start_probing=False)
+    service = ForwardingTaskService(config, cluster, pool=pool, server_host="127.0.0.1", server_port=19528)
+    calls: list[str] = []
+
+    def forward(state: NodeState, request: task_pb2.ReqTask) -> task_pb2.TaskResp:
+        calls.append(state.node.id)
+        if len(calls) == 1:
+            raise _AmbiguousNodeFault
+        return task_pb2.TaskResp(request_uuid=request.uuid, status_code=200)
+
+    monkeypatch.setattr(service, "_forward", forward)
+    try:
+        response = service.Send(
+            task_pb2.ReqTask(uuid="safe", method=task_pb2.GET, url="https://example.com/read"),
+            cast(ServicerContext, cast(object, RecordingContext())),
+        )
+        assert len(calls) == 2
+        assert response.status_code == 200
+    finally:
+        service.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method",
+    [task_pb2.POST, task_pb2.PUT, task_pb2.PATCH, task_pb2.DELETE],
+)
+async def test_async_forwarder_does_not_repeat_non_idempotent_requests(
+    method: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _gateway_settings()
+    cluster = ClusterConfig.from_config(config["CLUSTER"])
+    pool = NodePool(cluster, start_probing=False)
+    service = AsyncForwardingTaskService(config, cluster, pool=pool, server_host="127.0.0.1", server_port=19528)
+    calls: list[str] = []
+
+    def fail(state: NodeState, _request: task_pb2.ReqTask) -> task_pb2.TaskResp:
+        calls.append(state.node.id)
+        raise _AmbiguousNodeFault
+
+    monkeypatch.setattr(service, "_forward", fail)
+    recording = RecordingContext()
+    try:
+        response = await service.Send(
+            task_pb2.ReqTask(uuid="unsafe-async", method=cast(Any, method), url="https://example.com/action"),
+            cast(ServicerContext, cast(object, recording)),
+        )
+        assert len(calls) == 1
+        assert recording.code is grpc.StatusCode.DEADLINE_EXCEEDED
+        assert response.status_code == -1
+    finally:
+        await service.acleanup()
+
+
+@pytest.mark.asyncio
+async def test_async_forwarder_keeps_failover_for_safe_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _gateway_settings()
+    cluster = ClusterConfig.from_config(config["CLUSTER"])
+    pool = NodePool(cluster, start_probing=False)
+    service = AsyncForwardingTaskService(config, cluster, pool=pool, server_host="127.0.0.1", server_port=19528)
+    calls: list[str] = []
+
+    def forward(state: NodeState, request: task_pb2.ReqTask) -> task_pb2.TaskResp:
+        calls.append(state.node.id)
+        if len(calls) == 1:
+            raise _AmbiguousNodeFault
+        return task_pb2.TaskResp(request_uuid=request.uuid, status_code=200)
+
+    monkeypatch.setattr(service, "_forward", forward)
+    try:
+        response = await service.Send(
+            task_pb2.ReqTask(uuid="safe-async", method=task_pb2.GET, url="https://example.com/read"),
+            cast(ServicerContext, cast(object, RecordingContext())),
+        )
+        assert len(calls) == 2
+        assert response.status_code == 200
+    finally:
+        await service.acleanup()
 
 
 def test_plain_service_is_not_forwarding(settings: Settings) -> None:

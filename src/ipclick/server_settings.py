@@ -1,3 +1,5 @@
+"""服务端监听、并发、压缩和进程数量配置。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -38,6 +40,8 @@ _COMPRESSION_ALIASES: dict[str, grpc.Compression] = {
 @final
 @dataclass(frozen=True)
 class ServerSettings:
+    """经校验且可派生运行时并发上限的服务端配置。"""
+
     host: str = DEFAULT_HOST
     port: int = DEFAULT_GRPC_PORT
     max_workers: int = DEFAULT_MAX_WORKERS
@@ -48,6 +52,8 @@ class ServerSettings:
     async_mode: bool = False
 
     def __post_init__(self) -> None:
+        if not 1 <= self.port <= 65535:
+            raise ConfigError(f"SERVER.port 必须在 1..65535 范围内，当前为 {self.port}")
         if self.max_workers < 1:
             raise ConfigError(f"SERVER.max_workers 必须 >= 1，当前为 {self.max_workers}")
         if self.concurrent_rpcs < self.max_workers:
@@ -57,24 +63,32 @@ class ServerSettings:
             )
         if self.concurrent_streams < 1:
             raise ConfigError(f"SERVER.max_concurrent_streams 必须 >= 1，当前为 {self.concurrent_streams}")
+        if self.processes < 0:
+            raise ConfigError(f"SERVER.processes 必须 >= 0，当前为 {self.processes}")
 
     @property
     def concurrent_rpcs(self) -> int:
+        """返回显式 RPC 上限，或按 worker 数推导准入容量。"""
         return self.max_concurrent_rpcs or self.max_workers * RPCS_PER_WORKER
 
     @property
     def concurrent_streams(self) -> int:
+        """返回 HTTP/2 并发流上限，并保证不低于安全基线。"""
         return self.max_concurrent_streams or max(MIN_CONCURRENT_STREAMS, self.concurrent_rpcs)
 
     @property
     def grpc_compression(self) -> grpc.Compression:
+        """将配置别名映射为 gRPC 压缩枚举。"""
         return _COMPRESSION_ALIASES.get(self.compression, grpc.Compression.Gzip)
 
     @property
     def listen_addr(self) -> str:
-        return f"{self.host}:{self.port}"
+        """返回可直接传给 gRPC 的监听地址。"""
+        host = f"[{self.host}]" if ":" in self.host and not self.host.startswith("[") else self.host
+        return f"{host}:{self.port}"
 
     def replace_endpoint(self, host: str | None = None, port: int | None = None) -> ServerSettings:
+        """保留其他设置，仅替换命令行覆盖的监听端点。"""
         if host is None and port is None:
             return self
         return ServerSettings(
@@ -90,6 +104,7 @@ class ServerSettings:
 
     @classmethod
     def from_config(cls, server_config: dict[str, Any] | None) -> ServerSettings:
+        """从 ``[SERVER]`` 解析设置，对关键布尔值和 worker 数严格校验。"""
         config = dict(server_config or {})
         defaults = cls()
         return cls(
@@ -105,10 +120,12 @@ class ServerSettings:
 
 
 def fork_supported() -> bool:
+    """返回当前平台是否支持项目采用的 fork 多进程模型。"""
     return sys.platform != "win32" and hasattr(os, "fork")
 
 
 def resolve_processes(configured: int) -> int:
+    """解析自动进程数，并在不支持 fork 的平台安全降级。"""
     resolved = max(1, min(MAX_AUTO_PROCESSES, os.cpu_count() or 1)) if configured == 0 else configured
     if resolved > 1 and not fork_supported():
         log.warning(

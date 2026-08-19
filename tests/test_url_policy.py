@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from ipclick.exceptions import URLNotAllowedError
+from ipclick.utils import url_util
 from ipclick.utils.url_util import DEFAULT_ALLOWED_SCHEMES, URLPolicy, merge_query_params, validate_url
 
 
@@ -15,6 +16,8 @@ def test_default_policy_blocks_metadata_but_allows_private() -> None:
     validate_url("http://127.0.0.1:8080/x", policy)
     with pytest.raises(URLNotAllowedError, match="云元数据"):
         validate_url("http://169.254.169.254/latest/meta-data/", policy)
+    with pytest.raises(URLNotAllowedError, match="云元数据"):
+        validate_url("http://[::ffff:169.254.169.254]/latest/meta-data/", policy)
 
 
 @pytest.mark.parametrize("url", ["ftp://example.com", "gopher://example.com"])
@@ -51,6 +54,20 @@ def test_checks_are_skipped_entirely_when_both_switches_are_off() -> None:
     validate_url("http://169.254.169.254/latest/", policy)
 
 
+def test_string_boolean_security_switches_are_parsed_by_value() -> None:
+    policy = URLPolicy.from_config({"block_metadata_endpoints": "false", "block_private_networks": "true"})
+
+    assert policy.block_metadata_endpoints is False
+    assert policy.block_private_networks is True
+
+
+def test_dns_failure_is_rejected_when_ssrf_checks_are_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(url_util, "_resolve_host", lambda _host: [])
+
+    with pytest.raises(URLNotAllowedError, match="无法解析主机"):
+        validate_url("https://temporarily-unresolved.example", URLPolicy())
+
+
 def test_custom_scheme_allowlist_is_normalised() -> None:
     policy = URLPolicy.from_config({"allowed_schemes": ["HTTPS"]})
     assert policy.allowed_schemes == frozenset({"https"})
@@ -63,3 +80,4 @@ def test_merge_query_params() -> None:
     assert merge_query_params("http://e.com/p", {"a": 1}) == "http://e.com/p?a=1"
     assert merge_query_params("http://e.com/p?x=1", {"a": 2}) == "http://e.com/p?x=1&a=2"
     assert merge_query_params("http://e.com/p", {"a": 1, "b": None}) == "http://e.com/p?a=1"
+    assert merge_query_params("http://e.com/p?x=1", {"a": None}) == "http://e.com/p?x=1"

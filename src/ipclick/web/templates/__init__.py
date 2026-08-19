@@ -1,3 +1,5 @@
+"""集中导出 Web 管理端的 HTML 模板渲染函数。"""
+
 from __future__ import annotations
 
 from ipclick.web.templates.base import NAV, attr, esc, set_default_theme

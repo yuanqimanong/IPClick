@@ -1,3 +1,5 @@
+"""内置 AI Skill 预览与安装说明的 HTML 渲染器。"""
+
 from __future__ import annotations
 
 from ipclick.web.templates.base import esc, page
@@ -12,6 +14,7 @@ def render_skill(
     description: str,
     install_dir: str,
 ) -> str:
+    """渲染 Skill 元数据、安装命令及已转义的 Markdown 原文。"""
     body = f"""
   <div class="msg tip">
     技能包（Skill）是一份 Markdown：告诉 AI 代理<b>什么时候</b>该用 IPClick、<b>怎么用</b>。

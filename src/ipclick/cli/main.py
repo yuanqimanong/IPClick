@@ -1,3 +1,5 @@
+"""部署、运行、健康检查和配置诊断命令。"""
+
 import os
 from pathlib import Path
 import re
@@ -9,9 +11,9 @@ from ipclick import __version__
 from ipclick.adapters.browser_engines import engine_status, resolve_engine
 from ipclick.adapters.browser_settings import BrowserSettings, describe_max_pages
 from ipclick.auth import load_tokens
-from ipclick.cli.agent import component, config_group, fetch, node, status, trace
+from ipclick.cli.agent import component, config_group, fetch, format_grpc_target, node, status, trace
 from ipclick.cli.skill_cmd import skill
-from ipclick.config_loader import load_config
+from ipclick.config_loader import load_config, placeholders
 from ipclick.config_loader.loader import example_config, example_env
 from ipclick.factory import resolve_mode
 from ipclick.health import check_health
@@ -29,10 +31,12 @@ from ipclick.web.server import is_public_host
 
 
 def _display_width(text: str) -> int:
+    """计算中英文混排终端文本的近似显示宽度。"""
     return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
 
 
 def _print_example(ctx: click.Context, _param: click.Parameter, value: str | None) -> None:
+    """Click eager callback：输出配置模板后立即结束命令。"""
     if not value or ctx.resilient_parsing:
         return
     click.echo(example_env() if value == "env" else example_config(), nl=False)
@@ -54,7 +58,8 @@ def _print_example(ctx: click.Context, _param: click.Parameter, value: str | Non
     help="输出模板到 stdout。-e 或 -e toml 出配置文件，-e env 出 .env（可重定向）",
 )
 @click.pass_context
-def main(ctx: click.Context):
+def main(ctx: click.Context) -> None:
+    """IPClick 命令行根命令。"""
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -69,7 +74,8 @@ def main(ctx: click.Context):
     default=None,
     help="按端口命名：生成 ipclick-<端口>.toml 并把端口填进去。同机起多个实例时用",
 )
-def init(force: bool, target_dir: Path, port: int | None):
+def init(force: bool, target_dir: Path, port: int | None) -> None:
+    """生成行为配置和权限收紧的机密环境文件。"""
     target_dir.mkdir(parents=True, exist_ok=True)
     toml_path = target_dir / (f"ipclick-{port}.toml" if port else "ipclick.toml")
     env_path = target_dir / ".env"
@@ -94,8 +100,11 @@ def init(force: bool, target_dir: Path, port: int | None):
 
     password = generate_password()
     env_text = example_env().replace("IPCLICK_WEB_PASSWORD=", f"IPCLICK_WEB_PASSWORD={password}")
+    # os.open 的 mode 只在新建文件时生效；覆盖旧文件前也要主动收紧原权限。
+    if os.name == "posix" and env_path.exists():
+        env_path.chmod(0o600)
     with os.fdopen(os.open(env_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
-        f.write(env_text)
+        _ = f.write(env_text)
     click.echo(f"已生成 {env_path}（权限 600，已预填随机 Web 密码）")
 
     gitignore = target_dir / ".gitignore"
@@ -151,7 +160,8 @@ def run(
     web_port: int | None,
     web_host: str | None,
     web_lan: bool,
-):
+) -> None:
+    """按配置和命令行覆盖项启动 gRPC 服务及可选 Web 管理端。"""
     try:
         if web_lan:
             if web_host and web_host != "0.0.0.0":
@@ -202,15 +212,16 @@ def run(
 @click.option("--config", "-c", type=click.Path(path_type=Path), help="配置文件路径")
 @click.option("--service", default="", help="要查询的服务名，默认查总体状态")
 @click.option("--timeout", type=float, default=5.0, show_default=True, help="超时（秒）")
-def health(host: str, port: int | None, config: Path | None, service: str, timeout: float):
+def health(host: str, port: int | None, config: Path | None, service: str, timeout: float) -> None:
+    """调用标准 gRPC health 服务并通过退出码报告结果。"""
     LogUtil.init(level="ERROR")
 
-    resolved_port = port or int(
-        section(load_config(str(config) if config else None), "SERVER").get("port", DEFAULT_GRPC_PORT)
-    )
-    target = f"{host}:{resolved_port}"
+    config_data = load_config(str(config) if config else None)
+    resolved_port = port or int(section(config_data, "SERVER").get("port", DEFAULT_GRPC_PORT))
+    target = format_grpc_target(host, resolved_port)
+    tls = TLSSettings.from_config(section(config_data, "SECURITY"))
 
-    healthy, status = check_health(target, service=service, timeout=timeout)
+    healthy, status = check_health(target, service=service, timeout=timeout, tls=tls)
     click.echo(f"{target} -> {status}")
     if not healthy:
         raise SystemExit(1)
@@ -218,14 +229,16 @@ def health(host: str, port: int | None, config: Path | None, service: str, timeo
 
 @main.command("config-info")
 @click.option("--config", "-c", type=click.Path(path_type=Path), help="配置文件路径")
-def config_info(config: Path | None):
+def config_info(config: Path | None) -> None:
+    """展示经过默认值、覆盖项和路径占位符解析后的关键配置。"""
     try:
         cfg = load_config(str(config) if config else None)
 
         server = section(cfg, "SERVER")
         proxy = section(cfg, "PROXY")
         security = section(cfg, "SECURITY")
-        log_cfg = section(cfg, "LOG")
+        server_settings = ServerSettings.from_config(server)
+        log_cfg = placeholders.resolve_for("LOG", section(cfg, "LOG"), server_settings.port)
         downloader_cfg = section(cfg, "DOWNLOADER")
         monitor = section(cfg, "MONITOR")
 
@@ -237,7 +250,7 @@ def config_info(config: Path | None):
             f"  Web port:     {web.get('port', DEFAULT_WEB_PORT)}   "
             f"← 浏览器打开这个（{'已启用' if web.get('enabled') else '未启用，用 run -w 开'}）"
         )
-        click.echo(f"  Max workers:  {ServerSettings.from_config(server).max_workers}")
+        click.echo(f"  Max workers:  {server_settings.max_workers}")
         click.echo(f"  Log level:    {log_cfg.get('level', 'info')}")
         click.echo(f"  Log output:   {log_cfg.get('output', 'stdout')}")
 
@@ -292,15 +305,19 @@ def config_info(config: Path | None):
         discovery = str(dict(cfg.get("CLUSTER", {}).get("discovery") or {}).get("mode") or "static")
         click.echo(f"  集群节点:     {len(nodes)} 个（发现方式 {discovery}）")
 
-        proxy_host = proxy.get("host") or proxy.get("tunnel_server")
-        click.echo(f"  代理:         {proxy_host + ':' + str(proxy.get('port', '')) if proxy_host else '未配置'}")
+        proxy_host = str(proxy.get("host") or "").strip()
+        tunnel_server = str(proxy.get("tunnel_server") or "").strip()
+        proxy_display = f"{proxy_host}:{proxy.get('port', '')}" if proxy_host else tunnel_server or "未配置"
+        click.echo(f"  代理:         {proxy_display}")
         if proxy.get("auth_key"):
             click.echo("  代理鉴权:     已配置（已隐藏）")
 
         click.echo("")
         click.echo("Monitoring:")
         click.echo(f"  健康检查:     {monitor.get('health_check', True)}")
-        trace = TraceSettings.from_config(section(cfg, "TRACE"))
+        trace = TraceSettings.from_config(
+            placeholders.resolve_for("TRACE", section(cfg, "TRACE"), server_settings.port)
+        )
         click.echo(f"  链路内存缓冲: {f'最近 {trace.memory_size} 条' if trace.memory_size else '已关闭'}")
         if trace.sqlite_enabled:
             retention = f"保留 {trace.retention_days} 天" if trace.retention_days else "永久保留"

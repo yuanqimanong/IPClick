@@ -1,3 +1,5 @@
+"""基于 curl_cffi 的同步、异步和流式 HTTP 适配器。"""
+
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -47,10 +49,13 @@ _PASSTHROUGH_KWARGS = frozenset({"ja3", "akamai", "default_headers", "http_versi
 
 
 class CurlCffiAdapter(DownloaderAdapter):
+    """复用 curl_cffi session 并支持 TLS 指纹伪装的适配器。"""
+
     adapter_name: str = "curl_cffi"
     supports_async: bool = True
 
     def __init__(self, settings: AdapterSettings | None = None):
+        """校验可选依赖并初始化同步、异步 session 缓存。"""
         if _curl_cffi is None:
             raise AdapterError("curl_cffi is not installed. Install it with: pip install curl-cffi")
 
@@ -136,6 +141,7 @@ class CurlCffiAdapter(DownloaderAdapter):
         allowed_status_codes: list[int] | None = None,
         kwargs: str | None = None,
     ) -> Response:
+        """同步发送 HTTP 请求并转换为统一响应。"""
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
             raise ValidationError(f"Unsupported HTTP method: {method}")
@@ -153,6 +159,7 @@ class CurlCffiAdapter(DownloaderAdapter):
             }
         )
 
+        # proxy/证书校验/指纹会改变连接属性，必须分开复用连接池。
         session = self._sessions.get((proxy, verify, impersonate))
 
         try:
@@ -174,6 +181,7 @@ class CurlCffiAdapter(DownloaderAdapter):
     @override
     @aretry()
     async def adownload(self, url: str, **kwargs: Any) -> Response:
+        """使用原生 AsyncSession 异步发送 HTTP 请求。"""
         method = str(kwargs.get("method", "GET")).upper()
         if method not in _SUPPORTED_METHODS:
             raise ValidationError(f"Unsupported HTTP method: {method}")
@@ -204,6 +212,7 @@ class CurlCffiAdapter(DownloaderAdapter):
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         **kwargs: Any,
     ) -> Iterator[StreamEvent]:
+        """产出响应首部及正文分片，并在生成器结束时关闭响应。"""
         method = str(kwargs.get("method", "GET")).upper()
         if method not in _SUPPORTED_METHODS:
             yield StreamHeader(url=url, status_code=-1, error=f"Unsupported HTTP method: {method}")
@@ -211,16 +220,8 @@ class CurlCffiAdapter(DownloaderAdapter):
 
         session = self._sessions.get((kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate")))
 
-        request_kwargs: dict[str, Any] = {
-            "headers": kwargs.get("headers"),
-            "cookies": kwargs.get("cookies"),
-            "params": kwargs.get("params"),
-            "data": kwargs.get("data"),
-            "json": kwargs.get("json"),
-            "timeout": kwargs.get("timeout") or self.timeout,
-            "allow_redirects": bool(kwargs.get("allow_redirects", True)),
-        }
-        request_kwargs = {k: v for k, v in request_kwargs.items() if v is not None}
+        # 与普通请求共用白名单 builder，避免切换到 stream 后静默丢失指纹、证书等参数。
+        request_kwargs = self._build_request_kwargs(kwargs)
 
         try:
             response = session.request(method, url, stream=True, **request_kwargs)
@@ -238,18 +239,22 @@ class CurlCffiAdapter(DownloaderAdapter):
             )
             yield from response.iter_content(chunk_size=chunk_size)
         finally:
+            # 提前停止迭代也会执行 finally，归还底层连接。
             response.close()
 
     @override
     def close(self) -> None:
+        """关闭同步缓存，并调度关闭异步 session。"""
         self._sessions.close()
         self._async_sessions.close()
 
     @override
     async def aclose(self) -> None:
+        """在正确事件循环中关闭所有 session。"""
         self._sessions.close()
         await self._async_sessions.aclose()
 
 
 def is_available() -> bool:
+    """返回 curl_cffi 是否已安装。"""
     return CURL_CFFI_AVAILABLE

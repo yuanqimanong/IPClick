@@ -136,3 +136,70 @@ def test_idle_hosts_are_swept_when_the_table_is_full() -> None:
         with limiter.acquire(f"http://h{index}.example.com/a"):
             pass
     assert limiter.snapshot()["tracked_hosts"] <= 16
+
+
+def test_sync_host_table_is_a_hard_limit_while_all_slots_are_active() -> None:
+    limiter = HostLimiter(LimiterSettings(per_host_max_concurrent=1, max_tracked_hosts=2, idle_ttl=60.0))
+    first = limiter.acquire("http://one.example/a")
+    second = limiter.acquire("http://two.example/a")
+    first.__enter__()
+    second.__enter__()
+    try:
+        with pytest.raises(HostLimitTimeout, match="host 数已达上限"), limiter.acquire("http://three.example/a"):
+            pass
+        assert limiter.snapshot()["tracked_hosts"] == 2
+    finally:
+        second.__exit__(None, None, None)
+        first.__exit__(None, None, None)
+
+
+def test_sync_host_table_evicts_idle_lru_at_capacity() -> None:
+    limiter = HostLimiter(LimiterSettings(per_host_max_concurrent=1, max_tracked_hosts=2, idle_ttl=60.0))
+    with limiter.acquire("http://old.example/a"):
+        pass
+    with limiter.acquire("http://new.example/a"):
+        pass
+    now = time.monotonic()
+    with limiter._slots["old.example"].lock:
+        limiter._slots["old.example"].last_used = now - 2.0
+    with limiter._slots["new.example"].lock:
+        limiter._slots["new.example"].last_used = now - 1.0
+    with limiter.acquire("http://third.example/a"):
+        pass
+
+    assert set(limiter._slots) == {"new.example", "third.example"}
+
+
+async def test_async_host_table_is_a_hard_limit_while_all_slots_are_active() -> None:
+    from ipclick.async_limiter import AsyncHostLimiter
+
+    limiter = AsyncHostLimiter(LimiterSettings(per_host_max_concurrent=1, max_tracked_hosts=2, idle_ttl=60.0))
+    first = limiter.acquire("http://one.example/a")
+    second = limiter.acquire("http://two.example/a")
+    await first.__aenter__()
+    await second.__aenter__()
+    try:
+        with pytest.raises(HostLimitTimeout, match="host 数已达上限"):
+            async with limiter.acquire("http://three.example/a"):
+                pass
+        assert len(limiter) == 2
+    finally:
+        await second.__aexit__(None, None, None)
+        await first.__aexit__(None, None, None)
+
+
+async def test_async_host_table_evicts_idle_lru_at_capacity() -> None:
+    from ipclick.async_limiter import AsyncHostLimiter
+
+    limiter = AsyncHostLimiter(LimiterSettings(per_host_max_concurrent=1, max_tracked_hosts=2, idle_ttl=60.0))
+    async with limiter.acquire("http://old.example/a"):
+        pass
+    async with limiter.acquire("http://new.example/a"):
+        pass
+    now = time.monotonic()
+    limiter._slots["old.example"].last_used = now - 2.0
+    limiter._slots["new.example"].last_used = now - 1.0
+    async with limiter.acquire("http://third.example/a"):
+        pass
+
+    assert set(limiter._slots) == {"new.example", "third.example"}

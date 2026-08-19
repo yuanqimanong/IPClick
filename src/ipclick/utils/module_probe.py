@@ -1,3 +1,5 @@
+"""不执行可选模块代码地探测其安装状态和发行包版本。"""
+
 from __future__ import annotations
 
 import importlib
@@ -12,6 +14,7 @@ _lock = threading.Lock()
 
 
 def installed(module: str) -> bool:
+    """线程安全地缓存并返回模块是否可被导入系统发现。"""
     cached = _installed_cache.get(module)
     if cached is not None:
         return cached
@@ -24,6 +27,7 @@ def installed(module: str) -> bool:
 
 
 def _find(module: str) -> bool:
+    """执行一次不导入模块本体的 ``find_spec`` 探测。"""
     try:
         return importlib.util.find_spec(module) is not None
     except (ImportError, AttributeError, ValueError):
@@ -31,6 +35,7 @@ def _find(module: str) -> bool:
 
 
 def version(distribution: str) -> str | None:
+    """返回发行包版本；包不存在或元数据损坏时返回 ``None``。"""
     if distribution in _version_cache:
         return _version_cache[distribution]
     with _lock:
@@ -43,6 +48,7 @@ def version(distribution: str) -> str | None:
 
 
 def invalidate() -> None:
+    """清空导入系统及本模块缓存，供组件安装或卸载后刷新。"""
     importlib.invalidate_caches()
     with _lock:
         _installed_cache.clear()

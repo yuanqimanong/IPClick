@@ -1,3 +1,5 @@
+"""链路记录完整页面与实时 fragment 的 HTML 渲染器。"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -17,6 +19,7 @@ DEFAULT_LIVE_MS = 5000
 
 
 def live_label(ms: int) -> str:
+    """把刷新毫秒数转换为界面提示。"""
     for value, _, text in LIVE_INTERVALS:
         if value == ms:
             return text
@@ -51,6 +54,7 @@ def trace_live(
     *,
     source: str = "memory",
 ) -> str:
+    """渲染实时统计、状态分布和链路记录表格 fragment。"""
     process = dict(stats.get("process") or {})
     window = dict(stats.get("window") or {})
     recorder = dict(stats.get("recorder") or {})
@@ -101,6 +105,7 @@ def render_trace(
     live_ms: int = DEFAULT_LIVE_MS,
     fragment_url: str = "/fragment/trace",
 ) -> str:
+    """渲染带筛选器与刷新周期控制的完整链路页面。"""
     process = dict(stats.get("process") or {})
     adapters = sorted({r.adapter for r in records} | set((process.get("by_adapter") or {}).keys()))
     adapter_options = "".join(

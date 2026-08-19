@@ -1,3 +1,5 @@
+"""运行状态总览页面及其实时 fragment 渲染器。"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -32,6 +34,7 @@ def _concurrency_shape(server: dict[str, Any]) -> str:
 
 
 def render_dashboard(snapshot: dict[str, Any], username: str, csrf: str, actions_enabled: bool) -> str:
+    """把完整运行时快照渲染为仪表盘页面。"""
     if "error" in snapshot:
         return page(
             f'<div class="msg err">取状态失败：{esc(snapshot["error"])}</div>',
@@ -178,6 +181,7 @@ def render_dashboard(snapshot: dict[str, Any], username: str, csrf: str, actions
 
 
 def dashboard_live(snapshot: dict[str, Any]) -> str:
+    """渲染供前端定时替换的高频统计 fragment。"""
     stats = dict(snapshot.get("trace") or {})
     process = dict(stats.get("process") or {})
     total = int(process.get("total", 0))

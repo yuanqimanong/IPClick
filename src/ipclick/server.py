@@ -1,3 +1,5 @@
+"""IPClick 同步/异步、单进程/多进程服务端的统一生命周期入口。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -43,6 +45,8 @@ SHUTDOWN_SIGNALS: tuple[str, ...] = ("SIGINT", "SIGTERM", "SIGBREAK")
 
 
 class IPClickServer:
+    """装配配置、鉴权、TLS、任务服务、健康检查和 Web 管理端。"""
+
     def __init__(
         self,
         config_path: str | None = None,
@@ -75,6 +79,7 @@ class IPClickServer:
         )
         self.server: Server | None = None
         self.task_service: TaskService | None = None
+        self._auth_interceptor: TokenAuthInterceptor | None = None
         self.cluster_config: ClusterConfig = ClusterConfig.from_config(section(self.config, "CLUSTER"))
         self._monitor_config: dict[str, Any] = section(self.config, "MONITOR")
         self.health: HealthReporter = HealthReporter(enabled=self.health_check_enabled)
@@ -97,20 +102,25 @@ class IPClickServer:
 
     @property
     def health_check_enabled(self) -> bool:
+        """返回标准 gRPC 健康接口是否启用。"""
         return as_bool(self._monitor_config.get("health_check"), True)
 
     @property
     def web_address(self) -> str:
+        """返回已启用 Web 管理端的监听地址。"""
         return f"{self.web_config.host}:{self.web_config.port}" if self.web_config.enabled else ""
 
     @property
     def web_port(self) -> int:
+        """返回 Web 管理端口，禁用时为零。"""
         return self.web_config.port if self.web_config.enabled else 0
 
     def dashboard_extras(self) -> dict[str, Any]:
+        """返回由 Web 页面控制器提供的附加仪表盘数据。"""
         return self._web_pages.dashboard_extras() if self._web_pages is not None else {}
 
     def observed_nodes(self) -> list[dict[str, Any]]:
+        """返回 Web 管理端展示的节点快照并合并手动摘除状态。"""
         pool = self._node_pool
         if pool is None:
             return []
@@ -160,6 +170,8 @@ class IPClickServer:
                 discovery=discovery,
                 discovery_config=discovery_config,
             )
+            for node_id in self.drained:
+                self._node_pool.drain(node_id)
             log.info(f"Web 端节点观测已启动：{len(self._node_pool)} 个节点")
         except Exception as e:
             log.warning(f"Web 端节点观测未启动：{e}")
@@ -167,16 +179,24 @@ class IPClickServer:
 
     def _reload_cluster(self) -> tuple[bool, str]:
         reloaded = self._web_pages.config if self._web_pages is not None else self.config
-        self.config = reloaded
         try:
-            self.cluster_config = ClusterConfig.from_config(section(reloaded, "CLUSTER"))
+            updated = ClusterConfig.from_config(section(reloaded, "CLUSTER"))
         except ConfigError as e:
             return False, f"新的集群配置不合法，已保持原样：{e}"
 
         service = self.task_service
         if isinstance(service, ForwardingTaskService):
-            return service.reload_cluster(reloaded)
+            ok, message = service.reload_cluster(reloaded)
+            if not ok:
+                return ok, message
+            self.config = reloaded
+            self.cluster_config = updated
+            self._refresh_auth_tokens(reloaded, updated)
+            return ok, message
 
+        self.config = reloaded
+        self.cluster_config = updated
+        self._refresh_auth_tokens(reloaded, updated)
         if self._node_pool is not None:
             self._node_pool.stop()
             self._node_pool = None
@@ -188,13 +208,22 @@ class IPClickServer:
         node_id = form.get("node_id", "").strip()
         if name == "drain" and node_id:
             self.drained.add(node_id)
+            if self._node_pool is not None:
+                self._node_pool.drain(node_id)
+            if isinstance(self.task_service, ForwardingTaskService):
+                self.task_service.set_drained(node_id, True)
             return True, f"已手动摘除节点 {node_id}"
         if name == "undrain" and node_id:
             self.drained.discard(node_id)
+            if self._node_pool is not None:
+                self._node_pool.undrain(node_id)
+            if isinstance(self.task_service, ForwardingTaskService):
+                self.task_service.set_drained(node_id, False)
             return True, f"已恢复节点 {node_id}"
         return False, f"未知操作 {name!r}"
 
     def start(self, host: str | None = None, port: int | None = None) -> None:
+        """按当前配置阻塞运行服务，直至停机。"""
         if port is not None and port != self.settings.port:
             log.warning(
                 f"start() 传入的端口 {port} 与构造时的 {self.settings.port} 不一致："
@@ -204,15 +233,17 @@ class IPClickServer:
         self.settings = self.settings.replace_endpoint(host, port)
 
         auth_interceptor, tokens = self._build_auth()
+        self._auth_interceptor = auth_interceptor
         tls_settings = TLSSettings.from_config(section(self.config, "SECURITY"))
         warn_secrets_in_config(self.config)
 
         if self.settings.async_mode:
-            self._start_async(auth_interceptor=auth_interceptor, tls_settings=tls_settings)
+            self._start_async(auth_interceptor=auth_interceptor, tokens=tokens, tls_settings=tls_settings)
             return
         self._start_sync(auth_interceptor=auth_interceptor, tokens=tokens, tls_settings=tls_settings)
 
     def _build_auth(self) -> tuple[TokenAuthInterceptor, tuple[str, ...]]:
+        """合并外部令牌和绑定本节点的内部令牌。"""
         security_config = section(self.config, "SECURITY")
         cluster_section = section(self.config, "CLUSTER")
         self.cluster_config = ClusterConfig.from_config(cluster_section)
@@ -224,6 +255,18 @@ class IPClickServer:
         if internal:
             log.info(f"已接受集群内部令牌（节点 {self_id}）")
         return TokenAuthInterceptor(tokens), tokens
+
+    def _refresh_auth_tokens(self, config: Settings, cluster: ClusterConfig) -> None:
+        """使热更新后的节点身份和共享密钥立即作用于入站鉴权。"""
+        interceptor = self._auth_interceptor
+        if interceptor is None:
+            return
+        cluster_section = section(config, "CLUSTER")
+        self_id = resolve_self_id(cluster, self.settings.host, self.settings.port)
+        self_node = cluster.node_by_id(self_id)
+        internal = self_tokens(self_id, self_node.token if self_node else "", cluster_secret(cluster_section))
+        tokens = tuple(dict.fromkeys((*load_tokens(section(config, "SECURITY")), *internal)))
+        interceptor.replace_tokens(tokens)
 
     def _cluster_kwargs(self, tls_settings: TLSSettings) -> dict[str, Any]:
         return {
@@ -250,6 +293,7 @@ class IPClickServer:
     def _start_sync(
         self, *, auth_interceptor: TokenAuthInterceptor, tokens: tuple[str, ...], tls_settings: TLSSettings
     ) -> None:
+        """装配并阻塞运行同步 gRPC server。"""
         self.server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=self.settings.max_workers, thread_name_prefix="ipclick-worker"),
             maximum_concurrent_rpcs=self.settings.concurrent_rpcs,
@@ -288,6 +332,7 @@ class IPClickServer:
             raise
 
     def _bind(self, tls_settings: TLSSettings) -> None:
+        """按 TLS 设置绑定安全或明文监听端口。"""
         if self.server is None:
             raise RuntimeError("gRPC server 尚未创建")
         if tls_settings.enabled:
@@ -310,7 +355,10 @@ class IPClickServer:
                 f"请设置环境变量 {AUTH_TOKEN_ENV} 或配置 [SECURITY].auth_token"
             )
 
-    def _start_async(self, *, auth_interceptor: TokenAuthInterceptor, tls_settings: TLSSettings) -> None:
+    def _start_async(
+        self, *, auth_interceptor: TokenAuthInterceptor, tokens: tuple[str, ...], tls_settings: TLSSettings
+    ) -> None:
+        """在独立事件循环中运行实验性异步 server。"""
         from ipclick.async_server import serve_async
 
         service = self._build_async_task_service(tls_settings)
@@ -320,7 +368,7 @@ class IPClickServer:
         self._start_web()
 
         log.info(f"IPClick server starting on {self.listen_addr}（async_mode，实验性）")
-        warn_if_insecure(tls_settings, self.settings.host)
+        self._announce_security(auth_interceptor, tokens, tls_settings)
         try:
             asyncio.run(
                 serve_async(
@@ -338,8 +386,20 @@ class IPClickServer:
             )
         except KeyboardInterrupt:
             log.info("Received KeyboardInterrupt, shutting down...")
+        finally:
+            # serve_async 已异步关闭 service；这里收尾仅由 IPClickServer 持有的资源。
+            self.task_service = None
+            if self._web_server is not None:
+                self._web_server.stop()
+                self._web_server = None
+            if self._node_pool is not None:
+                self._node_pool.stop()
+                self._node_pool = None
+            self.health.close()
+            self.recorder.close()
 
     def _wire_rate_sharding(self) -> None:
+        """按健康节点数动态分摊每 host QPS 配额。"""
         service = self.task_service
         if service is None or self.cluster_config.forwarding_enabled:
             return
@@ -370,6 +430,7 @@ class IPClickServer:
                 _ = signal.signal(received, handler)
 
     def stop(self, grace_period: int = GRACE_PERIOD_SECONDS) -> None:
+        """先摘除健康状态，再优雅停止 server 并释放所有资源。"""
         if self._web_server is not None:
             self._web_server.stop()
             self._web_server = None
@@ -389,11 +450,13 @@ class IPClickServer:
             self.task_service.cleanup()
             self.task_service = None
 
+        self.health.close()
         self.recorder.close()
         log.info("IPClick server stopped")
 
 
 def endpoint_settings(config_path: str | None, host: str | None, port: int | None) -> ServerSettings:
+    """加载并应用命令行端点覆盖，供单/多进程入口复用。"""
     settings = ServerSettings.from_config(section(load_config(config_path, port), "SERVER"))
     return settings.replace_endpoint(host, port)
 
@@ -407,6 +470,8 @@ def serve(
     web_port: int | None = None,
     web_host: str | None = None,
 ) -> None:
+    """运行 IPClick server，并按配置选择单进程或 fork worker 模式。"""
+
     def build(*, enable_web: bool | None, reuseport: bool) -> IPClickServer:
         return IPClickServer(
             config_path,

@@ -1,7 +1,10 @@
+"""受配置开关保护的远程可选组件管理 RPC。"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
 import json
+import threading
 from typing import TYPE_CHECKING, Any, final
 
 import grpc
@@ -35,18 +38,23 @@ SUPPORTED_OPS: frozenset[str] = READ_ONLY_OPS | MUTATING_OPS
 
 @final
 class ComponentService:
+    """验证组件操作并惰性调用安装管理器。"""
+
     def __init__(self, config: Settings, on_finished: Callable[[Any], None] | None = None) -> None:
         self.config: Settings = config
         self._on_finished: Callable[[Any], None] | None = on_finished
         self._manager: InstallManager | None = None
+        self._manager_lock: threading.Lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
+        """返回当前节点是否明确允许远程组件管理。"""
         return as_bool(section(self.config, "CLUSTER").get("allow_remote_install"))
 
     def handle(
         self, request: task_pb2.ComponentReq, context: grpc.ServicerContext, *, node_id: str
     ) -> task_pb2.ComponentResp:
+        """执行白名单内操作，并将拒绝原因映射到 gRPC 状态。"""
         if not self.enabled:
             context.set_code(grpc.StatusCode.PERMISSION_DENIED)
             context.set_details(DISABLED_DETAIL)
@@ -85,17 +93,23 @@ class ComponentService:
         )
 
     def installer(self) -> InstallManager:
+        """惰性创建安装器，避免普通下载进程加载 Web 安装依赖。"""
         manager = self._manager
-        if manager is None:
-            from ipclick.web.installer import InstallManager
+        if manager is not None:
+            return manager
+        with self._manager_lock:
+            manager = self._manager
+            if manager is None:
+                from ipclick.web.installer import InstallManager
 
-            manager = InstallManager()
-            if self._on_finished is not None:
-                manager.on_finished = self._on_finished
-            self._manager = manager
-        return manager
+                manager = InstallManager()
+                if self._on_finished is not None:
+                    manager.on_finished = self._on_finished
+                self._manager = manager
+            return manager
 
     def snapshot_json(self) -> str:
+        """序列化当前适配器和浏览器组件状态。"""
         from ipclick.adapters.browser_settings import BrowserSettings
         from ipclick.components import snapshot
 
@@ -103,6 +117,7 @@ class ComponentService:
         return json.dumps(snapshot(browser), ensure_ascii=False, default=str)
 
     def current_job(self) -> task_pb2.ComponentJob | None:
+        """将当前安装任务转换为 protobuf 状态。"""
         current = self.installer().current()
         if not current:
             return None

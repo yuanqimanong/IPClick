@@ -1,3 +1,5 @@
+"""请求测试沙箱的表单与响应结果 HTML 渲染器。"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -41,6 +43,7 @@ def render_test(
     curl_error: str = "",
     allow_scripts: bool = False,
 ) -> str:
+    """渲染请求选项、curl 导入提示和截断后的测试响应。"""
     adapter_select = _adapter_select(choices, form.get("adapter", ""))
     method_options = "".join(
         f'<option value="{attr(m)}"{" selected" if form.get("method", "GET") == m else ""}>{esc(m)}</option>'

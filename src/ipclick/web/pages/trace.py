@@ -1,3 +1,5 @@
+"""链路记录页面、实时 fragment 与 JSON 查询视图。"""
+
 from __future__ import annotations
 
 from typing import Any, final
@@ -34,6 +36,8 @@ def _fragment_url(base: str, filters: dict[str, str]) -> str:
 
 @final
 class TracePage:
+    """对链路查询参数设限，并输出 HTML 或 JSON 表示。"""
+
     def __init__(self, ctx: PageContext) -> None:
         self.ctx: PageContext = ctx
 
@@ -58,6 +62,7 @@ class TracePage:
         return records, source, filters
 
     def trace_page(self, query: dict[str, str], username: str, csrf: str) -> str:
+        """渲染带筛选条件和可选实时刷新的完整链路页。"""
         records, source, filters = self._query_records(query)
         return render_trace(
             records,
@@ -71,10 +76,12 @@ class TracePage:
         )
 
     def trace_fragment(self, query: dict[str, str]) -> str:
+        """渲染实时轮询替换的链路表格 fragment。"""
         records, source, _ = self._query_records(query)
         return trace_live(records, self.ctx.recorder.stats(), source=source)
 
     def trace_json(self, query: dict[str, str]) -> dict[str, Any]:
+        """返回受数量上限约束的链路记录 JSON 数据。"""
         records, source, filters = self._query_records(query)
         return {
             "source": source,

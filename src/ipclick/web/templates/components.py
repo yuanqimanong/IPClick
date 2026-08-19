@@ -1,3 +1,5 @@
+"""可选组件管理页的 HTML 渲染器。"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -30,6 +32,7 @@ def render_components(
     active_node: str = "",
     remote: bool = False,
 ) -> str:
+    """渲染本机或远程节点的组件状态、安装任务与浏览器本体信息。"""
     http = [c for c in components if c.get("kind") == "http"]
     browser = [c for c in components if c.get("kind") == "browser"]
     running = bool(job and job.get("status") == "running")

@@ -1,3 +1,5 @@
+"""按目标主机实施并发上限与令牌桶速率限制。"""
+
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,11 +19,13 @@ _SECTION = "[DOWNLOADER]"
 
 
 class HostLimitTimeout(IPClickError):
-    pass
+    """等待主机并发或速率额度超过截止时间。"""
 
 
 @dataclass(frozen=True)
 class LimiterSettings:
+    """单主机限流配置；数值为零时禁用对应限制。"""
+
     per_host_max_concurrent: int = 0
     per_host_qps: float = 0.0
     per_host_burst: int = 0
@@ -31,16 +35,19 @@ class LimiterSettings:
 
     @property
     def enabled(self) -> bool:
+        """返回是否至少启用了一种限制。"""
         return self.per_host_max_concurrent > 0 or self.per_host_qps > 0
 
     @property
     def burst(self) -> int:
+        """返回显式突发量，或根据 QPS 推导的默认值。"""
         if self.per_host_burst > 0:
             return self.per_host_burst
         return max(1, math.ceil(self.per_host_qps)) if self.per_host_qps > 0 else 0
 
     @classmethod
     def from_config(cls, downloader_config: dict[str, Any] | None) -> "LimiterSettings":
+        """从 ``[DOWNLOADER]`` 配置解析并校验限流参数。"""
         config = dict(downloader_config or {})
         concurrency = section(config, "concurrency")
         rate = section(config, "rate_limit")
@@ -78,6 +85,7 @@ class LimiterSettings:
 
 
 def host_of(url: str) -> str:
+    """提取小写 hostname；无效或无主机名的 URL 返回空串。"""
     try:
         hostname = urlsplit(url).hostname
     except ValueError:
@@ -100,11 +108,15 @@ class _HostSlot:
 
     @property
     def idle(self) -> bool:
+        """返回该 host 是否没有活动或等待中的请求。"""
         return self.active == 0 and self.waiting == 0
 
 
 class HostLimiter:
+    """线程安全的逐主机并发信号量与令牌桶限流器。"""
+
     def __init__(self, settings: LimiterSettings | None = None):
+        """创建限流器，host 状态按需分配。"""
         self.settings: LimiterSettings = settings or LimiterSettings()
         self._share_qps: float | None = None
         self._slots: dict[str, _HostSlot] = {}
@@ -112,6 +124,7 @@ class HostLimiter:
         self._last_sweep: float = time.monotonic()
 
     def set_cluster_size(self, live_nodes: int) -> None:
+        """按存活节点数均分配置的全局 QPS。"""
         from ipclick.limiter import cluster_share
 
         configured = self.settings.per_host_qps
@@ -121,10 +134,12 @@ class HostLimiter:
 
     @property
     def effective_qps(self) -> float:
+        """返回本实例实际执行的单主机 QPS。"""
         return self._share_qps if self._share_qps is not None else self.settings.per_host_qps
 
     @property
     def effective_burst(self) -> float:
+        """返回按集群份额缩放后的突发额度。"""
         configured = float(self.settings.burst)
         if self._share_qps is None or self.settings.per_host_qps <= 0:
             return configured
@@ -133,6 +148,7 @@ class HostLimiter:
 
     @contextmanager
     def acquire(self, url: str, timeout: float | None = None) -> Generator[None]:
+        """在截止时间前依次获取并发和速率额度。"""
         settings = self.settings
         host = host_of(url) if settings.enabled else ""
         if not host:
@@ -142,6 +158,7 @@ class HostLimiter:
         slot = self._slot_for(host)
         deadline = time.monotonic() + (settings.wait_timeout if timeout is None else max(0.0, timeout))
 
+        # 先占并发槽，再取速率令牌，确保等待速率期间也受总并发保护。
         acquired = self._acquire_concurrency(slot, host, deadline)
         try:
             self._acquire_token(slot, host, deadline)
@@ -156,11 +173,10 @@ class HostLimiter:
     def _acquire_concurrency(self, slot: _HostSlot, host: str, deadline: float) -> bool:
         if slot.semaphore is None:
             with slot.lock:
+                slot.waiting -= 1
                 slot.active += 1
             return False
 
-        with slot.lock:
-            slot.waiting += 1
         try:
             remaining = deadline - time.monotonic()
             got = slot.semaphore.acquire(timeout=remaining) if remaining > 0 else slot.semaphore.acquire(blocking=False)
@@ -205,9 +221,17 @@ class HostLimiter:
             slot = self._slots.get(host)
             if slot is None:
                 self._maybe_sweep_locked()
+                if len(self._slots) >= self.settings.max_tracked_hosts:
+                    raise HostLimitTimeout(
+                        f"限流器跟踪的 host 数已达上限 {self.settings.max_tracked_hosts} 且均在使用中；"
+                        "请调大 [DOWNLOADER.concurrency].max_tracked_hosts"
+                    )
                 slot = _HostSlot(self.settings.per_host_max_concurrent, math.ceil(self.effective_burst))
                 self._slots[host] = slot
-            slot.last_used = time.monotonic()
+            with slot.lock:
+                # 在交还 slot 前先登记等待者，防止并发 sweep 删除刚取出的空闲条目。
+                slot.waiting += 1
+                slot.last_used = time.monotonic()
             return slot
 
     def _maybe_sweep_locked(self) -> None:
@@ -218,30 +242,46 @@ class HostLimiter:
 
         self._last_sweep = now
         ttl = self.settings.idle_ttl
-        stale = [h for h, s in self._slots.items() if s.idle and (over_limit or now - s.last_used > ttl)]
+        idle: list[tuple[float, str]] = []
+        for host, slot in self._slots.items():
+            # 固定锁顺序为 slots -> slot，避免 snapshot/acquire 与回收互相死锁。
+            with slot.lock:
+                if slot.idle:
+                    idle.append((slot.last_used, host))
+
+        stale = [host for last_used, host in idle if now - last_used > ttl]
         for host in stale:
             del self._slots[host]
 
-        if over_limit and len(self._slots) >= self.settings.max_tracked_hosts:
-            log.warning(
-                f"限流器跟踪的 host 数已达上限 {self.settings.max_tracked_hosts} 且均在使用中，"
-                f"请调大 [DOWNLOADER.concurrency].max_tracked_hosts"
-            )
-        elif stale:
+        # TTL 回收后仍满时，额外驱逐最久未使用的空闲项；活动项绝不驱逐。
+        remaining_idle = [(last_used, host) for last_used, host in idle if host in self._slots]
+        if len(self._slots) >= self.settings.max_tracked_hosts and remaining_idle:
+            _, lru_host = min(remaining_idle)
+            del self._slots[lru_host]
+            stale.append(lru_host)
+
+        if stale:
             log.debug(f"限流器回收了 {len(stale)} 个空闲 host 条目，剩余 {len(self._slots)}")
 
     def snapshot(self) -> dict[str, Any]:
+        """返回用于诊断的无副作用状态快照。"""
         with self._slots_lock:
+            active: dict[str, int] = {}
+            for host, slot in self._slots.items():
+                with slot.lock:
+                    if slot.active:
+                        active[host] = slot.active
             return {
                 "enabled": self.settings.enabled,
                 "per_host_max_concurrent": self.settings.per_host_max_concurrent,
                 "per_host_qps": self.settings.per_host_qps,
                 "tracked_hosts": len(self._slots),
-                "active": {h: s.active for h, s in self._slots.items() if s.active},
+                "active": active,
             }
 
 
 def build_limiter(downloader_config: dict[str, Any] | None) -> HostLimiter:
+    """校验后端配置并构建内存限流器。"""
     config = dict(downloader_config or {})
     rate = section(config, "rate_limit")
     backend = str(rate.get("backend") or "memory").strip().lower()
@@ -257,6 +297,7 @@ __all__ = ["HostLimitTimeout", "HostLimiter", "LimiterSettings", "build_limiter"
 
 
 def cluster_share(qps: float, live_nodes: int) -> float:
+    """计算每个存活集群节点应承担的 QPS 份额。"""
     if qps <= 0:
         return 0.0
     return qps / max(1, live_nodes)

@@ -1,3 +1,5 @@
+"""同步 gRPC 客户端及流式响应封装。"""
+
 from collections.abc import Iterable, Iterator
 import json as json_lib
 import threading
@@ -38,6 +40,7 @@ _KEEPALIVE_MARKERS = ("too_many_pings", "keepalive")
 
 
 def unavailable_hint(details: str | None, port: int) -> str:
+    """根据 gRPC UNAVAILABLE 详情返回可操作的诊断提示。"""
     lowered = (details or "").lower()
     if any(marker in lowered for marker in _KEEPALIVE_MARKERS):
         return (
@@ -76,11 +79,15 @@ _TASK_FIELDS = frozenset(
 
 
 class StreamedResponse:
+    """同步流式响应；负责解析首部、数据分片和尾部统计信息。"""
+
     def __init__(self, call: Any):
+        """读取流的首条 header，并保留底层调用以便取消。"""
         self._call: Any = call
         self._iter: Iterator[Any] = iter(call)
         self._closed: bool = False
         self._exhausted: bool = False
+        self._completed: bool = False
 
         self.elapsed_ms: int = 0
         self.total_bytes: int = 0
@@ -98,19 +105,25 @@ class StreamedResponse:
         try:
             first = next(self._iter)
         except grpc.RpcError as e:
+            self._call.cancel()
             raise TransportError(f"流式下载失败: {e}") from e
         except StopIteration as e:
+            self._call.cancel()
             raise TransportError("服务端未返回任何数据") from e
 
         if not first.HasField("header"):
+            # 构造函数失败后调用方拿不到响应对象，必须在这里主动释放 RPC。
+            self._call.cancel()
             raise TransportError("协议错误：流的第一条消息不是 header")
         return first.header
 
     def is_success(self) -> bool:
-        return 200 <= self.status_code < 300 and not self.error
+        """返回 HTTP 状态和服务端错误字段是否共同表示成功。"""
+        return 200 <= self.status_code < 300 and not self.error and not self.trailer_error
 
     def __iter__(self) -> Iterator[bytes]:
-        if self._exhausted:
+        """逐块消费响应体，并在 trailer 到达时更新统计信息。"""
+        if self._closed or self._exhausted:
             return
         try:
             for message in self._iter:
@@ -120,20 +133,29 @@ class StreamedResponse:
                     self.elapsed_ms = message.trailer.response_time_ms
                     self.total_bytes = message.trailer.total_bytes
                     self.trailer_error = message.trailer.error_message or None
-                    break
+                    self._completed = True
+                    return
+                else:
+                    raise TransportError("协议错误：正文中出现了重复的 header")
+            raise TransportError("协议错误：流在 trailer 到达前结束")
         except grpc.RpcError as e:
             raise TransportError(f"流式下载中断: {e}") from e
         finally:
             self._exhausted = True
+            # 生成器被 break/close，或协议异常退出时，必须释放仍在服务端运行的 RPC。
+            if not self._completed:
+                self._call.cancel()
 
     def read(self) -> bytes:
+        """消费并拼接剩余的全部响应体。"""
         return b"".join(self)
 
     def close(self) -> None:
+        """取消尚未消费完的 RPC；可重复调用。"""
         if self._closed:
             return
         self._closed = True
-        if not self._exhausted:
+        if not self._completed:
             self._call.cancel()
 
     def __enter__(self) -> "StreamedResponse":
@@ -148,6 +170,8 @@ class StreamedResponse:
 
 
 class ClientBase:
+    """同步与异步客户端共享的配置、鉴权和任务构造逻辑。"""
+
     def __init__(
         self,
         config_path: str | None = None,
@@ -156,6 +180,7 @@ class ClientBase:
         token: str | None = None,
         tls: TLSSettings | None = None,
     ):
+        """加载客户端配置并解析目标地址、TLS、鉴权和重试策略。"""
         self.config_path: str | None = config_path
         self.config: Settings = load_config(self.config_path)
 
@@ -190,7 +215,11 @@ class ClientBase:
 
     @property
     def target(self) -> str:
-        return f"{self.host}:{self.port}"
+        """返回 gRPC 使用的 ``host:port`` 目标地址。"""
+        host = self.host
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"{host}:{self.port}"
 
     def _rpc_error(self, e: grpc.RpcError) -> Exception:
         code = e.code() if hasattr(e, "code") else None
@@ -268,6 +297,8 @@ class ClientBase:
 
 
 class Downloader(ClientBase):
+    """线程安全、惰性建连的同步 IPClick gRPC 客户端。"""
+
     def __init__(
         self,
         config_path: str | None = None,
@@ -276,6 +307,7 @@ class Downloader(ClientBase):
         token: str | None = None,
         tls: TLSSettings | None = None,
     ):
+        """初始化客户端；首次请求时才创建 gRPC channel。"""
         super().__init__(config_path, host, port, token, tls)
 
         self._channel: grpc.Channel | None = None
@@ -283,24 +315,26 @@ class Downloader(ClientBase):
         self._lock: threading.Lock = threading.Lock()
 
     def _get_stub(self) -> task_pb2_grpc.TaskServiceStub:
-        if self._closed:
-            raise ClientClosedError("Downloader 已关闭，无法继续发送请求")
-
-        if self._stub is not None:
-            return self._stub
-
         with self._lock:
-            if self._stub is None:
+            # 检查关闭状态和取得 stub 必须共用同一个线性化点。即使连接
+            # 已存在，也不能在 close() 完成后把指向已关闭 channel 的 stub 交出去。
+            if self._closed:
+                raise ClientClosedError("Downloader 已关闭，无法继续发送请求")
+            stub = self._stub
+            if stub is None:
+                # channel/stub 成对发布，避免并发首请求创建多个连接。
                 self._channel = open_channel(
                     self.target,
                     credentials=self._credentials,
                     options=self._channel_options,
                     compression=grpc.Compression.Gzip,
                 )
-                self._stub = task_pb2_grpc.TaskServiceStub(self._channel)
-        return self._stub
+                stub = task_pb2_grpc.TaskServiceStub(self._channel)
+                self._stub = stub
+            return stub
 
     def close(self) -> None:
+        """关闭底层 channel，并禁止客户端继续发送请求。"""
         with self._lock:
             self._closed: bool = True
             if self._channel is not None:
@@ -338,6 +372,7 @@ class Downloader(ClientBase):
         allowed_status_codes: list[int] | None = None,
         **kwargs: Any,
     ) -> DownloadResponse:
+        """从便捷参数构造任务并执行；传输错误会转换为错误响应。"""
         task = self._build_task(
             url=url,
             adapter=adapter,
@@ -368,6 +403,7 @@ class Downloader(ClientBase):
             return DownloadResponse.from_error(str(e), url=url)
 
     def download(self, task: DownloadTask) -> DownloadResponse:
+        """提交完整任务，并对临时不可用的 gRPC 服务执行退避重试。"""
         pb_request = task.to_protobuf()
         stub = self._get_stub()
 
@@ -390,6 +426,7 @@ class Downloader(ClientBase):
         raise TransportError(f"连接 {self.target} 失败：重试 {self.rpc_max_retries} 次后仍不可用")
 
     def stream(self, url: str, **kwargs: Any) -> StreamedResponse:
+        """发起服务端流式下载，返回需要显式关闭的响应对象。"""
         task = self._build_task(url=url, **kwargs)
         stub = self._get_stub()
 
@@ -406,6 +443,7 @@ class Downloader(ClientBase):
             raise self._rpc_error(e) from e
 
     def batch(self, tasks: Iterable[DownloadTask], timeout: float | None = None) -> Iterator[DownloadResponse]:
+        """以双向流提交多个任务，并按服务端完成顺序产出响应。"""
         stub = self._get_stub()
 
         def _requests() -> Iterator[Any]:
@@ -424,22 +462,29 @@ class Downloader(ClientBase):
             raise self._rpc_error(e) from e
 
     def get(self, url: str, params: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
+        """发送 GET 请求。"""
         return self.request(method=HttpMethod.GET, url=url, params=params, **kwargs)
 
     def post(self, url: str, data: Any = None, json: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
+        """发送 POST 请求。"""
         return self.request(method=HttpMethod.POST, url=url, data=data, json=json, **kwargs)
 
     def put(self, url: str, data: Any = None, **kwargs: Any) -> DownloadResponse:
+        """发送 PUT 请求。"""
         return self.request(method=HttpMethod.PUT, url=url, data=data, **kwargs)
 
     def patch(self, url: str, data: Any = None, **kwargs: Any) -> DownloadResponse:
+        """发送 PATCH 请求。"""
         return self.request(method=HttpMethod.PATCH, url=url, data=data, **kwargs)
 
     def delete(self, url: str, **kwargs: Any) -> DownloadResponse:
+        """发送 DELETE 请求。"""
         return self.request(method=HttpMethod.DELETE, url=url, **kwargs)
 
     def head(self, url: str, **kwargs: Any) -> DownloadResponse:
+        """发送 HEAD 请求。"""
         return self.request(method=HttpMethod.HEAD, url=url, **kwargs)
 
     def options(self, url: str, **kwargs: Any) -> DownloadResponse:
+        """发送 OPTIONS 请求。"""
         return self.request(method=HttpMethod.OPTIONS, url=url, **kwargs)

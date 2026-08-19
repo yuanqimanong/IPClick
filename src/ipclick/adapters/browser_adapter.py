@@ -1,3 +1,5 @@
+"""Playwright 家族浏览器适配器及专用后台事件循环。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -64,7 +66,10 @@ async def _settle(page: Any, plan: _RenderPlan) -> None:
 
 
 class _BrowserWorker:
+    """在专用线程事件循环中复用浏览器并控制页面并发。"""
+
     def __init__(self, settings: BrowserSettings, engine: str):
+        """保存引擎配置；线程和浏览器均按需启动。"""
         self._settings: BrowserSettings = settings
         self._engine: str = engine
         self._resolved_pages: int = 0
@@ -148,9 +153,11 @@ class _BrowserWorker:
 
     @property
     def browser_started(self) -> bool:
+        """返回浏览器对象存在且仍连接。"""
         return self._browser is not None and self._is_alive(self._browser)
 
     def run(self, make_coro: Any, timeout: float) -> Any:
+        """把协程提交到专用事件循环，并同步等待有界结果。"""
         loop = self._ensure_loop()
         future: Future[Any] = asyncio.run_coroutine_threadsafe(make_coro(), loop)
         try:
@@ -162,6 +169,7 @@ class _BrowserWorker:
             raise AdapterError(f"浏览器任务超过 {timeout:.0f} 秒未返回") from None
 
     def close(self) -> None:
+        """依次关闭浏览器、驱动、事件循环和工作线程。"""
         loop = self._loop
         if loop is None:
             return
@@ -197,12 +205,14 @@ class _BrowserWorker:
         self._semaphore = None
 
     async def render(self, plan: _RenderPlan) -> Response:
+        """获取页面额度，在隔离 context 中执行一次渲染。"""
         browser = await self._ensure_browser()
         semaphore = self._semaphore
         if semaphore is None:
             raise AdapterError(f"{self._engine} 浏览器未就绪（页面额度未初始化），请重试")
 
         async with semaphore:
+            # 每次请求使用独立 context，避免 cookie、代理和页面状态串扰。
             context = await browser.new_context(**plan.context_options)
             try:
                 return await self._render_in_context(context, plan)
@@ -302,6 +312,8 @@ class _RenderPlan:
 
 
 class BrowserAdapter(DownloaderAdapter):
+    """Playwright、Patchright 与 Camoufox 的共享同步适配层。"""
+
     adapter_name: str = "browser"
 
     engine: str | None = None
@@ -311,6 +323,7 @@ class BrowserAdapter(DownloaderAdapter):
         settings: AdapterSettings | None = None,
         browser_settings: BrowserSettings | None = None,
     ):
+        """解析具体引擎并创建惰性后台浏览器 worker。"""
         resolved = browser_settings or BrowserSettings()
         if not resolved.enabled:
             raise AdapterError("浏览器渲染已被关闭（[BROWSER].enabled = false）")
@@ -462,6 +475,7 @@ class BrowserAdapter(DownloaderAdapter):
         allowed_status_codes: list[int] | None = None,
         kwargs: str | None = None,
     ) -> Response:
+        """校验浏览器导航约束并执行一次 GET 页面渲染。"""
         self.reject_impersonate(impersonate)
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
@@ -497,20 +511,27 @@ class BrowserAdapter(DownloaderAdapter):
 
     @override
     def close(self) -> None:
+        """关闭后台浏览器及其专用事件循环。"""
         self._worker.close()
 
 
 class PlaywrightAdapter(BrowserAdapter):
+    """使用官方 Playwright 的浏览器适配器。"""
+
     adapter_name: str = "playwright"
     engine: str | None = "playwright"
 
 
 class PatchrightAdapter(BrowserAdapter):
+    """使用 Patchright 反检测 Chromium 的浏览器适配器。"""
+
     adapter_name: str = "patchright"
     engine: str | None = "patchright"
 
 
 class CamoufoxAdapter(BrowserAdapter):
+    """使用 Camoufox Firefox 指纹管理的浏览器适配器。"""
+
     adapter_name: str = "camoufox"
     engine: str | None = "camoufox"
 

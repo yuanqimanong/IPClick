@@ -1,3 +1,5 @@
+"""从 ``task.proto`` 重新生成 Python 消息、gRPC 绑定和类型存根。"""
+
 from pathlib import Path
 import subprocess
 import sys
@@ -11,6 +13,7 @@ _RELATIVE_IMPORT = "from . import task_pb2 as task__pb2"
 
 
 def generate() -> None:
+    """运行 ``grpc_tools.protoc`` 并校正生成文件的包内导入。"""
     subprocess.run(
         [
             sys.executable,

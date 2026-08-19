@@ -1,3 +1,5 @@
+"""HTTP 适配器共享的连接、超时和重试配置。"""
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,9 +11,13 @@ DEFAULT_RETRY_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504}
 
 HARD_MAX_BACKOFF = 300.0
 
+HARD_MAX_RETRIES = 20
+
 
 @dataclass(frozen=True)
 class AdapterSettings:
+    """适配器创建时固定的连接池与重试默认值。"""
+
     connect_timeout: float = 10.0
     download_timeout: float = 300.0
 
@@ -28,6 +34,7 @@ class AdapterSettings:
 
     @classmethod
     def from_config(cls, downloader_config: dict[str, Any] | None) -> "AdapterSettings":
+        """从 ``[DOWNLOADER]`` 配置解析容错后的适配器设置。"""
         config = dict(downloader_config or {})
         retry = section(config, "retry")
         concurrency = section(config, "concurrency")
@@ -43,7 +50,7 @@ class AdapterSettings:
         return cls(
             connect_timeout=as_positive_float(config.get("connect_timeout"), defaults.connect_timeout),
             download_timeout=as_positive_float(config.get("download_timeout"), defaults.download_timeout),
-            max_attempts=as_int(retry.get("max_attempts"), defaults.max_attempts, minimum=0),
+            max_attempts=as_int(retry.get("max_attempts"), defaults.max_attempts, minimum=0, maximum=HARD_MAX_RETRIES),
             backoff_exponent=as_positive_float(retry.get("backoff_exponent"), defaults.backoff_exponent),
             initial_backoff=as_positive_float(retry.get("initial_backoff"), defaults.initial_backoff),
             max_backoff=min(as_positive_float(retry.get("max_backoff"), defaults.max_backoff), HARD_MAX_BACKOFF),
@@ -56,4 +63,4 @@ class AdapterSettings:
         )
 
 
-__all__ = ["DEFAULT_RETRY_STATUS_CODES", "HARD_MAX_BACKOFF", "AdapterSettings"]
+__all__ = ["DEFAULT_RETRY_STATUS_CODES", "HARD_MAX_BACKOFF", "HARD_MAX_RETRIES", "AdapterSettings"]
