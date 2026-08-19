@@ -1,13 +1,3 @@
-"""浏览器渲染参数。
-
-把配置文件的 ``[BROWSER]`` 节变成浏览器适配器真正会读的对象。
-
-原来那一节写了一堆配置——插件目录、``.crx``/``.dll`` 列表、缓存上限 MB 数、
-``sandbox.level = strict/moderate/off``——没有任何一项有消费方，也没有任何一项
-能落到 playwright 上。这里只保留能真正生效的键，其余全部删掉：和
-``[DOWNLOADER]`` 一样的原则，宁可少配也不要"配了不生效"。
-"""
-
 from dataclasses import dataclass, field
 import os
 from typing import Any
@@ -47,8 +37,6 @@ def _as_str_tuple(value: Any, allowed: frozenset[str] | None = None) -> tuple[st
 
 @dataclass(frozen=True)
 class BrowserSettings:
-    """浏览器渲染的默认行为。请求级 ``automation_config`` 优先于这里的值。"""
-
     enabled: bool = True
 
     engine: str = "auto"
@@ -87,7 +75,6 @@ class BrowserSettings:
 
     @classmethod
     def from_config(cls, browser_config: dict[str, Any] | None) -> "BrowserSettings":
-        """从配置文件的 ``[BROWSER]`` 节构造。缺失或非法的项回落到默认值。"""
         config = dict(browser_config or {})
         timeout = dict(config.get("timeout") or {})
         proxy = dict(config.get("proxy") or {})
@@ -168,12 +155,6 @@ MAX_AUTO_PAGES = 16
 
 
 def available_memory_mb() -> int | None:
-    """本机可用内存（MB）。读不出来返回 None，由调用方回落到静态默认值。
-
-    优先读 cgroup 的限额而不是宿主机总量：容器里 ``/proc/meminfo`` 报的是
-    **宿主机**的内存，照它推导会在一个 512MB 的容器里开出十几个页面，
-    然后被 OOM killer 杀掉——而现象只是"容器莫名其妙重启"。
-    """
     import os
     from pathlib import Path as _Path
 
@@ -216,15 +197,6 @@ def available_memory_mb() -> int | None:
 
 
 def resolve_max_pages(configured: int, engine: str) -> int:
-    """算出真正生效的页面并发上限。
-
-    ``configured > 0`` 就照用——显式配置永远优先，自动推导不该覆盖人的决定。
-
-    ``configured == 0`` 时按**内存**推导，而不是 CPU 核数。这一点容易搞反：
-    浏览器页面是内存瓶颈不是 CPU 瓶颈，按核数算的话一台 16 核 4GB 的机器会
-    开出 16 个 camoufox 页面（约 6.4GB），直接换页。CPU 核数只做上限——
-    页面渲染确实要 CPU，开得比核数多也没意义。
-    """
     if configured > 0:
         return configured
 
@@ -240,11 +212,5 @@ def resolve_max_pages(configured: int, engine: str) -> int:
 
 
 def describe_max_pages(configured: int, engine: str) -> str:
-    """给人看的页面上限。
-
-    只显示配置的原始值会误导：配了 ``0``（自动推导）的人看到"页面上限 0"，
-    合理的推断是"并发被关掉了"或"这个特性没生效"，而实际生效的是推导出来的
-    那个数。状态页、CLI、启动日志三处都曾这么显示。
-    """
     resolved = resolve_max_pages(configured, engine)
     return str(resolved) if configured > 0 else f"{resolved}（auto）"

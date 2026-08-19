@@ -1,47 +1,3 @@
-"""Web 管理端。
-
-``ipclick run --web`` 起一个带登录的网页界面。只用标准库——为几个页面拉进
-FastAPI 那一串依赖不划算。前端也没有构建链路：布局是纯 CSS Grid，交互是几十行
-原生 JS（见 :mod:`ipclick.web.assets`）。
-
-页面
-----
-* ``/`` 总览：吞吐、成功率、在途、各适配器、集群、最近请求 + 右侧常驻状态栏。
-* ``/trace`` 请求流：实时看请求打进来（**局部刷新**，不重载整页），
-  可按状态 / 适配器 / URL 过滤。
-* ``/test`` 试一试：填个网址（或直接粘一条 curl）就地发一次请求，看链路与源码。
-  走的是本进程 TaskService 的**同一条**代码路径——包括 SSRF 准入、限流、以及
-  开了转发时的分发；也可以点名打到某一个节点。
-* ``/components`` 组件：五个可选 extras 的安装状态与装 / 卸（带真进度条）。
-  ``?node=<id>`` 时操作的是**那台子节点**——对端要自己开
-  ``[CLUSTER].allow_remote_install``，默认拒绝。
-* ``/config`` 配置：两个分页——**基础设置**（端口、线程、超时、日志…）与
-  **集群设置**（转发开关、节点增删、每台子节点的部署材料）。写回 ipclick.toml
-  （保留注释）。0.5 把 ``/nodes`` 并了进来，老地址会跳转过去。
-* ``/deploy`` 部署材料：给某台子节点生成 ipclick.toml + .env + 启动命令；
-  ``/deploy.zip`` 打包全部。**只生成，不推送**——加一个远程写配置的 RPC 等于
-  "拿下主控 = 能改所有机器的 SSRF 开关"。
-* ``/skill`` AI 接入：随包分发的技能包正文与下载。
-
-能改什么、不能改什么
---------------------
-**能**：超时、重试、限流、日志级别、浏览器引擎、链路记录、集群策略与节点列表。
-
-**不能**：``[SECURITY]`` 全部（令牌、TLS、SSRF 三个开关）、Web 自己的登录凭据、
-集群共享密钥与各节点 token、``[BROWSER].allow_scripts``。名单在
-:mod:`ipclick.web.editable`，那里也写了每一项为什么在哪一侧。
-
-0.4 的两处放开
---------------
-* **可以装依赖了。** 0.3 刻意不给这个能力（"装依赖要在机器上执行命令，那是网页
-  最不该有的能力"）。现在允许，但只限 IPClick 自己声明的那五个 extras：包名走
-  白名单常量、命令用列表交给 subprocess（``shell=False``），绑定当前解释器。
-  见 :mod:`ipclick.web.installer`。
-* **有 JavaScript 了。** 主题切换、安装任务轮询、局部刷新这三件事没有 JS 做不好。
-  CSP 里用**脚本哈希**放行那两段内联脚本，而不是 ``'unsafe-inline'``——注入进来
-  的 ``<script>`` 仍然执行不了。
-"""
-
 from collections.abc import Callable
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -71,14 +27,6 @@ _CSP = csp()
 
 @final
 class _QuietThreadingHTTPServer(ThreadingHTTPServer):
-    """把处理请求时的异常收进本项目的日志。
-
-    ``handle_error`` 是 :class:`socketserver.BaseServer` 的方法（**不是** handler 的），
-    默认实现把完整堆栈打到 stderr —— 绕过日志配置，还带上服务端源码路径。
-    最常触发它的正是"用户等不及了，关掉标签页"，而那恰恰是排查慢请求时最需要
-    干净日志的时刻。
-    """
-
     @override
     def handle_error(self, request: Any, client_address: Any) -> None:
         error = sys.exc_info()[1]
@@ -96,22 +44,15 @@ WILDCARD_HOSTS: frozenset[str] = frozenset({"0.0.0.0", "::", "[::]", "*"})
 
 
 def normalize_theme(value: Any) -> str:
-    """把配置里的主题值收敛到 :data:`THEMES` 之一。写错了当亮色，不让页面白屏。
-
-    ``auto`` 是 0.5 之前的值，现在也当亮色——升级后配置文件里留着它不该让页面出问题。
-    """
     text = str(value or "").strip().lower()
     return text if text in THEMES else DEFAULT_THEME
 
 
 def is_public_host(host: str) -> bool:
-    """这个监听地址会不会让本机之外的人够得着。"""
     return host.strip().lower() not in ("127.0.0.1", "::1", "[::1]", "localhost", "")
 
 
 class WebConfig:
-    """``[WEB]`` 配置。"""
-
     def __init__(self, config: dict[str, Any] | None = None):
         data = dict(config or {})
         self.enabled: bool = bool(data.get("enabled", False))
@@ -134,13 +75,6 @@ def _as_int(value: Any, default: int) -> int:
 
 
 class WebServer:
-    """带登录的 Web 管理端。
-
-    ``snapshot_provider`` 每次请求时被调用，返回要展示的数据；
-    ``action_handler`` 处理可变操作，返回 ``(是否成功, 提示语)``。
-    两者都由调用方注入，Web 层本身不碰业务对象。
-    """
-
     def __init__(
         self,
         snapshot_provider: Callable[[], dict[str, Any]],
@@ -163,7 +97,6 @@ class WebServer:
         self._thread: threading.Thread | None = None
 
     def start(self, host: str = "127.0.0.1", port: int = DEFAULT_WEB_PORT) -> str | None:
-        """启动。返回访问地址；起不来返回 None。"""
         if self._httpd is not None:
             return f"http://{host}:{port}/"
         set_default_theme(self.theme)
@@ -204,7 +137,7 @@ class WebServer:
 
             @override
             def log_message(self, format: str, *args: Any) -> None:
-                """默认实现直接打到 stderr，会绕过本项目的日志配置。"""
+                pass
 
             @property
             def source(self) -> str:
@@ -356,7 +289,6 @@ class WebServer:
                 return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain; charset=utf-8")
 
             def _deploy(self, pages: WebPages, session: Any) -> None:
-                """子节点的部署材料。``kind=toml|env`` 单独取原文，否则出整页。"""
                 query = self._query()
                 node_id = query.get("node", "")
                 kind = query.get("kind", "")

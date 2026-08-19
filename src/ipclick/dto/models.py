@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from enum import Enum
 import json
-from typing import Any, Self
+from typing import Any, Self, cast
 
 import uuid_utils as uuid
 
@@ -28,12 +28,6 @@ class IPClickAdapter(Enum):
 
     @classmethod
     def from_pb(cls, value: int) -> Self:
-        """从 Protobuf 的整型枚举值找回 Enum 成员
-
-        Raises:
-            ValueError: 枚举值未知。静默回退到 CURL_CFFI 会让调用方以为用了
-                自己指定的适配器，实际却换了一个，因此这里直接报错。
-        """
         for member in cls:
             if member.pb_value == value:
                 return member
@@ -41,11 +35,6 @@ class IPClickAdapter(Enum):
 
     @classmethod
     def from_str(cls, name: str) -> Self:
-        """从字符串找回 Enum 成员 (用于 SDK 参数输入等)
-
-        Raises:
-            ValueError: 名称未知（含拼写错误）。
-        """
         for member in cls:
             if member.display_name.lower() == name.lower():
                 return member
@@ -69,8 +58,6 @@ METHOD_MAP: dict[int, str] = {member.value: member.name for member in HttpMethod
 
 @dataclass
 class ProxyConfig:
-    """代理配置"""
-
     scheme: str = "http"
     host: str | None = None
     port: int | None = None
@@ -82,11 +69,6 @@ class ProxyConfig:
     tunnel_server: str | None = None
 
     def to_url(self) -> str | None:
-        """转换为代理URL
-
-        Returns:
-            代理 URL；当既没有 host 也没有 tunnel_server 时返回 None（表示不走代理）。
-        """
         if not self.host and not self.tunnel_server:
             return None
 
@@ -102,8 +84,6 @@ class ProxyConfig:
 
 @dataclass
 class DownloadTask:
-    """下载任务"""
-
     uuid: str = ""
     adapter: IPClickAdapter | str = IPClickAdapter.CURL_CFFI
 
@@ -132,7 +112,6 @@ class DownloadTask:
     kwargs: str | None = None
 
     def __post_init__(self):
-        """数据验证"""
         if not self.url:
             raise ValidationError("URL is required")
         if not self.url.startswith(("http://", "https://")):
@@ -154,19 +133,12 @@ class DownloadTask:
 
     @staticmethod
     def _stringify_map(mapping: dict[str, Any] | None) -> dict[str, str] | None:
-        """protobuf 的 map<string, string> 只接受字符串值，这里统一转换。"""
         if not mapping:
             return None
         return {str(k): v if isinstance(v, str) else json.dumps(v, default=json_serializer) for k, v in mapping.items()}
 
     @staticmethod
     def _encode_body(body: Any) -> bytes | None:
-        """把请求体编码成 bytes（proto 里 data 是 bytes）。
-
-        ``bytes`` 原样透传——这正是改成 bytes 字段的目的：图片、gzip、非 UTF-8
-        表单体以前会在 json.dumps 那一步就抛 "not serializable"。
-        ``str`` 按 UTF-8 编码；dict / list 走 JSON（表单体的常见写法）。
-        """
         if body is None:
             return None
         if isinstance(body, (bytes, bytearray, memoryview)):
@@ -177,7 +149,6 @@ class DownloadTask:
 
     @staticmethod
     def _cookies_to_map(cookies: dict[str, Any] | str | None) -> dict[str, str] | None:
-        """把 dict 或 ``"a=1; b=2"`` 形式的 cookie 串统一成 map<string, string>。"""
         if not cookies:
             return None
         if isinstance(cookies, str):
@@ -190,12 +161,6 @@ class DownloadTask:
         return DownloadTask._stringify_map(cookies)
 
     def _proxy_to_str(self) -> str | None:
-        """把 ProxyConfig / str / bool 三种代理写法归一成 URL 字符串。
-
-        ``proxy=True`` 只在 SDK 层有意义（表示"用配置文件里的代理"），到了这里
-        已经应该被解析成具体配置；若仍是 True 说明调用方直接构造了 DownloadTask，
-        此时无从得知代理地址，明确报错好过静默不走代理。
-        """
         if self.proxy is None or self.proxy is False:
             return None
         if self.proxy is True:
@@ -205,7 +170,6 @@ class DownloadTask:
         return str(self.proxy)
 
     def to_protobuf(self) -> "task_pb2.ReqTask":
-        """转换为protobuf对象"""
         try:
             if isinstance(self.adapter, str):
                 adapter_member = IPClickAdapter.from_str(self.adapter)
@@ -214,7 +178,7 @@ class DownloadTask:
 
             return task_pb2.ReqTask(
                 uuid=str(self.uuid) or str(uuid.uuid7()),
-                adapter=adapter_member.pb_value,  # pyright: ignore[reportArgumentType]
+                adapter=cast("task_pb2.AdapterType", adapter_member.pb_value),
                 method=self.method.value,
                 url=self.url,
                 headers=self._stringify_map(self.headers),
@@ -243,13 +207,6 @@ class DownloadTask:
 
 @dataclass
 class ResponseTrace:
-    """一次请求的链路信息。
-
-    回答的是"这个请求到底怎么跑的"——集群里是谁执行的、实际用了哪个适配器
-    （``adapter="browser"`` 会被解析成具体引擎）、内部重试了几次、在限流闸门里
-    排了多久。刻意不含任何机密。
-    """
-
     node_id: str = ""
     adapter: str = ""
     attempts: int = 1
@@ -269,8 +226,6 @@ class ResponseTrace:
 
 @dataclass
 class DownloadResponse:
-    """下载响应封装"""
-
     request_uuid: str = ""
     adapter_type: str = ""
     request: Any = None
@@ -286,7 +241,6 @@ class DownloadResponse:
 
     @staticmethod
     def _adapter_name(pb_value: int) -> str:
-        """protobuf 传来的是枚举整数，对外统一暴露适配器名称。"""
         try:
             return IPClickAdapter.from_pb(pb_value).display_name
         except ValueError:
@@ -294,7 +248,6 @@ class DownloadResponse:
 
     @classmethod
     def from_protobuf(cls, pb_response: "task_pb2.TaskResp") -> "DownloadResponse":
-        """从protobuf响应创建对象"""
         try:
             text = pb_response.content.decode("utf-8", errors="ignore")
         except (UnicodeDecodeError, AttributeError):
@@ -315,7 +268,6 @@ class DownloadResponse:
 
     @classmethod
     def from_response(cls, response: Any, request_uuid: str = "", adapter_type: str = "") -> "DownloadResponse":
-        """从统一Response对象创建"""
         from ipclick.dto.response import Response
 
         if not isinstance(response, Response):
@@ -338,10 +290,6 @@ class DownloadResponse:
     def from_error(
         cls, error: str, url: str = "", request_uuid: str = "", adapter_type: str = ""
     ) -> "DownloadResponse":
-        """构造一个表示本地失败（如连不上服务端）的响应。
-
-        状态码 -1 与适配器侧的 ``Response.error_response`` 保持一致。
-        """
         return cls(
             request_uuid=request_uuid,
             adapter_type=adapter_type,
@@ -351,29 +299,19 @@ class DownloadResponse:
         )
 
     def json(self) -> Any:
-        """解析JSON响应"""
         try:
             return json.loads(self.text)
         except json.JSONDecodeError as e:
             raise ValueError(f"Response is not valid JSON: {e}") from e
 
     def is_success(self) -> bool:
-        """判断请求是否成功"""
         return 200 <= self.status_code < 300 and not self.error
 
     @property
     def ok(self) -> bool:
-        """``is_success()`` 的属性别名，与 ``dto.response.Response.ok`` 对齐。"""
         return self.is_success()
 
     def raise_for_status(self) -> None:
-        """如果状态码表示错误，抛出异常
-
-        Raises:
-            RequestError: 请求失败。注意必须抛子类而不是基类 IPClickError——
-                README 文档写的是 RequestError，而基类实例并不会被
-                ``except RequestError:`` 捕获。
-        """
         if not self.is_success():
             error_msg = self.error or f"HTTP {self.status_code} Error"
             raise RequestError(f"Request failed: {error_msg}")

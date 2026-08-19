@@ -1,8 +1,3 @@
-"""集群客户端：把请求分发到多个 IPClick 服务端，失败自动转移。
-
-对外接口与单节点的 :class:`~ipclick.sdk.Downloader` 一致，调用方基本不用改代码。
-"""
-
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
@@ -20,17 +15,6 @@ from ipclick.utils.log_util import log
 
 
 class ClusterDownloader(ClientBase):
-    """跨多个 IPClick 服务端的客户端，带负载均衡与故障转移。
-
-    ::
-
-        with ClusterDownloader() as d:          # 节点取自 [CLUSTER].nodes
-            resp = d.get("https://example.com")
-
-    每个节点持有一个独立的 :class:`~ipclick.sdk.Downloader`（因而各自复用
-    自己的 gRPC channel）。
-    """
-
     def __init__(
         self,
         config_path: str | None = None,
@@ -64,7 +48,6 @@ class ClusterDownloader(ClientBase):
         )
 
     def _client_for(self, state: NodeState) -> Downloader:
-        """取（或创建）某节点的 Downloader。"""
         if self._closed:
             raise ClientClosedError("ClusterDownloader 已关闭，无法继续发送请求")
 
@@ -85,7 +68,6 @@ class ClusterDownloader(ClientBase):
             return self._clients[node_id]
 
     def close(self) -> None:
-        """停止探活并关闭所有节点连接。可重复调用。"""
         self._closed: bool = True
         self.pool.stop()
         with self._clients_lock:
@@ -100,12 +82,6 @@ class ClusterDownloader(ClientBase):
         self.close()
 
     def _with_failover(self, operation: Any, description: str) -> Any:
-        """在节点间重试直到成功或用尽次数。
-
-        只对 :class:`TransportError` 转移——那意味着"这个节点有问题"。
-        其他 IPClickError（参数非法、鉴权失败）换个节点也是一样的结果，
-        转移只会把同一个错误重复 N 遍，还拖慢失败反馈。
-        """
         tried: set[str] = set()
         attempts = self.cluster_config.max_failover + 1
         last_error: Exception | None = None
@@ -137,11 +113,6 @@ class ClusterDownloader(ClientBase):
         ) from last_error
 
     def request(self, **kwargs: Any) -> DownloadResponse:
-        """发送一次请求，失败自动换节点。
-
-        与单节点 :meth:`~ipclick.sdk.Downloader.request` 契约一致：
-        传输失败返回 ``status_code == -1`` 的响应而不抛异常；参数错误仍会抛。
-        """
         url = str(kwargs.get("url", ""))
         task = self._build_task(**kwargs)
         try:
@@ -151,27 +122,12 @@ class ClusterDownloader(ClientBase):
             return DownloadResponse.from_error(str(e), url=url)
 
     def download(self, task: DownloadTask) -> DownloadResponse:
-        """执行下载任务，失败自动换节点。
-
-        Raises:
-            TransportError: 所有可用节点都失败。
-        """
         return self._with_failover(lambda c: c.download(task), f"下载 {task.url}")
 
     def stream(self, url: str, **kwargs: Any) -> StreamedResponse:
-        """流式下载。
-
-        注意：只有**建流**这一步会故障转移。流建立之后中途断掉不会自动重连——
-        那需要断点续传（Range 请求）才能不重复数据，目前没做。
-        """
         return self._with_failover(lambda c: c.stream(url, **kwargs), f"流式下载 {url}")
 
     def batch(self, tasks: Iterable[DownloadTask], timeout: float | None = None) -> Iterator[DownloadResponse]:
-        """批量下载。
-
-        整批发给同一个节点。按任务拆散分发到多个节点会打乱"按完成顺序返回"
-        的语义，也让部分失败难以归因；需要跨节点分摊时请自行切分成多批。
-        """
         materialized = list(tasks)
         call = self._with_failover(
             lambda c: list(c.batch(materialized, timeout=timeout)), f"批量 {len(materialized)} 个任务"
@@ -200,7 +156,6 @@ class ClusterDownloader(ClientBase):
         return self.request(method=HttpMethod.OPTIONS, url=url, **kwargs)
 
     def snapshot(self) -> dict[str, Any]:
-        """集群状态快照，供状态页与 CLI 使用。"""
         return self.pool.snapshot()
 
 

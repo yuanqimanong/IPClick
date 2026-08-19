@@ -1,17 +1,3 @@
-"""目标 URL 的安全校验。
-
-IPClick 服务端会代替调用方去请求任意 URL。若服务端监听在 0.0.0.0 且没有鉴权，
-它就成了一个内网跳板（SSRF）：外部调用方可以借它访问 127.0.0.1 上的服务，
-或读取云厂商的实例元数据（169.254.169.254）拿到临时凭证。
-
-这里提供一层与适配器无关的目标校验：
-
-* **协议白名单**（默认开启）——只允许 http/https，挡掉 file://、gopher:// 等。
-* **元数据地址拦截**（默认开启）——link-local 段没有任何正当的代理用途。
-* **内网地址拦截**（默认关闭）——回环/私网/保留地址。默认关闭是为了不破坏
-  "在本机跑服务端、代理本机服务" 这类现有用法；部署到公网时应在配置里打开。
-"""
-
 from dataclasses import dataclass, field
 import ipaddress
 import socket
@@ -37,7 +23,6 @@ def _is_metadata_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> b
 
 
 def _is_private_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """回环 / 私网 / link-local / 保留 / 组播 等非公网地址。"""
     return bool(
         ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified
     )
@@ -45,8 +30,6 @@ def _is_private_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bo
 
 @dataclass(frozen=True)
 class URLPolicy:
-    """目标 URL 的准入策略。"""
-
     allowed_schemes: frozenset[str] = DEFAULT_ALLOWED_SCHEMES
     block_metadata_endpoints: bool = True
     block_private_networks: bool = False
@@ -54,7 +37,6 @@ class URLPolicy:
 
     @classmethod
     def from_config(cls, security_config: dict[str, object] | None) -> "URLPolicy":
-        """从配置文件的 ``[SECURITY]`` 节构造策略。"""
         config = dict(security_config or {})
 
         schemes = config.get("allowed_schemes")
@@ -80,10 +62,6 @@ class URLPolicy:
 
 
 def _resolve_host(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
-    """把主机名解析成 IP 列表；已经是 IP 字面量时直接返回。
-
-    解析失败返回空列表——交给适配器去报真实的网络错误，安全校验不越俎代庖。
-    """
     try:
         return [ipaddress.ip_address(host)]
     except ValueError:
@@ -105,15 +83,6 @@ def _resolve_host(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Addre
 
 
 def validate_url(url: str, policy: URLPolicy | None = None) -> None:
-    """校验目标 URL 是否允许访问。
-
-    Args:
-        url: 待校验的目标 URL。
-        policy: 准入策略，默认用 :class:`URLPolicy` 的默认值。
-
-    Raises:
-        URLNotAllowedError: URL 格式非法，或命中策略里的禁止项。
-    """
     policy = policy or URLPolicy()
 
     try:
@@ -150,11 +119,6 @@ def validate_url(url: str, policy: URLPolicy | None = None) -> None:
 
 
 def merge_query_params(url: str, params: dict[str, Any] | None) -> str:
-    """把 params 合并进 URL 的 query。
-
-    浏览器导航没有单独的 params 参数，只能自己拼进 URL。注意是**合并**不是覆盖：
-    直接替换 query 会把 URL 里原有的参数弄丢。
-    """
     if not params:
         return url
     parsed = urlparse(url)

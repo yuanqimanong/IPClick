@@ -1,26 +1,3 @@
-"""为集群里的子节点生成一份可直接落地的部署材料。
-
-要解决的是"主控上点几下加好了节点，然后呢"。0.4 的答案是"你自己去每台机器上装
-一遍、把配置抄对"——而抄配置正是集群最容易出错的一步：端口写错、``self_id``
-忘了改、共享密钥少复制一个字符，症状分别是连不上、不分活、``UNAUTHENTICATED``，
-三种都不好查。
-
-所以这里由主控**生成**每台子节点该有的东西：
-
-* ``ipclick.toml`` —— 节点列表与主控完全一致（对等入口的前提），只有
-  ``self_id`` 和监听端口是这一台自己的；
-* ``.env`` —— 只有机密：gRPC 令牌与集群共享密钥，值取自主控**当前生效**的那份，
-  所以复制过去必然对得上；
-* **启动命令** —— pip 与 uv 两种写法，因为这两种环境的建法完全不同。
-
-**只生成，不推送。** 加一个"把配置写到远端"的 RPC 就等于：拿下主控 = 能改所有
-机器上的配置文件，包括 SSRF 拦截开关。生成的东西由人复制过去，攻击面一点没变。
-
-机密的处理：``.env`` 里确实有真实的令牌值——那是它的用途，不给值就没法部署。
-但它只在**已登录**的管理端里出现，且和页面上其他地方的规矩一致：不写日志、
-不落盘、不进任何缓存。
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -37,8 +14,6 @@ _BANNER = "# 由 IPClick 主控的「配置 → 集群设置」生成。改完�
 @final
 @dataclass(frozen=True)
 class NodePlan:
-    """一台子节点的部署材料。"""
-
     node_id: str
     address: str
     host: str
@@ -50,22 +25,11 @@ class NodePlan:
 
     @property
     def filename_prefix(self) -> str:
-        """打包时用的文件名前缀。节点 id 可能带冒号（``host:port`` 形式的自动 id），
-        那在 Windows 上不是合法文件名。"""
         safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in self.node_id)
         return safe or f"node-{self.port}"
 
     @property
     def toml_name(self) -> str:
-        """配置文件叫什么。
-
-        按端口命名（``ipclick-9002.toml``）而不是统一的 ``ipclick.toml``：这样几台
-        节点的配置可以**并排放在同一个目录里**而不打架，``run --port 9002`` 会自己
-        找到对应那份。逐台建子目录当然也行，但那是额外的纪律，而忘记建目录的后果是
-        第二台默默覆盖第一台的配置。
-
-        ``.env`` 反过来——全集群同一份（同一个令牌、同一个共享密钥），共用一个正好。
-        """
         return f"ipclick-{self.port}.toml"
 
     def snapshot(self) -> dict[str, Any]:
@@ -99,14 +63,6 @@ def node_toml(
     forward: bool,
     max_workers: int = 100,
 ) -> str:
-    """子节点的 ``ipclick.toml``。
-
-    节点列表和主控**一模一样**——这是"任意节点都能当入口"的前提。区别只有
-    ``self_id``（这台是谁）和监听端口。
-
-    刻意不生成完整的那份带几百行注释的模板：子节点要的是"能起来、能被主控调到"，
-    其余项留空就走内置默认值。要细调再去 ``ipclick -e > ipclick.toml`` 拿完整版。
-    """
     entries = "".join(f'    {{ id = "{n["id"]}", address = "{n["address"]}" }},\n' for n in nodes if n.get("address"))
     return f"""{_BANNER}
 # 这一台是 {node_id}。
@@ -142,11 +98,6 @@ block_private_networks = false
 
 
 def node_env(*, auth_token: str, cluster_secret: str) -> str:
-    """子节点的 ``.env``。只放机密。
-
-    两个值都取自主控当前生效的那份，所以复制过去必然对得上——集群最常见的故障
-    "两边密钥差一个字符"在这里就没有发生的机会了。
-    """
     lines = [
         _BANNER,
         "# 权限应为 600：chmod 600 .env",
@@ -163,22 +114,6 @@ def node_env(*, auth_token: str, cluster_secret: str) -> str:
 
 
 def node_commands(*, port: int, version: str, extras: str = "") -> tuple[tuple[str, str], ...]:
-    """这台子节点的部署命令。
-
-    三条踩过的坑，都写进这里了：
-
-    1. **版本要钉死。** ``uv pip install ipclick`` 会去 PyPI 抓"最新的"，而你要的
-       那个版本可能压根没发布——实测装到的是旧版，起来之后行为和主控对不上，
-       症状是各种"这个参数怎么不认"。所以一律 ``ipclick=={version}``。
-    2. **不要 ``uv run``。** 它会重新解析一遍依赖，可能装到别的地方去；而且这里
-       目录里没有 ``pyproject.toml``，``uv run`` 的语义并不是"跑我刚装的那个"。
-       直接用 ``.venv/bin/ipclick``，指哪打哪。
-    3. **本地 wheel 那条不能省。** 自己 build 的版本不在任何索引上，前两条都装不到，
-       只能从主控把 wheel 拷过去。
-
-    ``--port`` 让它去读 ``ipclick-<端口>.toml``（见 loader.candidate_names），
-    所以多个节点的配置可以并排放在同一个目录里。
-    """
     suffix = f"[{extras}]" if extras else ""
     pinned = f'"ipclick{suffix}=={version}"'
     wheel = f"ipclick-{version}-py3-none-any.whl{suffix}"
@@ -205,17 +140,6 @@ WEB_PORT_OFFSET = 10000
 
 
 def _web_port_for(port: int, nodes: list[dict[str, Any]]) -> int:
-    """给一台子节点挑 Web 管理端端口。
-
-    默认端口的部署保持 9528/9527 那一对——那是文档和横幅里反复出现的组合，
-    换掉只会多一个要记的数。其余情况加一万，然后**对着真实的节点列表核对**：
-    算出来的值不能等于任何一台的 gRPC 端口。
-
-    0.5.0 之前这里是 ``port - 1``，配上连续分配的 19001/19002/19003，生成出的
-    Web 端口是 19000/19001/19002 —— node-2 的 Web 端口正好等于 node-1 的 gRPC
-    端口。同机部署直接起不来（服务端没开 SO_REUSEPORT），跨机部署则是凭空又
-    造一批"这个端口到底是谁的"。
-    """
     if port == DEFAULT_GRPC_PORT:
         return DEFAULT_WEB_PORT
     taken = {p for _, p in (_split_address(str(n.get("address") or "")) for n in nodes)}
@@ -238,7 +162,6 @@ def build_plan(
     extras: str = "",
     max_workers: int = 100,
 ) -> NodePlan:
-    """一台子节点的完整部署材料。"""
     if not version:
         from ipclick import __version__
 
@@ -267,12 +190,6 @@ def build_plan(
 
 
 def bundle(plans: list[NodePlan]) -> bytes:
-    """把所有节点的材料打成一个 zip。
-
-    一台一台点"下载"在三五台时还行，再多就是纯苦力。zip 里按节点分目录，
-    外加一个 ``README.txt`` 说明每台该怎么用——解压出来的东西必须自解释，
-    否则过两周就没人记得哪个目录对应哪台机器。
-    """
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         readme = [

@@ -1,29 +1,3 @@
-"""浏览器渲染引擎。
-
-四个引擎，其中三个共用同一套代码：
-
-===============  ==========================  ===============================
-引擎             底层                        为什么要它
-===============  ==========================  ===============================
-``camoufox``     Firefox（Playwright API）   反检测做得最彻底，自带指纹伪装
-``patchright``   Chromium（Playwright API）  Playwright 的反检测分支，API 全兼容
-``playwright``   Chromium/Firefox/WebKit     原版，最稳，行为最可预期
-``drissionpage`` Chromium（CDP 直连）        Windows 上生态成熟，不依赖 Playwright
-===============  ==========================  ===============================
-
-前三个都产出一个 ``playwright.async_api.Browser``，所以
-:mod:`ipclick.adapters.browser_adapter` 那一套线程模型、上下文隔离、资源拦截
-全部复用，这里只负责"怎么把浏览器拉起来"。DrissionPage 是另一套 API，
-单独实现在 :mod:`ipclick.adapters.drission_adapter`。
-
-平台默认
---------
-``[BROWSER].engine = "auto"`` 时按平台选：
-
-* **Windows** → ``drissionpage``
-* **Linux / macOS** → ``camoufox``
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -49,60 +23,53 @@ _camoufox_not_installed: Any = _UNPROBED
 
 
 class _NeverRaised(Exception):
-    """camoufox 未安装时的占位异常类型，让对应的 except 分支永远不命中。"""
+    pass
 
 
 def _playwright_async_api() -> Any:
-    """``playwright.async_api.async_playwright``，第一次用到时才 import。"""
     global _playwright_api
     if _playwright_api is _UNPROBED:
         try:
             from playwright.async_api import async_playwright
 
             _playwright_api = async_playwright
-        except ImportError:  # pragma: no cover - 取决于安装环境
+        except ImportError:
             _playwright_api = None
     return _playwright_api
 
 
 def _patchright_async_api() -> Any:
-    """``patchright.async_api.async_playwright``，同上。"""
     global _patchright_api
     if _patchright_api is _UNPROBED:
         try:
             from patchright.async_api import async_playwright
 
             _patchright_api = async_playwright
-        except ImportError:  # pragma: no cover - 取决于安装环境
+        except ImportError:
             _patchright_api = None
     return _patchright_api
 
 
 def _camoufox_async_new_browser() -> Any:
-    """``camoufox.AsyncNewBrowser``，同上。"""
     global _camoufox_new_browser
     if _camoufox_new_browser is _UNPROBED:
         try:
             from camoufox import AsyncNewBrowser
 
             _camoufox_new_browser = AsyncNewBrowser
-        except ImportError:  # pragma: no cover - 取决于安装环境
+        except ImportError:
             _camoufox_new_browser = None
     return _camoufox_new_browser
 
 
 def _camoufox_not_installed_error() -> type[Exception]:
-    """camoufox 报"浏览器本体没下"用的异常类型。
-
-    没装 camoufox 时返回一个永不被抛的占位类型，这样 except 分支不必写 if。
-    """
     global _camoufox_not_installed
     if _camoufox_not_installed is _UNPROBED:
         try:
             from camoufox.exceptions import CamoufoxNotInstalled
 
             _camoufox_not_installed = CamoufoxNotInstalled
-        except ImportError:  # pragma: no cover - 取决于安装环境
+        except ImportError:
             _camoufox_not_installed = _NeverRaised
     return _camoufox_not_installed or _NeverRaised
 
@@ -130,16 +97,10 @@ FINGERPRINT_MANAGED: frozenset[str] = frozenset({"camoufox"})
 
 
 def default_engine() -> str:
-    """按平台选默认引擎。
-
-    Windows 上 DrissionPage 生态成熟、不用额外下浏览器；Linux/macOS 上
-    Camoufox 的反检测能力更强，且它自带的 Firefox 在无头服务器上更好伺候。
-    """
     return "drissionpage" if sys.platform == "win32" else "camoufox"
 
 
 def resolve_engine(name: str | None) -> str:
-    """把 ``[BROWSER].engine`` 的取值解析成具体引擎名。"""
     engine = (name or "auto").strip().lower()
     if engine in ("", "auto"):
         return default_engine()
@@ -149,16 +110,6 @@ def resolve_engine(name: str | None) -> str:
 
 
 def package_installed(engine: str) -> bool:
-    """引擎的 **Python 包** 装了没。
-
-    只回答"能不能 import"这一半。浏览器本体是另一半，见 :func:`browser_ready`——
-    两者分开是因为它们缺失时的处理方式不同：包缺了要 pip install，
-    浏览器本体缺了要跑各自的 fetch/install 命令。
-
-    走 :func:`ipclick.utils.module_probe.installed`（find_spec）而不是真 import：
-    这样进程不重启也能反映出终端里的安装**和卸载**。真正的 import 在启动浏览器
-    那一刻才发生。
-    """
     modules = ENGINE_MODULES.get(engine)
     if not modules:
         return False
@@ -166,13 +117,6 @@ def package_installed(engine: str) -> bool:
 
 
 def refresh() -> None:
-    """丢掉安装状态缓存，下次探测重新看磁盘。
-
-    安装/卸载之后调用（Web 端的「刷新状态」按钮和安装任务结束时各调一次）。
-    刻意**不**动那三个懒加载缓存：一个已经 import 进来的 playwright 无法从内存里
-    卸掉，把全局量清回 _UNPROBED 只会让下次再 import 一遍同一个模块对象，徒增
-    风险而没有收益。展示层看的是 find_spec 的结论，那一层是准的。
-    """
     module_probe.invalidate()
     with _browser_ready_lock:
         _browser_ready_cache.clear()
@@ -183,17 +127,6 @@ _browser_ready_lock = threading.Lock()
 
 
 def browser_ready(engine: str, settings: BrowserSettings | None = None) -> tuple[bool | None, str]:
-    """**浏览器本体** 就绪没。返回 ``(结果, 说明)``，结果为 None 表示查不出来。
-
-    为什么非要单独查这一项：``pip install camoufox`` 只装几 MB 的 Python 包，
-    浏览器本体（本机实测 1.3 GB）是 ``python -m camoufox fetch`` 下的。而 camoufox
-    的 ``camoufox_path(download_if_missing=True)`` 是**默认值**——不查的话，第一个
-    浏览器请求会在 gRPC 处理线程里开始下 1.3 GB：请求必然超时，并发的多个首请求
-    还可能各自触发一次下载，超时返回后下载仍在后台跑，看起来就像"这个引擎坏了"。
-
-    查不出来时返回 None 而不是 False：宁可显示"未知"，也不要把一台装好的机器
-    误报成没装（那会让人去重装一遍已经装好的东西）。
-    """
     resolved = settings or BrowserSettings()
     key = (
         engine,
@@ -226,20 +159,6 @@ def _probe_browser(engine: str, resolved: BrowserSettings) -> tuple[bool | None,
 
 
 def _resolve_camoufox_binary() -> str:
-    """算出 camoufox 浏览器本体的可执行文件路径。**绝不触发下载。**
-
-    刻意不用 camoufox 自己的 ``launch_path()``：它内部走
-    ``camoufox_path(download_if_missing=True)``——**默认值就是会下载**。也就是说
-    连"查一下装没装"都能让它开始下 1 GB。这在 Web 端尤其危险：渲染一次总览页面
-    就可能触发下载。
-
-    所以这里显式传 ``download_if_missing=False``，再自己拼出可执行文件名
-    （规则照抄它的 ``get_path``：mac 上在 .app 包里，其余平台在根目录）。
-
-    Raises:
-        Exception: camoufox 抛的 CamoufoxNotInstalled / UnsupportedVersion 等。
-            类型不稳定，由调用方统一转成 AdapterError。
-    """
     from camoufox.pkgman import LAUNCH_FILE, OS_NAME, camoufox_path
 
     root = camoufox_path(download_if_missing=False)
@@ -249,7 +168,6 @@ def _resolve_camoufox_binary() -> str:
 
 
 def _camoufox_browser_ready() -> tuple[bool | None, str]:
-    """camoufox 的检查是**确定的**：能算出路径且文件在，就是就绪。"""
     try:
         path = _resolve_camoufox_binary()
     except ImportError:
@@ -262,11 +180,6 @@ def _camoufox_browser_ready() -> tuple[bool | None, str]:
 
 
 def playwright_registry_dir(engine: str) -> Path | None:
-    """playwright / patchright 放浏览器的目录。
-
-    解析规则照抄它们 node 驱动里的实现（``PLAYWRIGHT_BROWSERS_PATH`` == "0" 时
-    装在包目录内，否则用环境变量或按平台的缓存目录）。
-    """
     env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
     if env == "0":
         try:
@@ -287,12 +200,6 @@ def playwright_registry_dir(engine: str) -> Path | None:
 
 
 def _playwright_browser_ready(engine: str, kind: str) -> tuple[bool | None, str]:
-    """看下载目录里有没有对应内核。
-
-    目录布局在不同 playwright 版本间变过（曾经是 ``ms-playwright/chromium-1234``，
-    也见过多一层 ``ms-playwright/b/...``），所以按前缀在两层深度内找，
-    而不是写死一层。
-    """
     directory = playwright_registry_dir(engine)
     if directory is None:
         return None, "无法确定浏览器下载目录"
@@ -309,13 +216,12 @@ def _playwright_browser_ready(engine: str, kind: str) -> tuple[bool | None, str]
             for entry in sorted(parent.iterdir()):
                 if entry.is_dir() and entry.name.startswith(kind):
                     return True, str(entry)
-    except OSError as e:  # pragma: no cover - 权限问题
+    except OSError as e:
         return None, f"无法读取 {directory}：{e}"
     return False, f"{directory} 里没有 {kind}（未执行 {engine} install {kind}）"
 
 
 def _system_chrome_ready() -> tuple[bool | None, str]:
-    """DrissionPage 用本机已装的 Chrome/Chromium，不下载任何东西。"""
     import shutil
 
     for name in ("chrome", "google-chrome", "chromium", "chromium-browser", "msedge"):
@@ -339,8 +245,6 @@ def _system_chrome_ready() -> tuple[bool | None, str]:
 @final
 @dataclass(frozen=True)
 class EngineStatus:
-    """一个引擎的完整安装状态。"""
-
     engine: str
     package: bool
     browser: bool | None
@@ -348,16 +252,10 @@ class EngineStatus:
 
     @property
     def ready(self) -> bool:
-        """能不能直接拿来用。
-
-        ``browser is None``（查不出来）时按能用处理：宁可让它真启动一次去报错，
-        也不要因为检查不到就拒绝一台其实装好了的机器。
-        """
         return self.package and self.browser is not False
 
     @property
     def label(self) -> str:
-        """给人看的一句话状态。"""
         if not self.package:
             return "包未安装"
         if self.browser is False:
@@ -368,7 +266,6 @@ class EngineStatus:
 
 
 def engine_status(engine: str, settings: BrowserSettings | None = None) -> EngineStatus:
-    """查一个引擎装到什么程度了。"""
     package = package_installed(engine)
     if not package:
         return EngineStatus(engine=engine, package=False, browser=None, detail=INSTALL_HINTS.get(engine, "缺少依赖"))
@@ -377,12 +274,6 @@ def engine_status(engine: str, settings: BrowserSettings | None = None) -> Engin
 
 
 def is_available(engine: str, settings: BrowserSettings | None = None) -> bool:
-    """引擎能不能用（包 **与** 浏览器本体）。
-
-    0.3 起把浏览器本体也算进来了。此前只查 Python 包，于是
-    ``pip install "ipclick[camoufox]"`` 但没 fetch 的机器上，``config-info`` 与
-    Web 端都显示"可用"，而第一次用会卡几分钟下 1.3 GB。
-    """
     return engine_status(engine, settings).ready
 
 
@@ -392,8 +283,6 @@ def available_engines(settings: BrowserSettings | None = None) -> list[str]:
 
 @dataclass(frozen=True)
 class LaunchedBrowser:
-    """一次启动的产物。关闭时两个都要收，否则 driver 进程会泄漏。"""
-
     driver: Any
     browser: Any
 
@@ -413,13 +302,6 @@ def _chromium_launch_options(settings: BrowserSettings) -> dict[str, Any]:
 
 
 async def launch(engine: str, settings: BrowserSettings) -> LaunchedBrowser:
-    """拉起浏览器，返回 (driver, browser)。
-
-    必须在事件循环线程里调用。
-
-    Raises:
-        AdapterError: 依赖没装，或浏览器起不来。
-    """
     status = engine_status(engine, settings)
     if not status.ready:
         raise AdapterError(
@@ -453,14 +335,9 @@ async def _launch_playwright_like(api: Any, engine: str, settings: BrowserSettin
 
 
 def _camoufox_executable() -> str:
-    """解析 camoufox 浏览器本体的路径，缺了就报错——绝不触发下载。
-
-    Raises:
-        AdapterError: 本体未就绪。
-    """
     try:
         path = _resolve_camoufox_binary()
-    except ImportError as e:  # pragma: no cover - package_installed 已经挡过
+    except ImportError as e:
         raise AdapterError(f"camoufox 包未安装：{INSTALL_HINTS['camoufox']}") from e
     except Exception as e:
         raise AdapterError(
@@ -473,7 +350,6 @@ def _camoufox_executable() -> str:
 
 
 async def _launch_camoufox(settings: BrowserSettings) -> LaunchedBrowser:
-    """Camoufox 用的是它自己下载的 Firefox，``[BROWSER].browser`` 在这里没有意义。"""
     if settings.kind != "firefox":
         log.debug(f"camoufox 只有 Firefox 内核，忽略 [BROWSER].browser = {settings.kind!r}")
 

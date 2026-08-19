@@ -1,22 +1,3 @@
-"""gRPC 共享令牌鉴权。
-
-IPClick 服务端会代替调用方请求任意 URL。在此之前它没有任何鉴权，
-任何能连到端口的人都能拿它当代理用——SSRF 防护限制的是"能打到哪儿"，
-不解决"谁能用"。这两件事不能互相替代。
-
-传输方式采用 gRPC 标准做法：``authorization: Bearer <token>`` metadata 头，
-任何语言的 gRPC 客户端都能对接。
-
-令牌来源优先级：环境变量 ``IPCLICK_AUTH_TOKEN`` > 配置文件
-``[SECURITY].auth_token``。密钥不该写进配置文件，环境变量是首选。
-支持配置多个令牌以便轮换时新旧并存。
-
-注：本模块使用 ``from __future__ import annotations``。grpc 的类型 stub 把
-``RpcMethodHandler`` 声明成泛型，但运行时的类并不支持下标，直接写
-``RpcMethodHandler[Any, Any]`` 会在 import 期抛 TypeError。延迟求值让类型
-检查器能看到参数、运行时又不去真正求值。
-"""
-
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
@@ -44,14 +25,6 @@ _EXEMPT_METHOD_PREFIXES: tuple[str, ...] = (
 
 
 def load_tokens(security_config: dict[str, Any] | None = None) -> tuple[str, ...]:
-    """收集所有有效令牌。
-
-    Args:
-        security_config: 配置文件的 ``[SECURITY]`` 节。
-
-    Returns:
-        去重后的令牌元组；为空表示未启用鉴权。
-    """
     tokens: list[str] = []
 
     env_token = os.getenv(AUTH_TOKEN_ENV, "").strip()
@@ -69,16 +42,10 @@ def load_tokens(security_config: dict[str, Any] | None = None) -> tuple[str, ...
 
 
 def is_exempt(method: str) -> bool:
-    """该 gRPC 方法是否免鉴权。"""
     return method.startswith(_EXEMPT_METHOD_PREFIXES)
 
 
 def extract_token(metadata: Sequence[tuple[str, Any]] | None) -> str | None:
-    """从 gRPC metadata 中取出令牌。
-
-    同时接受带 ``Bearer `` 前缀和裸令牌两种写法——后者方便 grpcurl 之类的
-    工具手动调试。
-    """
     if not metadata:
         return None
 
@@ -97,11 +64,6 @@ def extract_token(metadata: Sequence[tuple[str, Any]] | None) -> str | None:
 
 
 def token_matches(candidate: str | None, valid_tokens: Sequence[str]) -> bool:
-    """常量时间比较，避免通过响应耗时逐字节猜出令牌。
-
-    注意必须遍历完所有令牌，不能命中就 break——提前返回会让"匹配第 1 个"
-    和"匹配第 3 个"耗时不同，重新引入时序侧信道。
-    """
     if not candidate:
         return False
 
@@ -113,19 +75,12 @@ def token_matches(candidate: str | None, valid_tokens: Sequence[str]) -> bool:
 
 
 def build_client_metadata(token: str | None) -> tuple[tuple[str, str], ...]:
-    """构造客户端调用时附带的 metadata。token 为空则返回空元组。"""
     if not token:
         return ()
     return ((AUTH_METADATA_KEY, f"{BEARER_PREFIX}{token}"),)
 
 
 class TokenAuthInterceptor(grpc.ServerInterceptor):
-    """校验 ``authorization`` metadata 的服务端拦截器。
-
-    令牌列表为空时直接放行——这样现有部署升级后不会立刻全部中断，
-    但服务端启动时会打一条显著的告警。
-    """
-
     def __init__(self, tokens: Sequence[str]):
         self._tokens: tuple[str, ...] = tuple(tokens)
         self._deny: grpc.RpcMethodHandler[Any, Any] = grpc.unary_unary_rpc_method_handler(self._reject)
@@ -136,12 +91,6 @@ class TokenAuthInterceptor(grpc.ServerInterceptor):
 
     @property
     def tokens(self) -> tuple[str, ...]:
-        """有效令牌，只读。
-
-        给 aio 拦截器复用**同一份**令牌与判定函数用。鉴权规则在同步/异步两条路上
-        各写一份，就等着哪天异步模式悄悄放行了本该拒绝的调用——而那种缺陷不会
-        报错，只会安静地少拦一些人。
-        """
         return self._tokens
 
     @staticmethod

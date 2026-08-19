@@ -1,5 +1,3 @@
-"""集群节点模型与状态。"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -12,12 +10,6 @@ from ipclick.exceptions import ConfigError
 
 
 class NodeStatus(StrEnum):
-    """节点状态。
-
-    ``UNKNOWN`` 是刚启动、还没探过活的状态。它被当作**可用**处理——
-    否则冷启动的一瞬间所有节点都不可用，第一批请求会全部失败。
-    """
-
     UNKNOWN = "unknown"
     HEALTHY = "healthy"
     UNHEALTHY = "unhealthy"
@@ -25,8 +17,6 @@ class NodeStatus(StrEnum):
 
 @dataclass(frozen=True)
 class Node:
-    """一个 IPClick 服务端节点。"""
-
     id: str
     host: str
     port: int
@@ -42,11 +32,6 @@ class Node:
 
     @classmethod
     def from_config(cls, entry: dict[str, Any], index: int = 0) -> Node:
-        """从 ``[CLUSTER].nodes`` 的一项构造。
-
-        Raises:
-            ConfigError: address 缺失或格式不合法。
-        """
         address = str(entry.get("address", "")).strip()
         if not address:
             raise ConfigError(f"集群节点 #{index} 缺少 address")
@@ -81,12 +66,6 @@ class Node:
 
 
 class NodeState:
-    """单个节点的运行时状态。
-
-    与 :class:`Node` 分开：Node 是配置（不可变），这里是随时间变化的部分。
-    所有字段都在锁内读写——健康探测在后台线程，选节点在请求线程。
-    """
-
     def __init__(self, node: Node):
         self.node: Node = node
         self._lock: threading.Lock = threading.Lock()
@@ -106,12 +85,10 @@ class NodeState:
 
     @property
     def is_available(self) -> bool:
-        """能否派发请求。UNKNOWN 视为可用，理由见 :class:`NodeStatus`。"""
         with self._lock:
             return self._status is not NodeStatus.UNHEALTHY
 
     def snapshot(self) -> dict[str, Any]:
-        """给状态页 / 日志用的只读快照。"""
         with self._lock:
             return {
                 "id": self.node.id,
@@ -130,14 +107,6 @@ class NodeState:
             }
 
     def record_probe(self, healthy: bool, detail: str, *, failure_threshold: int, recovery_threshold: int) -> bool:
-        """记录一次健康探测结果。
-
-        用连续次数阈值而不是单次结果来切换状态：一次探测抖动就把节点摘掉、
-        下一次又加回来，会让流量在节点间反复横跳（flapping）。
-
-        Returns:
-            状态是否发生了变化。
-        """
         with self._lock:
             previous = self._status
             self._last_checked = time.time()
@@ -158,33 +127,24 @@ class NodeState:
             return self._status is not previous
 
     def record_request(self, success: bool) -> None:
-        """记录一次真实请求的结果（用于统计与快速失败判断）。"""
         with self._lock:
             self._total_requests += 1
             if not success:
                 self._total_failures += 1
 
     def mark_unhealthy(self, reason: str) -> None:
-        """请求侧发现节点不可用时立刻摘除，不等下一轮探测。"""
         with self._lock:
             self._status = NodeStatus.UNHEALTHY
             self._last_error = reason
             self._consecutive_successes = 0
 
     def update_node(self, node: Node) -> None:
-        """换掉配置部分（地址 / 权重变了），**保留**运行时状态。
-
-        热更新节点列表时用。重建一个 NodeState 会把健康计数清零，那样
-        "连续 N 次才切状态"的判定永远达不到，熔断与恢复双双失效。
-        """
         with self._lock:
             self.node = node
 
 
 @dataclass
 class ClusterConfig:
-    """``[CLUSTER]`` 配置。"""
-
     nodes: tuple[Node, ...] = ()
     strategy: str = "round_robin"
     failure_threshold: int = 2
@@ -211,7 +171,6 @@ class ClusterConfig:
 
     @classmethod
     def from_config(cls, cluster_config: dict[str, Any] | None) -> ClusterConfig:
-        """从配置文件的 ``[CLUSTER]`` 节构造。节点列表为空即视为未启用集群。"""
         config = dict(cluster_config or {})
 
         raw_nodes = config.get("nodes") or []

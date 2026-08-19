@@ -1,13 +1,3 @@
-"""重新生成 task.proto 的 Python / gRPC 代码。
-
-用法：
-    uv run python -m ipclick.dto.proto.generate
-
-grpc_tools 生成的 task_pb2_grpc.py 使用顶层导入 ``import task_pb2``，
-在包内会 ImportError。以前这一行是每次手工改回相对导入的（见 task.proto
-顶部的注释），本脚本把这一步固化下来，避免再次遗漏。
-"""
-
 from pathlib import Path
 import subprocess
 import sys

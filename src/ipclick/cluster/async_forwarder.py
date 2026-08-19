@@ -1,25 +1,3 @@
-"""异步模式下的服务端转发（0.7.0）。
-
-解掉 ``[SERVER].async_mode`` 与 ``[CLUSTER].forward = "on"`` 的互斥。
-
-设计上是**组合而非重写**：路由决策（挑节点、故障转移、防环路、健康计数）
-全部复用 :class:`~ipclick.cluster.forwarder.ForwardingTaskService`，本文件
-只决定"这一跳怎么执行"——
-
-* 本地执行 → 走 :class:`~ipclick.services.async_task_service.AsyncTaskService`
-  那条真异步路径，拿到协程的全部好处
-* 转发给别的节点 → 出站那一跳仍是**同步 gRPC stub**，丢进线程池执行
-
-为什么出站不一并换成 ``grpc.aio``：那需要重做连接池、TLS 凭据、故障转移与
-健康计数这一整套，而它们现在是转发模式最要紧、也最经得起考验的部分。
-把它们照搬到 aio 上是一次独立的重构，风险不该和"服务端换并发模型"捆在一起。
-
-**代价说清楚**：被转发出去的请求，每个仍占一个线程直到对端回话。所以异步模式
-对纯转发流量的收益有限；收益集中在**入口自己执行**的那部分（``forward="on"``
-时入口本来就在 nodes 里，会分到相当比例的活）。想让转发那一跳也不占线程，
-等后续把出站换成 aio。
-"""
-
 import asyncio
 from typing import Any, final
 
@@ -35,28 +13,12 @@ from ipclick.utils.log_util import log
 
 
 @final
-class AsyncForwardingTaskService(  # pyright: ignore[reportUnsafeMultipleInheritance, reportIncompatibleMethodOverride]
-    AsyncTaskService, ForwardingTaskService
-):
-    """异步 + 服务端转发。
-
-    MRO 是 AsyncTaskService → ForwardingTaskService → TaskService：
-    构造走 ForwardingTaskService（节点池、self_id、TLS 那一套），
-    RPC 入口走 AsyncTaskService，而 :meth:`Send` 在这里显式编排两者。
-    """
-
+class AsyncForwardingTaskService(AsyncTaskService, ForwardingTaskService):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """显式转给 ForwardingTaskService 的构造。
-
-        MRO 上 AsyncTaskService 没有 __init__，所以不写这一句也能跑通。但写出来
-        是有价值的：多重继承下"父类构造到底有没有被调用"是靠 MRO 推出来的，
-        而 MRO 会随着谁加了个 __init__ 而变——那时节点池、self_id、TLS 全部
-        不会初始化，症状是转发时 AttributeError，跟继承顺序毫无字面联系。
-        """
         ForwardingTaskService.__init__(self, *args, **kwargs)
 
     @override
-    async def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":  # pyright: ignore[reportIncompatibleMethodOverride]
+    async def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
         if is_forwarded(context):
             self._local_count += 1
             return await AsyncTaskService.Send(self, request, context)

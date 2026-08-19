@@ -105,6 +105,9 @@ reportUnknownLambdaType = "none"
 reportImplicitStringConcatenation = false
 # 要求所有未被消费的返回值写成 `_ = ...`，噪音大于收益
 reportUnusedCallResult = false
+reportIncompatibleMethodOverride = false
+reportUnsafeMultipleInheritance = false
+reportMissingSuperCall = false
 
 [tool.ruff]
 # 代码格式化

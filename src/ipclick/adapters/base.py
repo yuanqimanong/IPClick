@@ -23,8 +23,6 @@ UA_POOL_SIZE = 32
 
 @dataclass
 class StreamHeader:
-    """流式响应的元信息，总是第一个 yield 出来的元素。"""
-
     url: str
     status_code: int
     headers: dict[str, str] = field(default_factory=dict)
@@ -39,11 +37,6 @@ MAX_RETRY_DELAY = AdapterSettings().max_backoff
 
 
 def _coerce_delay(value: Any, default: float) -> float:
-    """把 retry_delay 归一成秒数。
-
-    历史上它既可能是 float（服务端传来的 retry_backoff_seconds），
-    也可能是 (min, max) 元组（适配器自身的默认值）。
-    """
     if value is None:
         return default
     try:
@@ -60,18 +53,6 @@ def _coerce_delay(value: Any, default: float) -> float:
 def retry(
     max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_delay"
 ) -> Callable[[Callable[..., Response]], Callable[..., Response]]:
-    """
-    重试装饰器，支持指数退避和随机延迟
-
-    返回类型写全（而不是 ``Callable[..., Any]``）是为了让被装饰的方法保住
-    ``-> Response``：写成 Any 的话，类型检查器认为 ``self.download(...)`` 返回
-    Any，之后对结果的任何误用都查不出来——而这个装饰器套在每一个适配器的
-    download 上。
-
-    Args:
-        max_retries_attr: 最大重试次数属性名
-        retry_delay_attr: 重试延迟属性名
-    """
 
     def decorator(func: Callable[..., Response]) -> Callable[..., Response]:
         @functools.wraps(func)
@@ -159,16 +140,6 @@ def retry(
 def aretry(
     max_retries_attr: str = "max_retries", retry_delay_attr: str = "retry_delay"
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """:func:`retry` 的异步版。
-
-    单独写一份而不是复用同步那个：里面的 ``time.sleep`` 在协程里会**阻塞整个
-    事件循环**——不是拖慢这一个请求，是让同一个循环上所有在飞的请求一起停住。
-    默认退避 1+2+4 秒，一次重试就能把整个 worker 冻结七秒，而现象是"毫不相干的
-    请求也集体变慢"，极难联想到是某个失败请求在退避。
-
-    行为与同步版逐条对齐：只重试真正值得重试的，ValidationError / AdapterError
-    直接抛（重试改变不了参数写错或依赖没装）。
-    """
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(func)
@@ -246,11 +217,6 @@ def _backoff(
     exponent: float = 2.0,
     max_backoff: float = MAX_RETRY_DELAY,
 ) -> float:
-    """指数退避 + 抖动，并封顶到 max_backoff。
-
-    抖动可以避免多个并发任务在同一时刻集体重试（惊群）。
-    exponent / max_backoff 来自 [DOWNLOADER.retry] 配置。
-    """
     delay = min(base_delay * (exponent**attempt), max_backoff)
     return delay * uniform(0.8, 1.2)
 
@@ -262,24 +228,6 @@ _JS_FUNCTION_PREFIXES = ("function", "async", "(", "=>")
 
 
 def normalize_js(script: str) -> str:
-    """把 ``automation_script`` 归一成 Playwright ``evaluate`` 能吃的形式。
-
-    统一三个写法，因为两套引擎的原生要求本来就不同：
-
-    * DrissionPage 的 ``run_js`` 要求用 ``return x`` 取值。
-    * Playwright 的 ``evaluate`` 要的是**表达式或函数**，顶层 ``return`` 直接
-      ``SyntaxError: Illegal return statement``。
-
-    调用方不该为了换个引擎重写脚本，所以这里做转换而不是把差异甩给调用方：
-
-    ==============================  ==========================================
-    写法                            处理
-    ==============================  ==========================================
-    ``() => ...`` / ``function...``  原样透传
-    含 ``return`` 的语句块          包成 ``() => { ... }``
-    单个表达式                      包成 ``() => (...)``
-    ==============================  ==========================================
-    """
     text = script.strip()
     if not text:
         return text
@@ -300,12 +248,6 @@ _PERMANENT_NAV_ERRORS = (
 
 
 def raise_if_permanent_navigation_error(error: Exception) -> None:
-    """浏览器说"这个 URL 我压根不会去连"时，转成参数错误。
-
-    这类失败重试多少次都是同样的结果，而浏览器路径重试一次的代价是几秒到几十秒
-    （实测一个 ERR_UNSAFE_PORT 的 URL 要 15.9 秒才返回）。而且报成 -1 会让调用方
-    以为是网络故障，实际是自己 URL 写错了。
-    """
     text = str(error)
     for marker in _PERMANENT_NAV_ERRORS:
         if marker in text:
@@ -313,12 +255,6 @@ def raise_if_permanent_navigation_error(error: Exception) -> None:
 
 
 def raise_if_script_error(error: Exception, script: str | None) -> None:
-    """脚本本身写错了就转成 ValidationError（不重试、报 INVALID_ARGUMENT）。
-
-    ``automation_script`` 是**调用方提供的 JavaScript**，在页面里 evaluate。写错了
-    （语法错、引用了不存在的变量）重试多少次都是同样的结果——默认配置下一个拼错的
-    脚本要先起三次浏览器、睡够 15 秒才返回，而且最终报成 -1，看起来像网络故障。
-    """
     if not script:
         return
     text = str(error)
@@ -329,16 +265,9 @@ def raise_if_script_error(error: Exception, script: str | None) -> None:
 
 
 class DownloaderAdapter(ABC):
-    """下载器抽象基类"""
-
     adapter_name: str = "base_downloader_adapter"
 
     def __init__(self, settings: AdapterSettings | None = None):
-        """
-        Args:
-            settings: 来自配置文件 ``[DOWNLOADER]`` 节的默认行为。
-                请求级参数（timeout / max_retries / ...）优先于这里的值。
-        """
         self.settings: AdapterSettings = settings or AdapterSettings()
         self._ua_lock: threading.Lock = threading.Lock()
         self._ua_pool_cache: list[str] | None = None
@@ -380,61 +309,15 @@ class DownloaderAdapter(ABC):
         allowed_status_codes: list[Any] | None = None,
         kwargs: str | None = None,
     ) -> Response:
-        """
-        执行HTTP请求
-
-        Args:
-            url: 请求URL
-            method: 请求方法
-            headers: 请求头
-            cookies: 请求cookies
-            params: 请求参数
-            data: 请求数据
-            json: 请求JSON数据
-            files: multipart 文件上传（仅本地直接调用适配器时可用——
-                gRPC 协议里没有这个字段，跨网络请自己拼 multipart 体走 data）
-            proxy: 代理地址
-            timeout: 超时时间
-            max_retries: 最大重试次数
-            retry_delay: 重试退避基数（秒）
-            verify: SSL证书验证
-            allow_redirects: 允许重定向
-            stream: 是否流式读取
-            impersonate: 浏览器指纹伪装（只有 curl_cffi 支持；其余适配器收到会报错）
-            automation_config: 自动化配置
-            automation_script: 自动化脚本
-            allowed_status_codes: 可接受的状态码（不触发重试）
-            kwargs: 透传给底层客户端的额外参数（JSON 字符串）
-
-        Returns:
-            Response: 统一的响应对象
-        """
         raise NotImplementedError
 
     supports_async: bool = False
 
     async def adownload(self, url: str, **kwargs: Any) -> Response:
-        """异步执行一次请求。
-
-        默认实现把同步的 :meth:`download` 丢进线程池——**语义完全一致，
-        只是拿不到协程的好处**（那个线程仍然是稀缺资源）。真正想要收益的
-        适配器覆写此方法并把 ``supports_async`` 置 True。
-
-        为什么不把 download 直接改成 async：那会打断每一个第三方适配器，
-        而它们看不到任何提示——基类方法签名变了，子类的同步实现会被当成
-        协程去 await，报出来的错误（"object Response can't be used in
-        'await' expression"）和真正的原因（"你的适配器该改成 async 了"）
-        之间没有任何字面联系。
-        """
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, functools.partial(self.download, url, **kwargs))
 
     async def adownload_stream(self, url: str, **kwargs: Any) -> "AsyncIterator[StreamEvent]":
-        """异步流式。默认把同步迭代器逐个搬到线程池里取。
-
-        逐个搬而不是一次性取完：流式的意义就在于响应体不整个进内存，
-        先 list() 再 yield 等于把这个性质丢掉。
-        """
         loop = asyncio.get_running_loop()
         iterator = await loop.run_in_executor(None, functools.partial(self.download_stream, url, **kwargs))
         sentinel = object()
@@ -451,18 +334,6 @@ class DownloaderAdapter(ABC):
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         **kwargs: Any,
     ) -> "Iterator[StreamEvent]":
-        """流式执行请求：先 yield 一个 :class:`StreamHeader`，随后 yield 若干 bytes 分片。
-
-        与 :meth:`download` 的区别在于响应体不会整个进内存。适配器可以覆写此方法
-        提供真正的流式实现；基类给出一个回退实现——先整体下载再切片，
-        接口一致但省不了内存，仅用于尚未支持流式的适配器。
-
-        注意这里**不套 @retry**：重试意味着要么缓存已发出的分片、要么让调用方
-        看到重复数据，两者都不可接受。流式请求失败就是失败，由调用方决定重来。
-
-        Yields:
-            第一个元素是 :class:`StreamHeader`，之后是 ``bytes`` 分片。
-        """
         response = self.download(url, **kwargs)
         yield StreamHeader(
             url=response.url,
@@ -476,17 +347,6 @@ class DownloaderAdapter(ABC):
             yield content[start : start + chunk_size]
 
     def reject_impersonate(self, impersonate: str | None) -> None:
-        """本适配器不支持浏览器指纹伪装时，显式报错而不是静默忽略。
-
-        原来这个参数在 niquests 上是被默默丢掉的：调用方以为自己带了
-        Chrome 指纹，实际发出去的是裸 TLS 握手，被 Cloudflare 挡下来时根本
-        想不到是这里的问题。指纹伪装是反爬场景的核心诉求，"我以为开了但没开"
-        比"明确告诉我做不到"糟得多。
-
-        Raises:
-            ValidationError: 显式指定了 impersonate。服务端会把它映射成
-                INVALID_ARGUMENT，调用方能直接看到该换 curl_cffi。
-        """
         if impersonate:
             raise ValidationError(
                 f"{self.adapter_name} 不支持浏览器指纹伪装（impersonate={impersonate!r}）。"
@@ -495,11 +355,6 @@ class DownloaderAdapter(ABC):
 
     @staticmethod
     def parse_extra_kwargs(raw: str | None) -> dict[str, Any]:
-        """解析透传的 kwargs JSON 字符串。
-
-        SDK 总会发 ``"{}"``，但直接构造 DownloadTask 或用第三方 gRPC 客户端时
-        可能是 ``None`` / 空串，此时不应该抛 JSONDecodeError。
-        """
         if not raw:
             return {}
         try:
@@ -512,18 +367,6 @@ class DownloaderAdapter(ABC):
         return parsed if isinstance(parsed, dict) else {}
 
     def _get_user_agent(self) -> str:
-        """获取 User-Agent，fake_useragent 不可用时回退到内置 UA。
-
-        **不要**每次都调 ``generator.random``——实测那一次调用要 2.82ms，
-        单线程上限只有 355 次/秒，而且是纯 Python、全程持有 GIL。它此前
-        在 niquests 适配器的热路径上每请求调一次，实测把吞吐压到了 1/4.4
-        （543 → 2368 QPS，并发 100）。这是整个服务端最贵的一处单点开销，
-        比 GIL 本身、比 gRPC 序列化都贵。
-
-        所以改成**预生成一个池子，请求时随机取一个**：轮换 UA 的意图
-        （反检测）完整保留，但每请求的成本从 2.82ms 降到一次 list 索引。
-        池子只建一次，摊到成千上万个请求上可以忽略。
-        """
         pool = self._ua_pool
         if pool:
             return pool[randrange(len(pool))]
@@ -531,11 +374,6 @@ class DownloaderAdapter(ABC):
 
     @property
     def _ua_pool(self) -> list[str]:
-        """惰性构建的 User-Agent 池。
-
-        惰性是必要的：curl_cffi 适配器靠 impersonate 决定指纹，从不取 UA，
-        没理由让它在启动时白等一次池子构建（32 次取值约 90ms）。
-        """
         cached = self._ua_pool_cache
         if cached is not None:
             return cached
@@ -555,36 +393,28 @@ class DownloaderAdapter(ABC):
             return self._ua_pool_cache
 
     def get(self, url: str, **kwargs: Any) -> Response:
-        """GET请求快捷方法"""
         return self.download(url, method="GET", **kwargs)
 
     def post(self, url: str, **kwargs: Any) -> Response:
-        """POST请求快捷方法"""
         return self.download(url, method="POST", **kwargs)
 
     def put(self, url: str, **kwargs: Any) -> Response:
-        """PUT请求快捷方法"""
         return self.download(url, method="PUT", **kwargs)
 
     def delete(self, url: str, **kwargs: Any) -> Response:
-        """DELETE请求快捷方法"""
         return self.download(url, method="DELETE", **kwargs)
 
     def head(self, url: str, **kwargs: Any) -> Response:
-        """HEAD请求快捷方法"""
         return self.download(url, method="HEAD", **kwargs)
 
     def options(self, url: str, **kwargs: Any) -> Response:
-        """OPTIONS请求快捷方法"""
         return self.download(url, method="OPTIONS", **kwargs)
 
-    def close(self) -> None:  # noqa: B027 - 基类默认无资源可关，子类按需覆写
-        """关闭连接，释放资源"""
+    def close(self) -> None:
+        return None
 
     def __enter__(self) -> "DownloaderAdapter":
-        """上下文管理器入口"""
         return self
 
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
-        """上下文管理器退出"""
         self.close()

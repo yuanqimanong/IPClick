@@ -1,18 +1,3 @@
-"""集群状态页（只读）。
-
-**刻意只读**：不提供增删节点、改权重、手动摘挂等变更能力。这个服务已经能代
-任意 URL 发请求了，再给它一个能改配置的网页等于又开一个高价值攻击面——而状态
-页通常跑在比 gRPC 端口设防更少的地方。运维变更走配置文件，比走网页安全得多。
-
-只用标准库，不引入 Web 框架：页面就一个表格加一点 CSS，为此拉进 FastAPI
-这一串依赖不划算。
-
-提供两个端点：
-
-* ``/``          人看的 HTML 页面（自动刷新）
-* ``/api/nodes`` 机器读的 JSON，供脚本或外部面板消费
-"""
-
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -92,11 +77,6 @@ _PAGE_TEMPLATE = """<!doctype html>
 
 
 def _escape(text: Any) -> str:
-    """最小化 HTML 转义。
-
-    节点 id / region / 错误信息都可能来自配置或远端，直接拼进 HTML 会有
-    注入风险。页面是只读的，但仍然不该把未转义内容渲染出去。
-    """
     return (
         str(text)
         .replace("&", "&amp;")
@@ -118,7 +98,6 @@ def _format_ago(seconds: float | None) -> str:
 
 
 def render_page(snapshot: dict[str, Any]) -> str:
-    """把集群快照渲染成 HTML。"""
     rows: list[str] = []
     for node in snapshot.get("nodes", []):
         status = str(node.get("status", "unknown"))
@@ -159,14 +138,13 @@ def render_page(snapshot: dict[str, Any]) -> str:
 
 
 def make_handler(snapshot_provider: Callable[[], dict[str, Any]]) -> type[BaseHTTPRequestHandler]:
-    """构造一个绑定了快照来源的 HTTP handler 类。"""
 
     class StatusHandler(BaseHTTPRequestHandler):
         server_version: str = "IPClickStatus/1.0"
 
         @override
         def log_message(self, format: str, *args: Any) -> None:
-            """默认实现直接往 stderr 打，会绕过本项目的日志配置。"""
+            pass
 
         def _send(self, status: int, body: bytes, content_type: str) -> None:
             self.send_response(status)
@@ -211,22 +189,12 @@ def make_handler(snapshot_provider: Callable[[], dict[str, Any]]) -> type[BaseHT
 
 
 class StatusPageServer:
-    """在独立端口上跑集群状态页。"""
-
     def __init__(self, snapshot_provider: Callable[[], dict[str, Any]]):
         self._provider: Callable[[], dict[str, Any]] = snapshot_provider
         self._httpd: HTTPServer | None = None
         self._thread: threading.Thread | None = None
 
     def start(self, port: int, host: str = "127.0.0.1") -> bool:
-        """启动。
-
-        默认只监听 127.0.0.1——状态页会暴露内网节点地址与拓扑，不该默认对外。
-        需要远程访问时请显式配置 host，并自行加反向代理鉴权。
-
-        Returns:
-            是否成功启动。
-        """
         if self._httpd is not None:
             return True
         try:

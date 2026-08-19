@@ -1,12 +1,3 @@
-"""适配器运行参数。
-
-把配置文件的 ``[DOWNLOADER]`` 节变成适配器真正会读的对象。此前这一节只是被
-``TaskService`` 存进 ``self.adapter_config`` 就再没被读过，改了完全不生效。
-
-这里只收录能落到 curl_cffi / niquests 上的项。做不到的（按主机的并发上限、限速、
-分块下载）不做假映射——宁可在 README 里标"尚未实现"，也不要让人以为配了有用。
-"""
-
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,8 +25,6 @@ def _as_int(value: Any, default: int, *, minimum: int = 0) -> int:
 
 @dataclass(frozen=True)
 class AdapterSettings:
-    """适配器的默认行为。请求级参数优先于这里的值。"""
-
     connect_timeout: float = 10.0
     download_timeout: float = 300.0
 
@@ -52,7 +41,6 @@ class AdapterSettings:
 
     @classmethod
     def from_config(cls, downloader_config: dict[str, Any] | None) -> "AdapterSettings":
-        """从配置文件的 ``[DOWNLOADER]`` 节构造。缺失或非法的项回落到默认值。"""
         config = dict(downloader_config or {})
         retry = dict(config.get("retry") or {})
         concurrency = dict(config.get("concurrency") or {})

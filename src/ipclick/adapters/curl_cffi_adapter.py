@@ -21,7 +21,6 @@ from ipclick.utils.log_util import log
 if TYPE_CHECKING:
     from curl_cffi.requests import ProxySpec
 
-# 标成 Any 是为了让"模块或 None"这种运行时形态不必到处写 type: ignore。
 _curl_cffi: Any
 _curl_opt: Any
 _impersonate_mod: Any
@@ -31,14 +30,14 @@ try:
     from curl_cffi import CurlOpt as _curl_opt
     import curl_cffi.requests as _curl_cffi
     from curl_cffi.requests import impersonate as _impersonate_mod
-except ImportError:  # pragma: no cover - 取决于安装环境
+except ImportError:
     _curl_cffi = None
     _curl_opt = None
     _impersonate_mod = None
 
 try:
     from fake_useragent import UserAgent as _user_agent_cls
-except ImportError:  # pragma: no cover - 取决于安装环境
+except ImportError:
     _user_agent_cls = None
 
 DEFAULT_CHROME: str | None = getattr(_impersonate_mod, "DEFAULT_CHROME", None)
@@ -52,16 +51,6 @@ _PASSTHROUGH_KWARGS = frozenset({"ja3", "akamai", "default_headers", "http_versi
 
 
 class CurlCffiAdapter(DownloaderAdapter):
-    """
-    curl_cffi适配器，支持浏览器指纹伪装
-
-    优势：
-    - 更好的反检测能力
-    - 浏览器指纹伪装
-    - 更快的性能
-    - 支持HTTP/2
-    """
-
     adapter_name: str = "curl_cffi"
     supports_async: bool = True
 
@@ -82,11 +71,6 @@ class CurlCffiAdapter(DownloaderAdapter):
         self.ua_generator: Any = _user_agent_cls(platforms="desktop") if _user_agent_cls is not None else None
 
     def _get_session(self, proxy: str | None, verify: bool, impersonate: str | None) -> Any:
-        """取得（并缓存）一个 curl_cffi Session。
-
-        原实现调用模块级的 ``curl_cffi.requests.get/post/...``，每次请求都要
-        重新建连并重做 TLS 握手；``get_session()`` 虽然写了却从没被调用过。
-        """
         key = (proxy, verify, impersonate)
         session = self._sessions.get(key)
         if session is not None:
@@ -107,13 +91,6 @@ class CurlCffiAdapter(DownloaderAdapter):
             return self._sessions[key]
 
     def _build_proxies(self, proxy: str | None) -> "ProxySpec | None":
-        """构造 curl_cffi 的 proxies 参数。
-
-        libcurl 会自己读环境变量里的 http_proxy/https_proxy，Session 上的
-        ``trust_env=False`` 并不能阻止它（实测 proxies=None 和 proxies={} 都
-        仍然走环境代理）。只有显式传空字符串才能真正关掉，否则"不指定代理"
-        会静默变成"走服务端所在机器的环境代理"。
-        """
         if proxy:
             return {"http": proxy, "https": proxy}
         if self.trust_env:
@@ -121,12 +98,6 @@ class CurlCffiAdapter(DownloaderAdapter):
         return {"http": "", "https": ""}
 
     def _build_request_kwargs(self, source: dict[str, Any]) -> dict[str, Any]:
-        """组装交给 curl_cffi 的请求参数。同步与异步两条路共用。
-
-        抽出来是因为两边必须对同样的输入产生同样的请求——各写一份迟早失步，
-        而失步的表现是"同一个请求同步能过、异步过不了"，从症状根本看不出
-        是参数组装的差异。
-        """
         extra = self.parse_extra_kwargs(source.get("kwargs"))
 
         built: dict[str, Any] = {
@@ -169,9 +140,6 @@ class CurlCffiAdapter(DownloaderAdapter):
         allowed_status_codes: list[int] | None = None,
         kwargs: str | None = None,
     ) -> Response:
-        """
-        使用curl_cffi执行HTTP请求
-        """
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
             raise ValidationError(f"Unsupported HTTP method: {method}")
@@ -232,12 +200,6 @@ class CurlCffiAdapter(DownloaderAdapter):
     @override
     @aretry()
     async def adownload(self, url: str, **kwargs: Any) -> Response:
-        """curl_cffi 的真异步实现，走 libcurl 的 multi 接口。
-
-        参数处理刻意和同步的 :meth:`download` 共用一套（``_build_request_kwargs``），
-        两边对同样的输入必须产生同样的请求——各写一份迟早失步，而这种失步
-        表现为"同一个请求同步能过、异步过不了"，极难定位。
-        """
         method = str(kwargs.get("method", "GET")).upper()
         if method not in _SUPPORTED_METHODS:
             raise ValidationError(f"Unsupported HTTP method: {method}")
@@ -268,13 +230,6 @@ class CurlCffiAdapter(DownloaderAdapter):
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         **kwargs: Any,
     ) -> Iterator[StreamEvent]:
-        """curl_cffi 的真流式实现。
-
-        这里是 stream=True 唯一正确的用法：必须在响应上下文里把分片消费完。
-        之前在 download() 里转发 stream=True 却又去读 .content，拿到的是空
-        bytes 而 status_code 仍是 200——静默丢包，所以那条路径已经把该参数
-        彻底忽略掉了。
-        """
         method = str(kwargs.get("method", "GET")).upper()
         if method not in _SUPPORTED_METHODS:
             yield StreamHeader(url=url, status_code=-1, error=f"Unsupported HTTP method: {method}")
@@ -313,7 +268,6 @@ class CurlCffiAdapter(DownloaderAdapter):
 
     @override
     def close(self) -> None:
-        """关闭所有缓存的 Session"""
         with self._sessions_lock:
             for session in self._sessions.values():
                 try:
@@ -324,5 +278,4 @@ class CurlCffiAdapter(DownloaderAdapter):
 
 
 def is_available() -> bool:
-    """检查curl_cffi是否可用"""
     return CURL_CFFI_AVAILABLE

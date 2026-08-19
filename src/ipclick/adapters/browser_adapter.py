@@ -1,33 +1,3 @@
-"""浏览器渲染适配器（Playwright 系）。
-
-覆盖三个引擎——``playwright`` / ``patchright`` / ``camoufox``。它们拉起浏览器的
-方式不同（见 :mod:`ipclick.adapters.browser_engines`），但拿到的都是同一种
-``playwright.async_api.Browser``，所以下面这套线程模型、上下文隔离、资源拦截
-完全共用。DrissionPage 是另一套 API，单独在
-:mod:`ipclick.adapters.drission_adapter`。
-
-**它解决的问题**：curl_cffi / niquests 拿到的是服务端返回的原始 HTML。
-对于内容全靠 JS 渲染出来的页面，那份 HTML 里什么都没有。这里起一个真正的浏览器
-把页面跑完，返回渲染后的 DOM。
-
-**代价**：一次请求几百毫秒到几秒，每个页面几十上百 MB 内存。能用 HTTP 适配器
-解决的就别用它。
-
-线程模型
---------
-Playwright 的同步 API 绑定创建它的线程，而 gRPC 服务端的请求落在线程池里的任意
-线程上——直接用同步 API 必然出问题。这里改用异步 API，跑在一个专属线程的事件
-循环上：所有请求都跨线程投递到那个循环，浏览器实例始终只被一个线程碰。
-顺带的好处是多个页面能在同一个循环里并发渲染，而不是被串行化。
-
-安全
-----
-``automation_script`` 默认**禁用**（``[BROWSER].allow_scripts``）。页面里的 JS
-能自己发请求，服务端那套 URL 策略（禁云元数据、禁内网）对它完全不起作用——放开
-它等于把 SSRF 防线让开一整条。另外，渲染本身就会加载页面引用的子资源，同样不经过
-URL 策略；介意的话把 ``block_resources`` 配严一些，并打开 URL 策略的内网拦截。
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -72,12 +42,6 @@ _MAX_WAIT_FOR_TIMEOUT_MS = 60_000
 
 
 class _BrowserWorker:
-    """拥有事件循环与浏览器实例的专属线程。
-
-    浏览器是懒启动的：只有第一个请求真正到来才付启动代价，导入这个模块或者
-    实例化适配器都不会拉起一个进程。
-    """
-
     def __init__(self, settings: BrowserSettings, engine: str):
         self._settings: BrowserSettings = settings
         self._engine: str = engine
@@ -117,16 +81,6 @@ class _BrowserWorker:
             return self._loop
 
     async def _ensure_browser(self) -> Any:
-        """在事件循环线程里拿到一个**活着的**浏览器，必要时重建。
-
-        以前这里只判 ``is not None``，于是浏览器进程一旦死掉（小内存机器上被
-        OOM killer 干掉是常事，日志里会出现 "Network service crashed"），这个节点
-        之后每个浏览器请求都必败，而且要走满重试才返回——运维现象是"browser
-        适配器突然全挂，重启进程才好"。
-
-        判定用 ``is_connected()``：它查的是 CDP/WebSocket 连接还在不在，
-        进程被杀之后这个连接必然断，比自己去 poll 进程状态可靠。
-        """
         if self._browser_lock is None:
             self._browser_lock = asyncio.Lock()
 
@@ -149,23 +103,15 @@ class _BrowserWorker:
 
     @staticmethod
     def _is_alive(browser: Any) -> bool:
-        """浏览器连接还在不在。探测失败时按"还活着"处理——
-        误判成死掉会白白重启一个好浏览器，代价比多失败一次大。
-        """
         checker = getattr(browser, "is_connected", None)
         if not callable(checker):
             return True
         try:
             return bool(checker())
-        except Exception:  # pragma: no cover - 驱动自身出问题
+        except Exception:
             return False
 
     async def _discard_browser(self) -> None:
-        """扔掉当前这套浏览器 + driver，失败也要把引用清干净。
-
-        清不干净的后果是下次 ``_ensure_browser`` 又拿到那个死对象，
-        于是永远重建不了。
-        """
         browser, driver = self._browser, self._playwright
         self._browser = None
         self._playwright = None
@@ -180,19 +126,9 @@ class _BrowserWorker:
 
     @property
     def browser_started(self) -> bool:
-        """浏览器**当前可用**吗。用来决定要不要给这次请求留冷启动余量。
-
-        判据必须和 :meth:`_ensure_browser` 完全一致（都用 ``is_connected``），
-        否则会错在最糟的方向上：浏览器被 OOM killer 杀掉后 ``self._browser``
-        仍然非 None，只看它的话这里说"已经起来了"→ 不给冷启动余量，而
-        ``_ensure_browser`` 那边判定失联、正在重建 → 这次请求要付完整的冷启动
-        代价却只拿到热路径的预算，必然超时。而这恰好是内存最紧张、最需要它
-        成功的时候。
-        """
         return self._browser is not None and self._is_alive(self._browser)
 
     def run(self, make_coro: Any, timeout: float) -> Any:
-        """把一个协程投递到浏览器线程执行，并等待结果。"""
         loop = self._ensure_loop()
         future: Future[Any] = asyncio.run_coroutine_threadsafe(make_coro(), loop)
         try:
@@ -204,7 +140,6 @@ class _BrowserWorker:
             raise AdapterError(f"浏览器任务超过 {timeout:.0f} 秒未返回") from None
 
     def close(self) -> None:
-        """关闭浏览器并停掉事件循环。可重复调用。"""
         loop = self._loop
         if loop is None:
             return
@@ -315,10 +250,6 @@ class _BrowserWorker:
 
     @staticmethod
     async def _scroll_to_bottom(page: Any) -> None:
-        """滚到底以触发懒加载。
-
-        高度不再变化就停，同时设一个轮次上限——无限滚动的页面永远不会"到底"。
-        """
         previous = -1
         for _ in range(20):
             height = await page.evaluate("() => document.body ? document.body.scrollHeight : 0")
@@ -331,12 +262,6 @@ class _BrowserWorker:
 
 @dataclass(frozen=True)
 class _RenderPlan:
-    """一次渲染需要的全部参数。
-
-    单独一个对象是为了让参数解析（在调用线程上做，出错立刻抛）和真正的渲染
-    （在浏览器线程上做）彻底分开。
-    """
-
     url: str
     context_options: dict[str, Any]
     cookies: list[dict[str, Any]]
@@ -352,19 +277,6 @@ class _RenderPlan:
 
 
 class BrowserAdapter(DownloaderAdapter):
-    """走 Playwright API 的浏览器渲染适配器（playwright / patchright / camoufox）。
-
-    三个引擎的差别只在"怎么把浏览器拉起来"，见
-    :mod:`ipclick.adapters.browser_engines`；拉起来之后拿到的都是同一种
-    ``playwright.async_api.Browser``，线程模型、上下文隔离、资源拦截全部共用。
-
-    与 HTTP 适配器的差异（都是浏览器本身的限制，不是没写）：
-
-    - 只支持 GET。浏览器导航就是 GET，其余方法请走 curl_cffi / niquests。
-    - 不支持 ``allow_redirects=False``。浏览器总是跟随重定向。
-    - ``stream=True`` 无意义：渲染必须等页面跑完才有结果。
-    """
-
     adapter_name: str = "browser"
 
     engine: str | None = None
@@ -393,13 +305,6 @@ class BrowserAdapter(DownloaderAdapter):
 
     @staticmethod
     def _positive_number(config: dict[str, Any], key: str) -> int:
-        """从 automation_config 里取一个非负数值项。
-
-        直接 ``int(float(...))`` 的话，``{"wait_for_timeout": "abc"}`` 会抛一个
-        裸的 ValueError 冒出适配器——调用方看到的是一句 Python 内部错误，而不是
-        "你这个参数写错了"。JSON 里塞列表/字典还会变成 TypeError。统一转成
-        ValidationError，和 automation_config 本身解析失败的处理保持一致。
-        """
         raw = config.get(key)
         if raw is None or raw == "":
             return 0
@@ -423,21 +328,6 @@ class BrowserAdapter(DownloaderAdapter):
         return parsed
 
     def _budget_for(self, plan: _RenderPlan) -> float:
-        """这次渲染最多给多少秒。
-
-        以前是 ``page_timeout + script_timeout + 60`` 无条件相加，于是调用方填
-        30 秒、实际单次能挂 150 秒——5 倍偏差，页面上还没有任何地方解释这个数字
-        从哪来。现在按**这次请求真正会做的事**算：
-
-        * 页面加载：总是要留。
-        * 等元素出现：``wait_for_selector`` 用的也是 ``page_timeout_ms``，是**导航
-          之后**的第二段等待，所以要再留一份。漏掉它的话，选择器一直等不到的
-          请求会先撞上外层预算，报成"浏览器任务超过 N 秒未返回"——把排查方向从
-          "这个选择器不对"引到"浏览器是不是卡了"。
-        * 脚本执行：只有真带了 ``automation_script`` 才留。
-        * 显式的等待：调用方自己要求的 ``wait_for_timeout`` 也得算进去。
-        * 冷启动：只有浏览器还没起来时才留，起过一次之后不再付。
-        """
         budget = plan.page_timeout_ms / 1000
         if plan.wait_for_selector:
             budget += plan.page_timeout_ms / 1000
@@ -546,7 +436,6 @@ class BrowserAdapter(DownloaderAdapter):
         allowed_status_codes: list[int] | None = None,
         kwargs: str | None = None,
     ) -> Response:
-        """用真实浏览器打开页面，返回渲染后的 DOM。"""
         self.reject_impersonate(impersonate)
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
@@ -582,33 +471,25 @@ class BrowserAdapter(DownloaderAdapter):
 
     @override
     def close(self) -> None:
-        """关闭浏览器与事件循环线程。"""
         self._worker.close()
 
 
 class PlaywrightAdapter(BrowserAdapter):
-    """原版 Playwright。最稳、行为最可预期，没有反检测处理。"""
-
     adapter_name: str = "playwright"
     engine: str | None = "playwright"
 
 
 class PatchrightAdapter(BrowserAdapter):
-    """Playwright 的反检测分支，API 完全兼容。需要 ``patchright install chromium``。"""
-
     adapter_name: str = "patchright"
     engine: str | None = "patchright"
 
 
 class CamoufoxAdapter(BrowserAdapter):
-    """基于 Firefox 的反检测浏览器，自带指纹伪装。需要 ``python -m camoufox fetch``。"""
-
     adapter_name: str = "camoufox"
     engine: str | None = "camoufox"
 
 
 def _normalize_cookies(cookies: dict[str, Any] | str | None, url: str) -> list[dict[str, Any]]:
-    """把 dict / ``a=1; b=2`` 字符串转成 playwright 要的 cookie 列表。"""
     if not cookies:
         return []
 

@@ -30,15 +30,6 @@ _OPTIONAL_ADAPTERS: dict[str, tuple[type[DownloaderAdapter], tuple[str, ...]]] =
 
 
 def sync_optional_adapters() -> None:
-    """按**当前磁盘上**的安装状态增删可选适配器的注册。
-
-    0.3 时这段逻辑是模块级的 if，只在 import 那一刻跑一次：运行时装完
-    ``ipclick[niquests]`` 也用不上，必须重启进程。现在它是个可以反复调的函数，
-    Web 端装完/卸完依赖就调一次。
-
-    只增删 :data:`_OPTIONAL_ADAPTERS` 里登记过的名字，不碰
-    :func:`register_adapter` 注册进来的自定义适配器——那些不归这里管。
-    """
     for name, (cls, modules) in _OPTIONAL_ADAPTERS.items():
         if all(module_probe.installed(m) for m in modules):
             ADAPTER_CLASSES[name] = cls
@@ -48,11 +39,6 @@ def sync_optional_adapters() -> None:
 
 
 def refresh() -> None:
-    """重新探测所有可选依赖的安装状态，并同步适配器注册表。
-
-    这是"不重启进程也能反映安装/卸载"的总入口：先让探测缓存失效，
-    再按新结论增删注册。
-    """
     browser_engines.refresh()
     sync_optional_adapters()
 
@@ -85,17 +71,11 @@ _REMOVED_ADAPTERS: dict[str, str] = {
 
 
 def resolve_browser_adapter_name(browser_settings: BrowserSettings | None) -> str:
-    """把通用的 ``browser`` 解析成具体的适配器名。
-
-    引擎取自 ``[BROWSER].engine``；``auto``（默认）按平台选：
-    Windows → DrissionPage，Linux/macOS → Camoufox。
-    """
     engine = browser_engines.resolve_engine((browser_settings or BrowserSettings()).engine)
     return _ENGINE_TO_ADAPTER[engine]
 
 
 def get_default_adapter(settings: AdapterSettings | None = None) -> DownloaderAdapter:
-    """创建默认适配器实例（curl_cffi）。"""
     return get_adapter(DEFAULT_ADAPTER_NAME, settings)
 
 
@@ -104,21 +84,6 @@ def get_adapter(
     settings: AdapterSettings | None = None,
     browser_settings: BrowserSettings | None = None,
 ) -> DownloaderAdapter:
-    """
-    获取适配器实例
-
-    Args:
-        adapter_name: 适配器名称。``browser`` 表示"用浏览器渲染，引擎由服务端定"。
-        settings: 来自配置文件 ``[DOWNLOADER]`` 节的默认行为；None 表示用内置默认值。
-        browser_settings: 来自配置文件 ``[BROWSER]`` 节；只有浏览器适配器会用到。
-
-    Returns:
-        DownloaderAdapter: 适配器实例
-
-    Raises:
-        AdapterError: 适配器未实现，或其依赖库未安装。
-        ConfigError: ``[BROWSER].engine`` 配置了未知的引擎名。
-    """
     if adapter_name == GENERIC_BROWSER_NAME:
         adapter_name = resolve_browser_adapter_name(browser_settings)
 
@@ -139,7 +104,6 @@ def get_adapter(
 
 
 def register_adapter(adapter_class: type[DownloaderAdapter]) -> None:
-    """注册自定义适配器，便于在不改动本包的前提下扩展。"""
     ADAPTER_CLASSES[adapter_class.adapter_name] = adapter_class
     ADAPTER_LIST[:] = list(ADAPTER_CLASSES.values())
 

@@ -1,13 +1,3 @@
-"""请求流 / 试一试 / 组件 / 配置 / AI 接入 这几页的业务逻辑。
-
-从 :mod:`ipclick.web.server` 拆出来：那个模块负责 HTTP（路由、会话、CSRF、
-响应头），这个负责"页面要展示什么、提交上来要怎么处理"。混在一起的话，
-每加一页都得往 HTTP 处理器里塞一段业务代码，很快就没法看了。
-
-这一层刻意只依赖注入进来的对象（TaskService、记录器、配置），不自己去
-import 服务端——这样它在测试里可以单独构造。
-"""
-
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -60,11 +50,6 @@ NODE_PORT_BASE = 19001
 
 @final
 class _WebContext:
-    """ "试一试"用的假 ServicerContext。
-
-    只收状态码，不把错误传播到别处——页面自己会把 error_message 显示出来。
-    """
-
     def __init__(self) -> None:
         self.code: object = None
         self.details: str = ""
@@ -84,8 +69,6 @@ class _WebContext:
 
 @final
 class WebPages:
-    """Web 端各页面的数据与操作。"""
-
     def __init__(
         self,
         config: Settings,
@@ -149,11 +132,6 @@ class WebPages:
         )
 
     def trace_fragment(self, query: dict[str, str]) -> str:
-        """请求流里自动刷新的那一块。前端只换这一块的 innerHTML。
-
-        和整页走**同一个**渲染函数，所以不会出现"局部刷新出来的表格和整页
-        渲染的不一样"——那种失步只有在数据变化时才暴露，最难查。
-        """
         records, source, _ = self._query_records(query)
         return trace_live(records, self.recorder.stats(), source=source)
 
@@ -186,12 +164,6 @@ class WebPages:
         }
 
     def _adapter_choices(self) -> list[dict[str, Any]]:
-        """「试一试」下拉框的分组数据。
-
-        0.3 这里只返回注册表里**本机已装**的那几个，于是没装的适配器直接从下拉框
-        消失——对着 wiki 看的人会觉得"文档和实现对不上"，也不知道 IPClick 到底
-        支持哪些。现在全部列出，没装的置灰并标上安装命令。
-        """
         from ipclick.adapters.browser_settings import BrowserSettings
         from ipclick.components import adapter_choices
 
@@ -222,16 +194,6 @@ class WebPages:
         )
 
     def _target_nodes(self) -> list[dict[str, Any]]:
-        """能点名的节点。
-
-        0.4 里这份列表只在**开了服务端转发**时才非空——理由是"没开转发的话本进程
-        不转发，选了也只会打到自己身上"。那个理由只对"走 TaskService"这一条路成立。
-        配了节点却看不到下拉框的人并不知道这层区别，只会觉得功能没做。
-
-        0.5 改成：配置里有节点就列出来。开了转发走转发器的 ``send_to_node``；
-        没开就由这一页**直连**那台机器发一次 gRPC（见 :meth:`_direct_send`）——
-        目的本来就是"验证我刚加的这台配对没有"，和本机转不转发无关。
-        """
         service = self.task_service
         cluster = getattr(service, "cluster", None) if service is not None else None
         nodes = list(getattr(cluster, "nodes", ()) or [])
@@ -252,7 +214,6 @@ class WebPages:
         ]
 
     def import_curl(self, form: dict[str, str]) -> tuple[dict[str, str], list[str], str]:
-        """把粘贴的 curl 命令解析成表单。返回 ``(表单, 提示, 错误)``。"""
         from ipclick.web.curl_parser import parse_curl
 
         raw = (form.get("curl") or "")[:CURL_MAX_LEN]
@@ -262,7 +223,6 @@ class WebPages:
         return parsed.as_form(), parsed.notes, ""
 
     def stash_test_result(self, form: dict[str, str], result: dict[str, Any]) -> str:
-        """存下一次「试一试」的结果，返回取回它的 token。"""
         token = secrets.token_urlsafe(9)
         with self._test_lock:
             self._test_results[token] = (dict(form), result)
@@ -271,7 +231,6 @@ class WebPages:
         return token
 
     def take_test_result(self, token: str) -> tuple[dict[str, str], dict[str, Any] | None]:
-        """按 token 取回结果。取不到就当成一次普通的打开（空表单）。"""
         if not token:
             return {}, None
         with self._test_lock:
@@ -279,16 +238,6 @@ class WebPages:
         return entry if entry is not None else ({}, None)
 
     def run_test(self, form: dict[str, str]) -> dict[str, Any]:
-        """就地发一次请求。
-
-        走本进程 TaskService 的 ``Send``——和真实 gRPC 调用方**同一条**路径，
-        因此 SSRF 准入、限流、集群转发、链路记录全都照常生效。另写一条只在页面上
-        成立的路径毫无意义：那验证的就不是线上行为了。
-
-        指定了"目标节点"时改走 ``send_to_node``：跳过负载均衡直连那一台。
-        这是唯一的例外，而它的目的恰恰是"验证某台机器配对没有"——按策略选就
-        只能靠轮询碰运气命中，节点一多完全没法用。
-        """
         if self.task_service is None:
             return {"error_only": True, "error": "本实例没有可用的任务服务（Web 端以只读方式启动）"}
 
@@ -342,7 +291,6 @@ class WebPages:
         }
 
     def _send_to_node(self, request: task_pb2.ReqTask, node_id: str) -> task_pb2.TaskResp:
-        """点名发给某个节点。开了转发走转发器，没开就直连。"""
         service = self.task_service
         sender = getattr(service, "send_to_node", None)
         if callable(sender):
@@ -350,12 +298,6 @@ class WebPages:
         return self._direct_send(request, node_id)
 
     def _direct_send(self, request: task_pb2.ReqTask, node_id: str) -> task_pb2.TaskResp:
-        """不经本进程的路由，直接对那台机器发一次 gRPC。
-
-        连法（令牌派生、TLS、开关 channel）走 :meth:`_call_node`——和远程组件管理
-        共用同一套，两处各写一份的话迟早出现"试一试能连、装组件连不上"这种自相
-        矛盾的状态。
-        """
         deadline = request.timeout_seconds * (request.max_retries + 1) + 15
         return cast(
             task_pb2.TaskResp,
@@ -367,13 +309,6 @@ class WebPages:
         )
 
     def _build_request(self, form: dict[str, str], url: str) -> task_pb2.ReqTask:
-        """把表单组装成 ReqTask。
-
-        字段与 :meth:`ipclick.sdk.Downloader.request` **一一对应**——页面上能调的
-        参数少于 SDK 的话，"试一试"就验不出真实调用会怎样，而那正是这一页存在的
-        全部理由。刻意不做的只有 ``stream``：这一页同步等结果再整页渲染，流式在
-        这里没有任何可观察的差别，加个开关只会让人以为验证过了。
-        """
         adapter_name = (form.get("adapter") or "").strip()
         try:
             adapter = IPClickAdapter.from_str(adapter_name) if adapter_name else IPClickAdapter.CURL_CFFI
@@ -429,7 +364,6 @@ class WebPages:
 
     @staticmethod
     def _apply_body(request: task_pb2.ReqTask, form: dict[str, str]) -> None:
-        """请求体。``data`` 与 ``json`` 互斥，所以用一个单选决定这段文本是哪一种。"""
         body = form.get("body") or ""
         if not body.strip():
             return
@@ -444,7 +378,6 @@ class WebPages:
 
     @staticmethod
     def _apply_maps(request: task_pb2.ReqTask, form: dict[str, str]) -> None:
-        """请求头 / Cookie / 查询参数。三者都是"每行一条"的文本框。"""
         for line in (form.get("headers") or "").splitlines():
             name, sep, value = line.partition(":")
             if sep and name.strip():
@@ -462,11 +395,6 @@ class WebPages:
             request.params = json_lib.dumps(pairs, ensure_ascii=False)
 
     def _resolve_proxy(self, form: dict[str, str]) -> str:
-        """代理。三档：不用 / 用配置里的 [PROXY] / 自定义 URL。
-
-        选"用配置"时在这里就解析成 URL，页面才能在结果里显示"这次到底走了哪个代理"
-        （只显示 host:port，账号密码不回显）。
-        """
         mode = (form.get("proxy_mode") or "none").strip()
         if mode == "custom":
             return (form.get("proxy_url") or "").strip()
@@ -481,11 +409,6 @@ class WebPages:
         return resolved
 
     def components_page(self, username: str, csrf: str, *, node_id: str = "") -> str:
-        """组件页。``node_id`` 非空时展示的是**那台子节点**的情况。
-
-        集群里每台机器都要各自装一遍适配器，逐台 SSH 上去敲命令是部署时最烦的
-        一步。所以这一页可以点名一台机器——和「试一试」同一个心智模型。
-        """
         from ipclick.adapters.browser_engines import playwright_registry_dir
         from ipclick.adapters.browser_settings import BrowserSettings
         from ipclick.components import COMPONENTS, snapshot
@@ -532,7 +455,6 @@ class WebPages:
         )
 
     def skill_markdown(self) -> str:
-        """技能正文。``/skill.md`` 直接吐它，页面里也嵌同一份。"""
         from ipclick import skill
 
         return skill.markdown()
@@ -550,18 +472,6 @@ class WebPages:
         )
 
     def remote_component(self, node_id: str, op: str, extra: str = "", browser_kind: str = "") -> dict[str, Any]:
-        """在**某台子节点**上装 / 卸组件，或查它装了什么。
-
-        集群里每台机器都要各自装一遍适配器，而"逐台 SSH 上去敲命令"是这套东西
-        部署时最烦的一步。所以主控的组件页可以点名一台机器。
-
-        连法和「试一试」的点名直连是同一套（同样的集群内部令牌、同样的 TLS 设置），
-        所以"探测通得过但装不了"这种自相矛盾的结果不会出现。
-
-        对端**默认不允许**这么做，要它自己打开 ``[CLUSTER].allow_remote_install``。
-        关着时会收到 PERMISSION_DENIED，这里把那句说明原样透出——那是可执行的指引，
-        换成笼统的"失败"等于把答案藏起来。
-        """
         import json as json_lib
 
         import grpc
@@ -587,7 +497,7 @@ class WebPages:
             return {"ok": False, "message": str(e), "node_id": node_id}
         except grpc.RpcError as e:
             return {"ok": False, "message": _readable_component_error(e, node_id), "node_id": node_id}
-        except Exception as e:  # pragma: no cover - 诊断入口不该抛
+        except Exception as e:
             log.exception(f"远程组件操作失败（{node_id}）：{e}")
             return {"ok": False, "message": f"{type(e).__name__}: {e}", "node_id": node_id}
 
@@ -607,11 +517,6 @@ class WebPages:
         }
 
     def _call_node(self, node_id: str, call: Callable[[Any, Any, float], Any], *, timeout: float) -> Any:
-        """对某个节点开一条 gRPC，跑一次 ``call``，然后关掉。
-
-        令牌与 TLS 的解析和 :meth:`_direct_send` 是同一套——两处各写一份的话，
-        迟早出现"试一试能连、装组件连不上"这种自相矛盾的状态。
-        """
         import grpc
 
         from ipclick.auth import build_client_metadata
@@ -641,11 +546,6 @@ class WebPages:
             channel.close()
 
     def component_action(self, op: str, extra: str, node_id: str = "") -> tuple[bool, str]:
-        """安装 / 卸载 / 下载浏览器本体。包名走白名单，见 installer 模块。
-
-        ``node_id`` 非空时转成一次远程调用——白名单、命令规划、"一次只跑一个任务"
-        的约束都在**对端**同样生效（对端跑的是同一份 InstallManager）。
-        """
         from ipclick.adapters.browser_settings import BrowserSettings
 
         kind = BrowserSettings.from_config(dict(self.config.get("BROWSER", {}))).kind
@@ -663,26 +563,17 @@ class WebPages:
         return False, f"未知操作 {op!r}"
 
     def component_status(self, node_id: str = "") -> dict[str, Any] | None:
-        """轮询用：当前（或最近一次）任务的快照。本机或某台子节点。"""
         if not node_id:
             return self.installer.current()
         return self.remote_component(node_id, "status").get("job")
 
     def refresh_components(self) -> tuple[bool, str]:
-        """手动「刷新状态」：丢掉探测缓存，重新看磁盘。
-
-        终端里装完/卸完之后点它，不用重启进程。
-        """
         from ipclick.adapters import registry
 
         registry.refresh()
         return True, "已重新探测各组件的安装状态"
 
     def _after_install(self, job: Any) -> None:
-        """安装任务结束时的回调：让新装的东西立刻可用。
-
-        失败时也刷——可能装了一半，此时该展示的是磁盘上的真实情况。
-        """
         from ipclick.adapters import registry
 
         registry.refresh()
@@ -708,11 +599,6 @@ class WebPages:
         return groups
 
     def _running_mismatch(self, name: str, file_value: Any) -> int:
-        """这一项的实际运行值和文件里写的不一样时返回实际值，否则 0。
-
-        只有端口有这个问题，而且只在 ``--port`` / ``--web-port`` 覆盖时出现。
-        返回 0 而不是 None，是为了让模板那边一个 falsy 判断就够。
-        """
         actual = self.runtime_ports.get(name)
         if not actual:
             return 0
@@ -775,14 +661,6 @@ class WebPages:
         )
 
     def _next_node_port(self) -> int:
-        """「添加节点」预填哪个端口。
-
-        从 :data:`NODE_PORT_BASE` 往上找第一个没被用过的。用一个和默认端口
-        （9527/9528）明显分开的号段是有意的：这些是**子节点**的端口，和主控自己
-        那两个混在一起时，人一眼看不出"这个 9529 到底是谁的"。
-
-        找不到就回落到基数——那意味着已经加了几万台，此时预填什么都不重要了。
-        """
         used = {int(port) for node in self._nodes() if (port := node["address"].rpartition(":")[2]).isdigit()}
         for candidate in range(NODE_PORT_BASE, NODE_PORT_BASE + 10000):
             if candidate not in used:
@@ -790,11 +668,6 @@ class WebPages:
         return NODE_PORT_BASE
 
     def _cluster_tab_data(self) -> dict[str, Any]:
-        """「集群设置」那一页要的东西。
-
-        机密只报"有没有"——和页面上其余地方同一条规矩。真正的值只在部署材料页
-        出现（那是它的用途），且不写日志、不落盘。
-        """
         from ipclick.auth import load_tokens
         from ipclick.cluster.tokens import cluster_secret
 
@@ -808,11 +681,6 @@ class WebPages:
         }
 
     def _deploy_plans(self) -> list[Any]:
-        """每台节点的部署材料。
-
-        令牌取的是**主控当前生效**的那份，所以复制过去必然对得上——集群最常见的
-        故障"两边密钥差一个字符"在这里就没有发生的机会。
-        """
         from ipclick.auth import load_tokens
         from ipclick.cluster.tokens import cluster_secret
         from ipclick.web.deploy import build_plan
@@ -852,15 +720,6 @@ class WebPages:
         return bundle(self._deploy_plans())
 
     def generate_secret(self, env: str) -> str:
-        """生成一个机密，返回取回它的 token（一次性）。
-
-        **刻意不写进任何文件。** 机密的正规位置是 ``.env``，由人自己粘过去——
-        这既是 0.3 就定下的规矩（"机密不接受从本页写入"），也顺带让"不可再次
-        查看"这件事成立：服务端根本没留副本，:meth:`take_generated` 取完即弃。
-
-        集群共享密钥尤其不能自动写：每台机器各自生成一个就全对不上了，必须在
-        一台上生成再复制到其余各台，这一点在页面上会明确提示。
-        """
         from ipclick.secrets import SECRETS
         from ipclick.web.auth import generate_password
 
@@ -884,20 +743,12 @@ class WebPages:
         return token
 
     def take_generated(self, token: str) -> dict[str, Any] | None:
-        """取回刚生成的机密，**取完即弃**。"""
         if not token:
             return None
         with self._test_lock:
             return self._generated.pop(token, None)
 
     def save_config(self, form: dict[str, str], username: str, csrf: str) -> str:
-        """保存配置。两个分页共用这一条路径——白名单还是那一份。
-
-        「集群设置」页额外带两样东西：转发开关（一个复选框，映射到
-        ``[CLUSTER].forward`` 的 on/off 字符串）和节点卡片里的地址 / 权重。
-        它们和普通字段一起提交，因为人的心智模型是"这一页改完点一次保存"，
-        而不是"配置一个保存按钮、节点另一个"。
-        """
         from ipclick.config_loader.writer import save, set_nodes, set_values
 
         tab = form.get("tab", "basic")
@@ -943,11 +794,6 @@ class WebPages:
         return self.config_page(username, csrf, tab=tab)
 
     def add_node(self, form: dict[str, str], username: str, csrf: str) -> str:
-        """「添加节点」弹窗的提交。
-
-        只要 IP 和端口两项必填，其余给预置默认值——加机器是集群的日常操作，
-        每次都让人把 id、权重想一遍纯属拖慢。id 留空就用 ``host:port``。
-        """
         from ipclick.config_loader.writer import save, set_nodes
 
         host = (form.get("new_node_host") or "").strip().strip("[]")
@@ -993,7 +839,6 @@ class WebPages:
     def _changed_only(
         self, updates: dict[str, dict[str, Any]], restart_needed: list[str]
     ) -> tuple[dict[str, dict[str, Any]], list[str]]:
-        """滤掉和当前值相同的项，并据此重算"哪些需要重启"。"""
         from ipclick.web.editable import FIELDS
 
         changed: dict[str, dict[str, Any]] = {}
@@ -1013,14 +858,6 @@ class WebPages:
         return changed, labels
 
     def remove_node(self, form: dict[str, str], username: str, csrf: str) -> str:
-        """删掉一台节点。
-
-        走**独立**的表单，不跟「保存」共用：共用的话，点一次删除会把页面上其余
-        未提交的改动（改了一半的地址、动过的转发开关）一起写进去，而人只点了删除。
-
-        只改本机的节点列表，不碰那台机器本身——那需要远程操作它，而这里没有也不该有
-        那个能力。
-        """
         from ipclick.config_loader.writer import save, set_nodes
 
         node_id = (form.get("remove_node") or "").strip()
@@ -1044,11 +881,6 @@ class WebPages:
         return self.config_page(username, csrf, tab="cluster")
 
     def _preserve_node_fields(self, nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """保留原有条目里网页不写的字段（token / region / zone）。
-
-        不保留的话，一次保存就会把配置文件里手写的令牌抹掉——而那种丢失只在下次
-        转发到那台机器时才暴露成 UNAUTHENTICATED。
-        """
         preserved = {n.id: n for n in self._existing_nodes()}
         for node in nodes:
             old = preserved.get(str(node["id"]))
@@ -1060,27 +892,17 @@ class WebPages:
         return nodes
 
     def _hot_reload_cluster(self) -> None:
-        """节点改完立刻重建路由，不用重启。
-
-        0.3 只写文件，真正在路由的 ClusterConfig / NodePool 在构造时就建好存死了，
-        所以页面上只能写"改完需要重启才生效"。
-        """
         if self._on_cluster_changed is None:
             return
         try:
             ok, message = self._on_cluster_changed()
-        except Exception as e:  # pragma: no cover - 热更新失败不该让保存看起来失败
+        except Exception as e:
             log.exception(f"集群配置热更新失败：{e}")
             self._errors.append(f"已写回文件，但热更新失败（重启后仍会生效）：{type(e).__name__}: {e}")
         else:
             (self._messages if ok else self._errors).append(message)
 
     def _apply_live(self, updates: dict[str, dict[str, Any]]) -> None:
-        """能当场生效的少数几项立刻应用，不等重启。
-
-        只做没有副作用的：日志级别、链路记录的内存缓冲与过滤。像 worker 线程数、
-        监听端口那种要重建对象的，如实标"需重启"而不是在这里偷偷重启服务。
-        """
         log_updates = updates.get("LOG") or {}
         debug = bool((updates.get("GENERAL") or {}).get("debug", False))
         if log_updates.get("level") or "debug" in (updates.get("GENERAL") or {}):
@@ -1122,11 +944,6 @@ class WebPages:
         ]
 
     def probe_node(self, node_id: str, address: str = "") -> dict[str, Any]:
-        """就地探一个节点：连得上吗、鉴权配对吗。
-
-        ``address`` 允许传入表单里**还没保存**的那个地址——加完一行想先试试
-        通不通是最自然的动作，非要先保存才能测就把流程割断了。
-        """
         from ipclick.cluster.node import ClusterConfig, Node
         from ipclick.cluster.probe import probe_node as run_probe
         from ipclick.cluster.tokens import cluster_secret
@@ -1170,9 +987,6 @@ class WebPages:
         return ClusterConfig.from_config(dict(self.config.get("CLUSTER", {}))).nodes
 
     def _read_config_text(self) -> str:
-        """读要改的那个文件。不存在就从随包的模板起一份——否则第一次保存会
-        生成一个只有一两行的配置文件，注释和其余默认值全丢了。
-        """
         if self.config_path.exists():
             return self.config_path.read_text(encoding="utf-8")
         from ipclick.config_loader.loader import example_config
@@ -1181,17 +995,12 @@ class WebPages:
         return example_config()
 
     def _reload_config(self) -> None:
-        """写完之后重新加载配置，让页面显示文件里真实的内容。
-
-        ``load_config`` 带 lru_cache，必须先清掉——否则页面上还是旧值，
-        看起来就像保存没生效。
-        """
         from ipclick.config_loader.loader import load_config
 
         try:
             load_config.cache_clear()
             self.config = load_config(str(self.config_path) if self.config_path.exists() else None)
-        except Exception as e:  # pragma: no cover - 读回失败不该让页面挂掉
+        except Exception as e:
             log.warning(f"重新加载配置失败：{e}")
 
     def _take_flash(self) -> tuple[list[str], list[str]]:
@@ -1200,7 +1009,6 @@ class WebPages:
         return messages, errors
 
     def dashboard_extras(self) -> dict[str, Any]:
-        """总览页要用的额外数据：链路统计、最近请求、组件安装状态。"""
         from ipclick.adapters.browser_engines import resolve_engine
         from ipclick.adapters.browser_settings import BrowserSettings
         from ipclick.components import snapshot
@@ -1220,11 +1028,6 @@ class WebPages:
 
 
 def _job_from_pb(job: Any) -> dict[str, Any]:
-    """把 protobuf 的任务快照转回页面用的那个 dict。
-
-    形状必须和本机 :meth:`ipclick.web.installer.Job.snapshot` **完全一致**——
-    前端那段渲染进度条的 JS 是同一份，两边差一个字段名就会在远程那条路上静默失效。
-    """
     percent = job.percent
     return {
         "id": job.id,
@@ -1244,7 +1047,6 @@ def _job_from_pb(job: Any) -> dict[str, Any]:
 
 
 def _readable_component_error(error: Any, node_id: str) -> str:
-    """远程组件操作失败时给一句能照着做的话。"""
     import grpc
 
     code = getattr(error, "code", lambda: None)()
@@ -1263,13 +1065,6 @@ def _readable_component_error(error: Any, node_id: str) -> str:
 
 
 def _same_value(current: Any, new: Any) -> bool:
-    """配置里的旧值和表单提交的新值算不算"没变"。
-
-    数字要跨类型比：toml 里写 ``60`` 读出来是 int，而表单上的"超时（秒）"是
-    float 字段，解析出来是 ``60.0``——按 ``==`` 比对本来也相等，但 bool 是 int
-    的子类，``True == 1`` 会把"开关没动"和"值从 1 改成 True"混为一谈，所以
-    bool 单独走一条。
-    """
     if isinstance(current, bool) or isinstance(new, bool):
         return isinstance(current, bool) and isinstance(new, bool) and current == new
     if isinstance(current, (int, float)) and isinstance(new, (int, float)):
@@ -1278,10 +1073,6 @@ def _same_value(current: Any, new: Any) -> bool:
 
 
 def _as_number(raw: str | None, default: float, label: str) -> float:
-    """表单里的数字。留空取默认值，写错了报出**哪一项**写错了。
-
-    统一报错文案是有意的：三四个数字输入框各写一套"必须是数字"，措辞迟早会散。
-    """
     text = (raw or "").strip()
     if not text:
         return default
@@ -1292,11 +1083,6 @@ def _as_number(raw: str | None, default: float, label: str) -> float:
 
 
 def _parse_status_codes(raw: str | None) -> list[int]:
-    """``200, 404`` 这样的一行文本 -> ``[200, 404]``。
-
-    这一项是"哪些状态码不算失败、不触发重试"。写错一个字符就整项丢掉的话，
-    用户会以为自己设了而实际没设，所以非法值直接报错。
-    """
     text = (raw or "").strip()
     if not text:
         return []
@@ -1312,13 +1098,6 @@ def _parse_status_codes(raw: str | None) -> list[int]:
 
 
 def _readable_error(error: Exception, target_node: str = "") -> str:
-    """把异常变成一句人能看懂的话。
-
-    ``grpc.RpcError`` 的 ``str()`` 是一大坨带 ``debug_error_string`` 的 repr，
-    在诊断页面上尤其糟——用户点「试一试」就是为了看清楚哪里出了问题，结果拿到
-    一段要自己找重点的日志。这里只留状态码和 details，并对点名场景补一句
-    "该往哪儿查"。
-    """
     import grpc
 
     if isinstance(error, grpc.RpcError):
@@ -1340,7 +1119,6 @@ def _readable_error(error: Exception, target_node: str = "") -> str:
 
 
 def _probe_title(result: Any) -> str:
-    """探测结果的一句话标题。三种结论要一眼分得开。"""
     if not result.reachable:
         return "连不上"
     if result.authenticated is False:
@@ -1351,18 +1129,6 @@ def _probe_title(result: Any) -> str:
 
 
 def _live_ms(query: dict[str, str]) -> int:
-    """请求流的刷新间隔（毫秒），0 表示关掉。
-
-    没提交过表单（查询串里没有 ``_`` 标记）就给默认档——这一页存在的意义就是
-    看着请求打进来，默认关掉等于默认没用。
-
-    ``live=1`` 是 0.4 那个复选框的取值。老书签、老链接点开时把它映射到默认档，
-    而不是让它落到"取值不认识"的分支上变成关闭。
-
-    **只有空串才是"关闭"**（0.4 那个复选框不勾选时提交的就是空串）。其余认不出来的
-    取值——超出档位表的数字、被截断的链接、乱码——一律回落到默认档，而不是关闭：
-    地址栏被改坏时该退回"能用"，把这一页唯一的功能悄悄关掉才是最难查的那种。
-    """
     if "_" not in query:
         return DEFAULT_LIVE_MS
     raw = query.get("live", "")
@@ -1378,7 +1144,6 @@ def _live_ms(query: dict[str, str]) -> int:
 
 
 def _fragment_url(base: str, filters: dict[str, str]) -> str:
-    """给实时刷新的片段拼查询串。过滤条件必须带上，否则刷新一次就把筛选冲掉了。"""
     from urllib.parse import urlencode
 
     query = {k: v for k, v in filters.items() if v}

@@ -52,19 +52,6 @@ _REFUSED_MARKERS = ("refused_stream", "concurrent rpc limit", "too_many_pings")
 
 
 def unavailable_hint(details: str | None, port: int) -> str:
-    """UNAVAILABLE 的排障提示。按真实成因分流，而不是一律讲端口。
-
-    这个状态码在实践中有两种完全不同的成因，排查方向相反：
-
-    * **服务端拒流**——它活得好好的，只是在途 RPC 到顶了。高并发压测里这是
-      最常见的一种（实测默认配置 1000 并发时七成请求走这条路），要调的是
-      ``[SERVER].max_concurrent_rpcs``。
-    * **真的连不上**——进程没起、地址端口不对、防火墙拦了。0.5.0 换过默认端口，
-      所以这一档才需要那句端口提示。
-
-    此前不加区分地给所有 UNAVAILABLE 都附端口提示，会让人在服务端明明健在的
-    时候去查防火墙。
-    """
     lowered = (details or "").lower()
     if any(marker in lowered for marker in _REFUSED_MARKERS):
         return (
@@ -105,16 +92,6 @@ _TASK_FIELDS = frozenset(
 
 
 class StreamedResponse:
-    """流式下载的响应句柄。
-
-    构造时会先把第一条 header 消息读出来，因此 ``status_code`` / ``headers``
-    在开始迭代 body 之前就可用——调用方可以据此决定继续接收还是直接放弃，
-    不必先把整个响应体拉完。
-
-    用完请调用 :meth:`close`，或直接当上下文管理器用（提前退出会 cancel 掉
-    这条 gRPC 流，服务端也就不会继续白白下载了）。
-    """
-
     def __init__(self, call: Any):
         self._call: Any = call
         self._iter: Iterator[Any] = iter(call)
@@ -134,7 +111,6 @@ class StreamedResponse:
         self.content_length: int = header.content_length
 
     def _read_header(self) -> Any:
-        """第一条消息必须是 header，否则协议就被破坏了。"""
         try:
             first = next(self._iter)
         except grpc.RpcError as e:
@@ -150,7 +126,6 @@ class StreamedResponse:
         return 200 <= self.status_code < 300 and not self.error
 
     def __iter__(self) -> Iterator[bytes]:
-        """迭代响应体分片。trailer 到达后自动停止并记录统计信息。"""
         if self._exhausted:
             return
         try:
@@ -168,14 +143,9 @@ class StreamedResponse:
             self._exhausted = True
 
     def read(self) -> bytes:
-        """把剩余分片全部读进内存。
-
-        这等于放弃了流式的意义，只适合小响应或测试。大文件请直接迭代。
-        """
         return b"".join(self)
 
     def close(self) -> None:
-        """取消这条流。已经读完的话是 no-op。"""
         if self._closed:
             return
         self._closed = True
@@ -194,13 +164,6 @@ class StreamedResponse:
 
 
 class ClientBase:
-    """同步与异步客户端共享的配置、令牌与任务组装逻辑。
-
-    抽出来是为了让 :class:`Downloader` 和 :class:`~ipclick.aio.AsyncDownloader`
-    对同样的输入产生同样的 DownloadTask——代理解析、令牌优先级这些规则
-    在两处各写一份的话迟早会失步。
-    """
-
     def __init__(
         self,
         config_path: str | None = None,
@@ -246,7 +209,6 @@ class ClientBase:
         return f"{self.host}:{self.port}"
 
     def _rpc_error(self, e: grpc.RpcError) -> Exception:
-        """把 gRPC 错误翻译成本项目的异常类型。"""
         code = e.code() if hasattr(e, "code") else None
         details = e.details() if hasattr(e, "details") else str(e)
         if code is grpc.StatusCode.UNAUTHENTICATED:
@@ -267,15 +229,6 @@ class ClientBase:
         return TransportError(f"gRPC 调用失败 [{code}]: {details}")
 
     def _should_retry_rpc(self, error: grpc.RpcError, attempt: int) -> bool:
-        """这次 RPC 失败能不能安全重试。
-
-        只认 UNAVAILABLE：那意味着**连接就没建起来**，请求根本没到过服务端，
-        重发不会造成重复执行。
-
-        DEADLINE_EXCEEDED 刻意不重试——请求可能已经发出去、服务端正在执行，
-        只是回复没赶上。这时重发一个 POST 就是重复下单。宁可让调用方拿到超时
-        自己决定，也不替它做这个决定。
-        """
         if attempt >= self.rpc_max_retries:
             return False
         code = error.code() if hasattr(error, "code") else None
@@ -300,7 +253,6 @@ class ClientBase:
         allowed_status_codes: list[int] | None = None,
         **kwargs: Any,
     ) -> DownloadTask:
-        """把调用方参数组装成 DownloadTask。"""
         resolved_proxy: str | None
         if not proxy:
             resolved_proxy = None
@@ -328,23 +280,10 @@ class ClientBase:
 
     @staticmethod
     def _deadline(task: DownloadTask) -> float:
-        """RPC deadline：任务超时 × 尝试次数，再留一点服务端处理余量。
-
-        不设的话服务端卡住时客户端会无限期等待。
-        """
         return task.timeout * (task.max_retries + 1) + _RPC_TIMEOUT_MARGIN
 
 
 class Downloader(ClientBase):
-    """IPClick下载器客户端
-
-    实例持有一个可复用的 gRPC channel。用完请调用 :meth:`close`，
-    或直接当作上下文管理器使用::
-
-        with Downloader() as d:
-            resp = d.get("https://example.com")
-    """
-
     def __init__(
         self,
         config_path: str | None = None,
@@ -353,18 +292,6 @@ class Downloader(ClientBase):
         token: str | None = None,
         tls: TLSSettings | None = None,
     ):
-        """
-        初始化下载器
-
-        Args:
-            config_path: 配置文件路径
-            host: 服务器地址 (覆盖配置文件)
-            port: 服务器端口 (覆盖配置文件)
-            token: 鉴权令牌 (覆盖环境变量 ``IPCLICK_AUTH_TOKEN`` 与配置文件
-                ``[SECURITY].auth_token``)。服务端未启用鉴权时可留空。
-            tls: 传输层配置 (覆盖 ``[SECURITY.tls]``)。服务端启用 TLS 时必须
-                同步开启，否则连接会握手失败。
-        """
         super().__init__(config_path, host, port, token, tls)
 
         self._channel: grpc.Channel | None = None
@@ -372,11 +299,6 @@ class Downloader(ClientBase):
         self._lock: threading.Lock = threading.Lock()
 
     def _get_stub(self) -> task_pb2_grpc.TaskServiceStub:
-        """惰性创建并复用 channel。
-
-        原实现每个请求都新建一个 channel，每次都要重做 TCP + HTTP/2 握手，
-        并且旧 channel 在 GC 前会一直占着 fd。
-        """
         if self._closed:
             raise ClientClosedError("Downloader 已关闭，无法继续发送请求")
 
@@ -403,7 +325,6 @@ class Downloader(ClientBase):
         return self._stub
 
     def close(self) -> None:
-        """关闭底层 gRPC channel。可重复调用。"""
         with self._lock:
             self._closed: bool = True
             if self._channel is not None:
@@ -441,24 +362,6 @@ class Downloader(ClientBase):
         allowed_status_codes: list[int] | None = None,
         **kwargs: Any,
     ) -> DownloadResponse:
-        """发送一次下载请求。
-
-        本方法不会抛出网络异常：失败时返回 ``status_code == -1`` 且 ``error``
-        非空的 :class:`DownloadResponse`。参数本身非法（如 URL 为空）仍会抛
-        :class:`~ipclick.exceptions.ValidationError`。
-
-        Args:
-            verify: 是否校验 SSL 证书，默认 True。
-                （0.2.0 之前这里默认 None，会被 protobuf 当成"未设置"，
-                服务端因而收到 False——即默认关闭证书校验。）
-
-        Note:
-            没有 ``files`` 参数。协议里从来没有这个字段（旧版的 ``files=``
-            一律抛 NotImplementedError），所以删掉它只是把 API 说实话。
-            要上传文件请自己拼好 multipart 体，用 ``data=<bytes>`` 加上
-            ``Content-Type: multipart/form-data; boundary=...`` 头发出去——
-            ``data`` 现在是 bytes 字段，任意二进制都能原样送达。
-        """
         task = self._build_task(
             url=url,
             adapter=adapter,
@@ -489,19 +392,6 @@ class Downloader(ClientBase):
             return DownloadResponse.from_error(str(e), url=url)
 
     def download(self, task: DownloadTask) -> DownloadResponse:
-        """
-        执行下载任务
-
-        Args:
-            task: 下载任务对象
-
-        Returns:
-            下载响应对象
-
-        Raises:
-            TransportError: 与服务端通信失败。
-            AuthenticationError: 鉴权失败。
-        """
         pb_request = task.to_protobuf()
         stub = self._get_stub()
 
@@ -524,21 +414,6 @@ class Downloader(ClientBase):
         raise TransportError(f"连接 {self.target} 失败：重试 {self.rpc_max_retries} 次后仍不可用")
 
     def stream(self, url: str, **kwargs: Any) -> StreamedResponse:
-        """流式下载：响应体分片返回，全程不把整个 body 放进内存。
-
-        大文件请用这个而不是 :meth:`get`。返回对象先给出状态码与响应头，
-        再按需迭代分片::
-
-            with downloader.stream("https://example.com/big.zip") as resp:
-                print(resp.status_code, resp.headers)
-                with open("big.zip", "wb") as f:
-                    for chunk in resp:
-                        f.write(chunk)
-
-        Raises:
-            TransportError / AuthenticationError: 与服务端通信失败。
-            ValidationError: 参数非法。
-        """
         task = self._build_task(url=url, **kwargs)
         stub = self._get_stub()
 
@@ -555,18 +430,6 @@ class Downloader(ClientBase):
             raise self._rpc_error(e) from e
 
     def batch(self, tasks: Iterable[DownloadTask], timeout: float | None = None) -> Iterator[DownloadResponse]:
-        """批量下载：一次 RPC 处理多个任务。
-
-        结果按**完成顺序**产出，不是提交顺序——慢的那个不会挡住快的，
-        所以要靠 ``request_uuid`` 对应回请求，不能靠顺序。
-        单个任务失败不影响其他任务，失败信息在各自响应的 ``error`` 里。
-
-        ::
-
-            tasks = [DownloadTask(uuid=u, url=u) for u in urls]
-            for resp in downloader.batch(tasks):
-                print(resp.request_uuid, resp.status_code)
-        """
         stub = self._get_stub()
 
         def _requests() -> Iterator[Any]:
@@ -585,29 +448,22 @@ class Downloader(ClientBase):
             raise self._rpc_error(e) from e
 
     def get(self, url: str, params: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
-        """发送GET请求"""
         return self.request(method=HttpMethod.GET, url=url, params=params, **kwargs)
 
     def post(self, url: str, data: Any = None, json: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
-        """发送POST请求"""
         return self.request(method=HttpMethod.POST, url=url, data=data, json=json, **kwargs)
 
     def put(self, url: str, data: Any = None, **kwargs: Any) -> DownloadResponse:
-        """发送PUT请求"""
         return self.request(method=HttpMethod.PUT, url=url, data=data, **kwargs)
 
     def patch(self, url: str, data: Any = None, **kwargs: Any) -> DownloadResponse:
-        """发送PATCH请求"""
         return self.request(method=HttpMethod.PATCH, url=url, data=data, **kwargs)
 
     def delete(self, url: str, **kwargs: Any) -> DownloadResponse:
-        """发送DELETE请求"""
         return self.request(method=HttpMethod.DELETE, url=url, **kwargs)
 
     def head(self, url: str, **kwargs: Any) -> DownloadResponse:
-        """发送HEAD请求"""
         return self.request(method=HttpMethod.HEAD, url=url, **kwargs)
 
     def options(self, url: str, **kwargs: Any) -> DownloadResponse:
-        """发送OPTIONS请求"""
         return self.request(method=HttpMethod.OPTIONS, url=url, **kwargs)

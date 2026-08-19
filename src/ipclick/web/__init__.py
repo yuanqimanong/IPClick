@@ -1,5 +1,3 @@
-"""IPClick Web 管理端（``ipclick run --web``）。"""
-
 from ipclick.web.auth import SessionStore, WebCredentials, announce, generate_password
 from ipclick.web.pages import WebPages
 from ipclick.web.server import COOKIE_NAME, WebConfig, WebServer

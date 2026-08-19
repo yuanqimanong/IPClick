@@ -47,10 +47,6 @@ class ServerConfig(TypedDict, total=False):
 
 
 class IPClickServer:
-    """
-    IPClick gRPC服务器
-    """
-
     def __init__(
         self,
         config_path: str | None = None,
@@ -105,13 +101,6 @@ class IPClickServer:
 
     @staticmethod
     def _compression(server_config: "ServerConfig | dict[str, Any]") -> grpc.Compression:
-        """响应压缩方式。
-
-        此前写死 Gzip。对本项目最常见的负载——几百字节到几 KB 的 JSON——压缩
-        省下的带宽不值那点 CPU；而在同机或内网部署里，带宽根本不是瓶颈。
-        但对大响应体（抓下来的 HTML 页面、下载的文件）它又确实有用，所以不是
-        "该关掉"，而是"该能选"。
-        """
         name = str(dict(server_config).get("compression", "gzip") or "gzip").strip().lower()
         if name in ("none", "off", "no", "identity"):
             return grpc.Compression.NoCompression
@@ -120,7 +109,6 @@ class IPClickServer:
         return grpc.Compression.Gzip
 
     def _start_web(self) -> None:
-        """按配置启动 Web 管理端。"""
         if not self.web_config.enabled:
             return
         credentials = WebCredentials.resolve(self.web_config.as_credentials_config())
@@ -149,12 +137,6 @@ class IPClickServer:
         announce(credentials, url)
 
     def _start_node_pool(self) -> None:
-        """给 Web 端建一个只读的节点池。
-
-        集群本来是**客户端**的概念，服务端进程不参与路由。但运维想在这台机器上
-        确认"我看到的集群拓扑对不对、哪些节点连得上"，为此起一个只探活、不参与
-        任何请求分发的池子是值得的。配置里没有节点就什么都不做。
-        """
         cluster_config = dict(self.config.get("CLUSTER", {}))
         try:
             parsed = ClusterConfig.from_config(cluster_config)
@@ -173,11 +155,6 @@ class IPClickServer:
             self._node_pool = None
 
     def _web_snapshot(self) -> dict[str, object]:
-        """给 Web 端看的运行状态。
-
-        机密（令牌、代理密码、证书内容）一律只报"有/无"，绝不回显——
-        管理界面是个比 gRPC 端口更容易被够到的地方。
-        """
         from ipclick.adapters.registry import ADAPTER_CLASSES, DEFAULT_ADAPTER_NAME
 
         security = dict(self.config.get("SECURITY", {}))
@@ -237,18 +214,9 @@ class IPClickServer:
         }
 
     def _live_snapshot(self) -> dict[str, object]:
-        """总览页那一块自动刷新用的**轻量**数据。
-
-        它每 5 秒被拉一次，而完整快照里有一堆按秒计算毫无意义、代价却不小的东西：
-        解析 TLS 配置、算集群拓扑、探四个引擎的浏览器本体（那是文件系统扫描）。
-        自动刷新的那块只用到链路统计，所以只算这一份。
-        """
         return {"trace": self.recorder.stats()}
 
     def _cluster_summary(self) -> dict[str, Any]:
-        """集群展示数据。开了服务端转发时用转发器自己的快照——那才是真正在
-        路由的那份状态；否则只报配置里声明的节点及其可达性。
-        """
         service = self.task_service
         if isinstance(service, ForwardingTaskService):
             data: dict[str, Any] = service.snapshot()
@@ -266,11 +234,6 @@ class IPClickServer:
         }
 
     def _cluster_nodes(self) -> list[dict[str, object]]:
-        """服务端进程本身不持有节点池——节点是**客户端**的概念。
-
-        这里展示的是本机配置里声明的节点及其可达性，方便运维确认"这台机器
-        看到的集群拓扑对不对"，而不是接管客户端的负载均衡状态。
-        """
         pool = getattr(self, "_node_pool", None)
         if pool is None:
             return []
@@ -281,19 +244,6 @@ class IPClickServer:
         return nodes
 
     def _reload_cluster(self) -> tuple[bool, str]:
-        """节点列表改完之后原地重建路由。
-
-        0.3 里 ``ClusterConfig`` 与 ``NodePool`` 的生命周期等于进程生命周期：
-        ``/nodes`` 保存完只是改了文件，真正在干活的路由表纹丝不动，所以页面上
-        只能写"改完需要重启才生效"。现在两条路都重建：
-
-        * 开了服务端转发 → 转发器自己换掉 cluster 与节点池（保留各节点的健康
-          计数，否则熔断/恢复的"连续 N 次"判定会被清零）。
-        * 没开转发 → 只有那个供 Web 端观测的池子，把它重建一遍。
-
-        监听端口这类要重建 gRPC server 的项**不在**热更新范围内，它们仍然标
-        "需重启"——但改节点列表本来也不会动到端口。
-        """
         reloaded = self._web_pages.config if self._web_pages is not None else self.config
         self.config = reloaded
         try:
@@ -313,11 +263,6 @@ class IPClickServer:
         return True, f"节点列表已更新（{count} 个节点在探活中）。本进程未开启服务端转发，不参与转发路由"
 
     def _web_action(self, name: str, form: dict[str, str]) -> tuple[bool, str]:
-        """处理 Web 端的可变操作。
-
-        只接受运行时的、可逆的操作。改配置一律不做——这个服务能代任意 URL
-        发请求，一个能改它配置的网页就是极高价值的目标。
-        """
         node_id = form.get("node_id", "").strip()
         if name == "drain" and node_id:
             self._drained.add(node_id)
@@ -328,13 +273,6 @@ class IPClickServer:
         return False, f"未知操作 {name!r}"
 
     def start(self, host: str | None = None, port: int | None = None) -> None:
-        """
-        启动服务器
-
-        Args:
-            port: 服务端口（覆盖配置）
-            host: 绑定地址（覆盖配置）
-        """
         server_config: ServerConfig = cast(ServerConfig, self.config.get("SERVER", {}))
 
         server_host: str = host or self._host
@@ -477,13 +415,6 @@ class IPClickServer:
         tls_settings: TLSSettings,
         server_config: Any,
     ) -> None:
-        """异步模式的启动路径。
-
-        刻意不复用同步那一大段：aio 的 server 生命周期是协程（start / stop /
-        wait_for_termination 都要 await），硬塞进同步流程只会让两边都别扭。
-        共用的是**参数解析**——上面算出来的 max_workers、准入上限、压缩、
-        鉴权、TLS 全部原样传进去，所以两种模式对同一份配置的理解完全一致。
-        """
         import asyncio as _asyncio
 
         from ipclick.async_server import serve_async
@@ -530,19 +461,6 @@ class IPClickServer:
             log.info("Received KeyboardInterrupt, shutting down...")
 
     def _wire_rate_sharding(self) -> None:
-        """客户端分发形态下，把 QPS 按存活节点数分片。
-
-        只在**同时满足**这三条时才做，任何一条不满足都是零开销：
-
-        * ``forward = "off"`` —— 服务端转发时所有任务过入口节点，本来就是全局的
-        * 配了 ``[CLUSTER].nodes`` —— 没有集群就没有分片一说
-        * 配了 ``per_host_qps`` —— 没限速就不该凭空造出一个限速
-
-        为此会起一个只探活、不参与任何路由的节点池。这是必要成本：份额要跟着
-        节点上下线变，就得知道现在活着几台。份额更新挂在探测回调上而不是另起
-        定时器——两个独立周期看到的节点状态会错开，而"限流份额"和"路由决策"
-        依据的存活数不一致是很难查的一类问题。
-        """
         service = self.task_service
         if service is None or self.cluster_config.forwarding_enabled:
             return
@@ -562,7 +480,6 @@ class IPClickServer:
         log.info(f"集群限流分片已启用：{len(self.cluster_config.nodes)} 个节点，份额随健康探测变化")
 
     def _setup_signal_handlers(self):
-        """设置信号处理器"""
 
         def signal_handler(signum: int, _frame: FrameType | None) -> None:
             signal_name = signal.Signals(signum).name
@@ -577,12 +494,6 @@ class IPClickServer:
             _ = signal.signal(signal.SIGBREAK, signal_handler)
 
     def stop(self, grace_period: int = 10):
-        """
-        停止服务器
-
-        Args:
-            grace_period: 优雅停机时间（秒）
-        """
         if self._web_server is not None:
             self._web_server.stop()
             self._web_server = None
@@ -607,16 +518,6 @@ class IPClickServer:
 
 
 def _as_strict_bool(raw: object, field: str, default: bool = False) -> bool:
-    """按布尔读一个配置项。含糊的值当场报错，不猜。
-
-    不能直接 ``bool()``：TOML 里给布尔值加引号是最常见的笔误之一，而
-    ``bool("false")`` 是 **True**。于是 ``async_mode = "false"`` 会**打开**实验性
-    异步模式——配置文件上白纸黑字写着关，跑起来却是开的，且没有任何提示。
-    人会在一个自以为没开的模式上排查问题，这类事故最费时间。
-
-    能明确判读的字符串照收（从环境变量注入配置时值本来就是字符串），
-    真正含糊的才拒绝。
-    """
     if raw is None:
         return default
     if isinstance(raw, bool):
@@ -634,14 +535,9 @@ def _as_strict_bool(raw: object, field: str, default: bool = False) -> bool:
 
 
 def _resolve_processes(config_path: str | None, port: int | None) -> int:
-    """读 ``[SERVER].processes``。
-
-    ``0`` 表示按 CPU 核数自动决定（上限 8——再多的收益会被目标站点和内核
-    的连接开销吃掉，而每个进程都要一份完整的适配器和连接池）。
-    """
     try:
         config = load_config(config_path, port)
-    except Exception:  # pragma: no cover - 配置有问题的话交给正常路径去报错
+    except Exception:
         return 1
     raw = dict(config.get("SERVER", {})).get("processes", 1)
     if isinstance(raw, bool):
@@ -658,13 +554,6 @@ def _resolve_processes(config_path: str | None, port: int | None) -> int:
 
 
 def _probe_port(host: str, port: int) -> None:
-    """在 fork 之前独占地试绑一次端口。
-
-    多进程分片要打开 SO_REUSEPORT，而那正好让"端口已被别的程序占用"变成
-    静默成功——两个不相干的进程一起监听，请求被内核随便分。所以在放开
-    SO_REUSEPORT 之前，先用一个**不带** SO_REUSEPORT 的普通 socket 试绑：
-    绑不上就当场失败，和单进程模式的行为保持一致。
-    """
     family = socket.AF_INET6 if ":" in host.strip("[]") or host in ("[::]", "::") else socket.AF_INET
     bind_host = host.strip("[]") if family is socket.AF_INET6 else host
     if bind_host in ("", "*"):
@@ -692,19 +581,6 @@ def _serve_multiprocess(
     web_port: int | None,
     web_host: str | None,
 ) -> None:
-    """多进程分片：N 个子进程靠 SO_REUSEPORT 共享同一个监听端口。
-
-    为什么需要它：服务端是一请求一线程的 CPython 进程，实测 16 核机器上
-    8 个核只能用出 1.45 个——GIL 是天花板，`max_workers` 从 32 调到 256
-    对吞吐没有任何影响（实测 279.8 / 277.9 QPS，差异在噪声内）。唯一能
-    真正用上多核的办法就是多进程。
-
-    分发由**内核**做（SO_REUSEPORT 按四元组哈希），不需要任何中间件，
-    也不需要改客户端——对调用方来说仍然只有一个地址一个端口。
-
-    Web 管理端只在 0 号子进程里起：它是有状态的（会话、安装任务），
-    起 N 份会让登录态随机失效，而且 N 个进程抢同一个 Web 端口必然失败。
-    """
     resolved_host = host or str(dict(load_config(config_path, port).get("SERVER", {})).get("host", "[::]"))
     resolved_port = int(port or dict(load_config(config_path, port).get("SERVER", {})).get("port", DEFAULT_GRPC_PORT))
     _probe_port(resolved_host, resolved_port)
@@ -727,7 +603,7 @@ def _serve_multiprocess(
                 server.start()
             except KeyboardInterrupt:
                 pass
-            except Exception as e:  # pragma: no cover
+            except Exception as e:
                 log.exception(f"worker {index} 退出: {e}")
                 os._exit(1)
             os._exit(0)
@@ -760,20 +636,6 @@ def serve(
     web_port: int | None = None,
     web_host: str | None = None,
 ):
-    """启动IPClick服务器的便捷函数。
-
-    根据提供的配置路径、主机地址和端口启动服务器。
-    如果参数为None，则使用相应的默认值。
-    Args:
-        config_path (str | None): 自定义配置文件路径。如果为None，则使用默认配置。
-        host (str | None): 绑定地址。如果为None，则使用默认地址（如localhost）。
-        port (int | None): 服务端口。如果为None，则使用默认端口（如8080）。
-        web_host (str | None): Web 管理端的绑定地址（覆盖 ``[WEB].host``）。
-            传 ``0.0.0.0`` 让同一局域网内的其他设备也能访问。
-    Returns:
-        None: 函数执行成功返回None。
-
-    """
     try:
         processes = _resolve_processes(config_path, port)
         if processes > 1:

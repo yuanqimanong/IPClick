@@ -27,16 +27,10 @@ from ipclick.web.server import is_public_host
 
 
 def _display_width(text: str) -> int:
-    """终端显示宽度。CJK 字符占两列，按 len() 补空格会对不齐。"""
     return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
 
 
 def _print_example(ctx: click.Context, _param: click.Parameter, value: str | None) -> None:
-    """输出模板然后退出。
-
-    直接打到 stdout（不加任何前缀），这样 `ipclick -e > ipclick.toml`
-    出来的就是一个能直接用的文件。
-    """
     if not value or ctx.resilient_parsing:
         return
     click.echo(example_env() if value == "env" else example_config(), nl=False)
@@ -59,17 +53,6 @@ def _print_example(ctx: click.Context, _param: click.Parameter, value: str | Non
 )
 @click.pass_context
 def main(ctx: click.Context):
-    """IPClick - 分布式HTTP请求代理工具
-
-    \b
-    部署：  init / run / health / config-info
-    调用：  fetch / status / trace / node / component / config
-    接入：  skill —— 输出或安装给 AI 代理用的技能包
-
-    "调用"那一组是给程序（尤其是 AI）用的：每条命令都支持 --json，
-    输出一个 JSON 文档到 stdout；退出码分类（0 成功 / 1 失败 / 3 连不上 /
-    4 鉴权失败 / 5 参数或配置被拒）。先跑 `ipclick skill show` 看完整用法。
-    """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -85,16 +68,6 @@ def main(ctx: click.Context):
     help="按端口命名：生成 ipclick-<端口>.toml 并把端口填进去。同机起多个实例时用",
 )
 def init(force: bool, target_dir: Path, port: int | None):
-    """在当前目录生成 ipclick.toml 与 .env。
-
-    比 `ipclick -e > 文件` 强在：.env 用 600 权限创建、预填一个随机的 Web 密码、
-    已存在时不会闷头覆盖、并把 .env 追加进 .gitignore。
-
-    \b
-    同一台机器上起多个实例：
-        ipclick init --port 8001 && ipclick init --port 8002
-        ipclick run --port 8001      # 自动读 ipclick-8001.toml
-    """
     target_dir.mkdir(parents=True, exist_ok=True)
     toml_path = target_dir / (f"ipclick-{port}.toml" if port else "ipclick.toml")
     env_path = target_dir / ".env"
@@ -177,7 +150,6 @@ def run(
     web_host: str | None,
     web_lan: bool,
 ):
-    """启动IPClick服务"""
     try:
         if web_lan:
             if web_host and web_host != "0.0.0.0":
@@ -229,11 +201,6 @@ def run(
 @click.option("--service", default="", help="要查询的服务名，默认查总体状态")
 @click.option("--timeout", type=float, default=5.0, show_default=True, help="超时（秒）")
 def health(host: str, port: int | None, config: Path | None, service: str, timeout: float):
-    """检查服务端健康状态（grpc.health.v1）。
-
-    健康时退出码 0，否则 1 —— 可直接用于 Docker HEALTHCHECK 或就绪探针。
-    该接口免鉴权，无需提供令牌。
-    """
     LogUtil.init(level="ERROR")
 
     resolved_port = port or int(
@@ -250,7 +217,6 @@ def health(host: str, port: int | None, config: Path | None, service: str, timeo
 @main.command("config-info")
 @click.option("--config", "-c", type=click.Path(path_type=Path), help="配置文件路径")
 def config_info(config: Path | None):
-    """显示配置信息"""
     try:
         cfg = load_config(str(config) if config else None)
 

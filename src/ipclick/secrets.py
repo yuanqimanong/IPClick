@@ -1,23 +1,3 @@
-"""机密的统一登记与解析。
-
-**一项配置只有一个家**：机密归 ``.env`` / 环境变量，行为配置归 ``ipclick.toml``。
-
-之前两边各存一份，同一个令牌既能写在 ``[SECURITY].auth_token`` 也能写在
-``IPCLICK_AUTH_TOKEN``——不但重复，更糟的是 ``ipclick.toml`` 是**应该进版本库**
-的文件，机密写进去就会跟着进 git、进备份、进 CI 日志。
-
-现在的规则
-----------
-* 机密的**正规位置**是环境变量（或 ``.env``），模板里也只列这些。
-* 写在配置文件里**仍然生效**——受信环境里图省事是合理的，砸掉现有部署不合理。
-  但启动时会打一行警告，指出哪几项该挪走。
-* 嫌吵可以 ``[SECURITY].allow_secrets_in_config = true`` 关掉那行警告。
-* 两边都写时**环境变量优先**：部署环境注入的必须能压过仓库里那份。
-
-这张表还有第二个用途：``ipclick config-info`` 靠它显示每项机密"来自哪里"，
-免得配错了地方还以为生效了。
-"""
-
 from dataclasses import dataclass
 import os
 from typing import Any
@@ -27,8 +7,6 @@ from ipclick.utils.log_util import log
 
 @dataclass(frozen=True)
 class SecretSpec:
-    """一项机密的登记信息。"""
-
     env: str
     section: str
     key: str
@@ -76,7 +54,6 @@ SUPPRESS_KEY = "allow_secrets_in_config"
 
 
 def _dig(config: Any, path: str) -> dict[str, Any]:
-    """按 ``"A.b"`` 取出嵌套的配置节。"""
     node: Any = config
     for part in path.split("."):
         if not isinstance(node, dict):
@@ -90,11 +67,6 @@ def config_value(config: Any, spec: SecretSpec) -> Any:
 
 
 def resolve(config: Any, spec: SecretSpec) -> tuple[str | None, str]:
-    """解析一项机密，返回 ``(值, 来源)``。
-
-    来源取值：``env`` / ``config`` / ``unset``。环境变量优先——
-    部署环境注入的必须能压过仓库里那份配置文件。
-    """
     from_env = (os.getenv(spec.env) or "").strip()
     if from_env:
         return from_env, "env"
@@ -107,7 +79,6 @@ def resolve(config: Any, spec: SecretSpec) -> tuple[str | None, str]:
 
 
 def describe_source(config: Any, spec: SecretSpec) -> str:
-    """一项机密来自哪里，给人看的说法。"""
     _, origin = resolve(config, spec)
     if origin == "env":
         return "环境变量 / .env"
@@ -117,16 +88,10 @@ def describe_source(config: Any, spec: SecretSpec) -> str:
 
 
 def audit(config: Any) -> list[tuple[SecretSpec, str]]:
-    """列出所有机密及其来源，供 config-info 展示。"""
     return [(spec, resolve(config, spec)[1]) for spec in SECRETS]
 
 
 def warn_secrets_in_config(config: Any) -> list[SecretSpec]:
-    """检查有没有机密写在配置文件里，有就打一行警告。
-
-    返回被发现的项，方便测试与展示。``[SECURITY].allow_secrets_in_config = true``
-    时只做检查不打警告。
-    """
     found: list[SecretSpec] = []
     for spec in SECRETS:
         raw = config_value(config, spec)
@@ -154,11 +119,6 @@ def warn_secrets_in_config(config: Any) -> list[SecretSpec]:
 
 
 def proxy_config(config: Any) -> dict[str, Any]:
-    """取 ``[PROXY]`` 配置，并用环境变量覆盖其中的凭据。
-
-    代理账号密码是机密，正规位置是 ``IPCLICK_PROXY_AUTH_KEY`` /
-    ``IPCLICK_PROXY_AUTH_PASSWORD``；配置文件里写了也认，但会在启动时被点名。
-    """
     merged = dict(_dig(config, "PROXY"))
     for spec in SECRETS:
         if spec.section != "PROXY":
@@ -170,9 +130,6 @@ def proxy_config(config: Any) -> dict[str, Any]:
 
 
 def env_template() -> str:
-    """``.env`` 模板。只列机密——非机密的部署参数（IPCLICK_HOST 等）仍然支持，
-    但那是给容器编排注入用的，不该混进这个放密钥的文件。
-    """
     lines = [
         "# IPClick 机密配置",
         "#",

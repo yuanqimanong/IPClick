@@ -1,27 +1,3 @@
-"""请求链路记录与统计。
-
-这个模块替代了原来的 Prometheus 埋点。取舍是刻意的：Prometheus 能回答
-"整体 QPS 和 P99 是多少"，但回答不了"我刚才那个请求为什么 403"——因为它按
-设计不保留单条记录（标签里放 URL 会造成基数爆炸）。而这个库的使用场景恰恰
-是后者，所以这里换成两层结构：
-
-1. **内存环形缓冲**（始终开启，默认 500 条）。零依赖、零磁盘、上限固定。
-   进程重启即丢——它服务的是"刚才发生了什么"。
-2. **SQLite**（``[TRACE].sqlite_enabled``，**默认关**）。按天保留，默认 30 天。
-   服务的是"上周三那批任务的成功率"。
-
-聚合统计（总数 / 成功率 / 各适配器耗时）用进程内计数器实时累加，即使
-SQLite 关着 Web 端也有数可看——代价只是重启归零。
-
-写 SQLite 的三条硬约束：
-
-* **单写线程 + 有界队列**。SQLite 同一时刻只允许一个写者；让 N 个 gRPC
-  worker 各自去写等于在热路径上抢锁。请求线程只做一次 ``put_nowait``。
-* **队列满了就丢，并且丢了要能看见**。链路日志是可观测性数据，绝不能反压
-  业务——但静默丢弃比丢弃更糟，所以有 ``dropped`` 计数器并会打日志。
-* **写失败不能传播**。磁盘满、文件被删、权限变更都不该让一次正常的下载失败。
-"""
-
 from __future__ import annotations
 
 from collections.abc import Generator, Sequence
@@ -57,7 +33,6 @@ _URL_MAX_LEN = 512
 
 
 def classify_status(status_code: int) -> str:
-    """把状态码归成有限的几类。"""
     if status_code < 0:
         return "failure"
     if status_code < 300:
@@ -72,14 +47,7 @@ def classify_status(status_code: int) -> str:
 @final
 @dataclass(frozen=True, slots=True)
 class TraceRecord:
-    """一条请求链路记录。
-
-    刻意**不含**请求头、cookie、请求体、代理串——那些里面有机密，而这张表是
-    要给 Web 端展示的。想看完整请求内容请开 debug 日志。
-    """
-
     ts: float
-    """完成时刻（unix 秒）。"""
     uuid: str
     node_id: str
     adapter: str
@@ -96,14 +64,6 @@ class TraceRecord:
 
     @property
     def host(self) -> str:
-        """目标站点。用 :func:`ipclick.limiter.host_of`——和按 host 限流是同一套
-        定义，两处对"host"的理解必须一致，否则排行榜和限流说的不是一回事。
-
-        ``[TRACE].record_url = false`` 时 :attr:`url` 里存的**已经是** host
-        （不带协议），而 ``host_of`` 要的是完整 URL，对它会解析失败。
-        所以解析不出来时把 url 原样当 host 用——否则关掉 record_url 的部署里
-        整个目标站点排行会全是 "-"。
-        """
         from ipclick.limiter import host_of
 
         return host_of(self.url) or self.url or "-"
@@ -118,29 +78,13 @@ class TraceRecord:
 
     @property
     def when(self) -> str:
-        """**服务端**本地时间字符串。
-
-        只是个回落值：页面上真正显示的时间由浏览器按**看的人**所在时区渲染
-        （见 :attr:`iso`）。没有 JS 时才用这一份。
-        """
         return datetime.fromtimestamp(self.ts).strftime("%Y-%m-%d %H:%M:%S")
 
     @property
     def iso(self) -> str:
-        """带时区偏移的 ISO-8601，例如 ``2026-08-18T16:50:21+08:00``。
-
-        页面把它放在 ``<time datetime="...">`` 上，浏览器据此换算成看的人自己的
-        时区。**必须带偏移量**——不带的话浏览器只能猜，而猜错的表现是"时间看着
-        像那么回事，但就是和自己的表差几个钟头"，很难被当成 bug 报出来。
-
-        :attr:`when` 那种"服务端本地时间"在只有一台机器、人就坐在它旁边时没问题；
-        一旦服务端跑在 UTC 的容器里（Docker 默认就是），东八区的人看到的每一条都
-        慢八小时。
-        """
         return datetime.fromtimestamp(self.ts).astimezone().isoformat(timespec="seconds")
 
     def as_row(self) -> tuple[Any, ...]:
-        """转成 SQLite 的插入元组（列顺序见 _INSERT_SQL）。"""
         return (
             self.ts,
             self.uuid,
@@ -182,8 +126,6 @@ class TraceRecord:
 @final
 @dataclass(frozen=True, slots=True)
 class TraceSettings:
-    """``[TRACE]`` 配置。"""
-
     memory_size: int = DEFAULT_MEMORY_SIZE
     sqlite_enabled: bool = False
     sqlite_path: str = "ipclick-trace.db"
@@ -236,8 +178,6 @@ class _AdapterStat:
 
 @final
 class Counters:
-    """进程内聚合计数器。始终开启，成本是几次整数自增。"""
-
     def __init__(self) -> None:
         self._lock: threading.Lock = threading.Lock()
         self.started_at: float = time.time()
@@ -360,19 +300,6 @@ _CLAIM_SUFFIX = ".owner"
 
 
 def _claim_database(path: str) -> str:
-    """声明本进程正在写这个链路库；发现别人也在写就**明确告警**。
-
-    WAL 模式下多个进程往同一个库里写是完全合法的——所以 SQLite 自己不会报任何
-    错，链路记录就这么静静地混在一起，界面上看不出来。这正是 P1-3 里最危险的
-    那一项：用户以为在看单个实例的数据，实际是多进程合并的结果。
-
-    这里只做"告警"，不做"阻止"：把同一个库共享给多个实例是有正当用途的
-    （比如刻意想看合并视图）。真正的解法是给路径加 ``{port}`` 占位符，所以
-    告警里直接把那句话说出来。
-
-    Returns:
-        标记文件路径；建不出来就返回空串（这只是个提醒机制，不该影响服务）。
-    """
     marker = path + _CLAIM_SUFFIX
     try:
         previous = int(Path(marker).read_text(encoding="utf-8").strip() or 0)
@@ -389,7 +316,7 @@ def _claim_database(path: str) -> str:
 
     try:
         _ = Path(marker).write_text(str(os.getpid()), encoding="utf-8")
-    except OSError as e:  # pragma: no cover - 目录不可写
+    except OSError as e:
         log.debug(f"无法写入链路库占用标记 {marker}：{e}")
         return ""
     return marker
@@ -404,46 +331,26 @@ def _release_database(marker: str) -> None:
 
 
 def _process_alive(pid: int) -> bool:
-    """pid 还在跑吗。查不出来时按"在跑"处理——宁可多一条告警，
-    也不要漏掉真正的多实例混写。
-    """
     if pid <= 0:
         return False
-    if sys.platform == "win32":  # pragma: no cover - 平台相关
+    if sys.platform == "win32":
         return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except PermissionError:  # pragma: no cover - 进程存在但不属于当前用户
+    except PermissionError:
         return True
-    except OSError:  # pragma: no cover
+    except OSError:
         return False
     return True
 
 
 class TraceReader:
-    """只读地打开一个链路记录库。
-
-    从 :class:`SQLiteSink` 里分出来，是为了让**服务进程之外**的人也能查这些记录
-    ——``ipclick trace list`` 就跑在另一个进程里。它必须只读：
-
-    * 不建表、不迁移。指着一个不存在的路径应该报"没有这个库"，而不是当场造一个
-      空库出来，让人以为"记录丢了"。
-    * 不占用（不写 ``_claim_database`` 标记）。那个标记是给写者用的互斥，
-      查一眼记录不该让服务端以为有第二个进程在抢着写。
-    * 不起后台线程。CLI 跑完就退，多一个 daemon 线程只是多一个退出时的不确定性。
-
-    连接一律走 ``file:...?mode=ro``：查询这条路上物理上不可能写坏数据文件。
-    """
-
     def __init__(self, path: str) -> None:
         self.path: str = os.path.abspath(path)
 
     def exists(self) -> bool:
-        """库文件在不在。不在时调用方该说"没开落盘 / 路径不对"，而不是返回空列表
-        ——"一条记录都没有"和"根本没这个库"是两回事。
-        """
         return os.path.isfile(self.path)
 
     def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
@@ -464,7 +371,6 @@ class TraceReader:
         adapter: str = "",
         keyword: str = "",
     ) -> list[TraceRecord]:
-        """按条件倒序查记录。参数全部走占位符，不做字符串拼接。"""
         where: list[str] = []
         params: list[Any] = []
         if since is not None:
@@ -495,7 +401,6 @@ class TraceReader:
             return []
 
     def summary(self, since: float | None = None) -> dict[str, Any]:
-        """时间范围内的聚合。SQL 里算，不把行拉到 Python 侧。"""
         where = "WHERE ts >= ?" if since is not None else ""
         params: tuple[Any, ...] = (since,) if since is not None else ()
         try:
@@ -545,7 +450,6 @@ class TraceReader:
             return {"total": 0, "ok": 0, "failed": 0, "success_rate": 0.0, "avg_ms": 0.0, "bytes": 0, "by_adapter": {}}
 
     def daily(self, days: int = 30) -> list[dict[str, Any]]:
-        """按天分组的计数，给 Web 端画趋势。"""
         since = time.time() - days * 86400
         try:
             conn = self._connect(readonly=True)
@@ -574,13 +478,6 @@ class TraceReader:
             return []
 
     def top_hosts(self, since: float | None = None, limit: int = 10) -> list[dict[str, Any]]:
-        """按目标 host 排行。
-
-        host 是入库时就算好的一列（见 :data:`_COLUMNS`），所以这里是一次带索引的
-        GROUP BY。原实现是 ``query(limit=20000)`` 把两万行拉进 Python 再聚合——
-        既慢（实测 219ms），那个 20000 的上限还是**静默**的：超过之后排行只反映
-        其中一部分，页面上却看不出来。
-        """
         where = "WHERE ts >= ?" if since is not None else ""
         params: tuple[Any, ...] = (since,) if since is not None else ()
         sql = f"""SELECT COALESCE(host, '-') AS host, COUNT(*) AS total,
@@ -609,7 +506,6 @@ class TraceReader:
         ]
 
     def db_size(self) -> int:
-        """数据文件大小（含 WAL）。"""
         total = 0
         for suffix in ("", "-wal", "-shm"):
             with contextlib.suppress(OSError):
@@ -630,13 +526,6 @@ class TraceReader:
 
 @final
 class SQLiteSink(TraceReader):
-    """把链路记录异步写进 SQLite。
-
-    ``close()`` 之前所有写入都只经过一个后台线程，因此不需要跨线程共享连接。
-    读取（Web 端查询）每次开一条新连接——sqlite3 的连接不是线程安全的，
-    而 WAL 模式下读不阻塞写。查询方法全部继承自 :class:`TraceReader`。
-    """
-
     def __init__(self, path: str, retention_days: int = 30, queue_size: int = DEFAULT_QUEUE_SIZE) -> None:
         super().__init__(path)
         self.retention_days: int = retention_days
@@ -672,14 +561,6 @@ class SQLiteSink(TraceReader):
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
-        """把老库补上后加的列。
-
-        只加列、不删列、不改已有列的类型——那类改动 SQLite 要重建整张表。
-
-        新列的回填是个例外：``host`` 全空的话目标站点排行对历史数据就是一片
-        ``-``，等于这个功能对老库不存在。回填只在**加列的那一次**跑，之后每次
-        启动都只是一次 ``PRAGMA table_info``。
-        """
         existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(traces)")}
         if "host" not in existing:
             _ = conn.execute("ALTER TABLE traces ADD COLUMN host TEXT")
@@ -695,7 +576,6 @@ class SQLiteSink(TraceReader):
             log.info("链路记录库已补上 host 列（用于目标站点排行）")
 
     def submit(self, record: TraceRecord) -> None:
-        """入队，绝不阻塞。队列满就丢并计数。"""
         if self._closed or self.failed:
             return
         try:
@@ -729,7 +609,6 @@ class SQLiteSink(TraceReader):
                 self._purge()
 
     def _drain(self) -> list[TraceRecord] | None:
-        """攒一批。返回 None 表示收到了关闭信号。"""
         batch: list[TraceRecord] = []
         try:
             first = self._queue.get(timeout=_FLUSH_INTERVAL)
@@ -800,20 +679,10 @@ class SQLiteSink(TraceReader):
 
 
 def _escape_like(text: str) -> str:
-    """转义 LIKE 模式里的通配符。
-
-    反斜杠自己要先转，否则它会把后面那个转义序列吃掉。
-    配套的 SQL 要写 ``ESCAPE '\\'``。
-    """
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _status_clause(status_class: str) -> str:
-    """把 "2xx" / "failure" 这类分类翻成固定的 SQL 片段。
-
-    返回的是写死的常量串，不含外部输入——不认识的分类返回空串（不过滤），
-    避免把用户输入拼进 SQL。
-    """
     return {
         "2xx": "status_code BETWEEN 200 AND 299",
         "3xx": "status_code BETWEEN 300 AND 399",
@@ -827,13 +696,6 @@ def _status_clause(status_class: str) -> str:
 @final
 @dataclass
 class RequestTrace:
-    """一次请求处理过程中攒出来的链路信息。
-
-    在 ``track_request`` 里创建，执行过程中被逐步填充，退出时定型成
-    :class:`TraceRecord`。用可变对象而不是原来那个 ``dict``——字段名写错时
-    类型检查能当场发现，而 ``ctx["stauts_code"] = 200`` 会静默无效。
-    """
-
     adapter: str
     method: str
     uuid: str = ""
@@ -850,8 +712,6 @@ class RequestTrace:
 
 @final
 class TraceRecorder:
-    """链路记录的统一入口。进程级单例，见 :func:`get_recorder`。"""
-
     def __init__(self, settings: TraceSettings | None = None) -> None:
         self.settings: TraceSettings = settings or TraceSettings()
         self.node_id: str = self.settings.node_id or _default_node_id()
@@ -879,15 +739,6 @@ class TraceRecorder:
     def track_request(
         self, adapter: str, method: str, *, uuid: str = "", url: str = "", stream: bool = False
     ) -> Generator[RequestTrace]:
-        """包住一次请求处理，退出时落一条记录。
-
-        用法::
-
-            with recorder.track_request("curl_cffi", "GET", url=url) as tr:
-                response = do_work()
-                tr.status_code = response.status_code
-                tr.size = len(response.content or b"")
-        """
         tr = RequestTrace(adapter=adapter, method=method, uuid=uuid, url=url, stream=stream, node_id=self.node_id)
         self.counters.enter()
         start = time.monotonic()
@@ -898,7 +749,6 @@ class TraceRecorder:
             self.emit(tr, duration_ms)
 
     def emit(self, tr: RequestTrace, duration_ms: int) -> None:
-        """把一次请求的结果落成记录。``track_request`` 会自动调用。"""
         url = tr.url if self.settings.record_url else _host_only(tr.url)
         record = TraceRecord(
             ts=time.time(),
@@ -945,7 +795,6 @@ class TraceRecorder:
         adapter: str = "",
         keyword: str = "",
     ) -> list[TraceRecord]:
-        """内存里的最近记录（倒序）。SQLite 关着时 Web 端就靠这个。"""
         with self._recent_lock:
             records = list(reversed(self._recent))
         return [r for r in records if _matches(r, status_class, adapter, keyword)][: max(1, limit)]
@@ -960,9 +809,6 @@ class TraceRecorder:
         adapter: str = "",
         keyword: str = "",
     ) -> tuple[list[TraceRecord], str]:
-        """统一查询入口。返回 (记录, 数据来源)——来源要给用户看见，
-        否则"只有 200 条"和"30 天只有 200 条"分不清。
-        """
         if self.sink is not None and not self.sink.failed:
             return (
                 self.sink.query(
@@ -981,7 +827,6 @@ class TraceRecorder:
         return self.recent(limit, status_class=status_class, adapter=adapter, keyword=keyword), "memory"
 
     def status(self) -> dict[str, Any]:
-        """记录器自身的状态，给 Web 端显示"数据从哪来、丢了多少"。"""
         with self._recent_lock:
             in_memory = len(self._recent)
         info: dict[str, Any] = {
@@ -1009,15 +854,6 @@ class TraceRecorder:
         return info
 
     def stats(self, days: int = 30) -> dict[str, Any]:
-        """给 Web 端的一整份统计。
-
-        进程计数器（实时）+ 时间范围聚合与按天趋势（带短 TTL 缓存）。
-
-        缓存只盖住跨天聚合那几项：它们描述的是一个 30 天的窗口，"3 秒新"这件事
-        毫无意义，而请求流页恰恰每 3 秒刷新一次。实测 20 万行时这三个查询合计
-        接近 1 秒，不缓存的话三个节点光算看板就要吃掉一整个核。
-        在途数、总数这些实时值不走缓存。
-        """
         out: dict[str, Any] = {"process": self.counters.snapshot(), "recorder": self.status()}
         if self.sink is not None and not self.sink.failed:
             out.update(self._window_stats(days))
@@ -1031,7 +867,7 @@ class TraceRecorder:
                 return cached[1]
 
         sink = self.sink
-        if sink is None:  # pragma: no cover - 调用方已经判过
+        if sink is None:
             return {}
         since = time.time() - days * 86400 if days > 0 else None
         data: dict[str, Any] = {
@@ -1068,15 +904,11 @@ def _host_only(url: str) -> str:
 
 
 def _default_node_id() -> str:
-    """没配 node_id 时的兜底：主机名 + pid。
-
-    带上 pid 是因为同一台机器上跑多个实例（不同端口）时，光有主机名分不出来。
-    """
     import socket
 
     try:
         host = socket.gethostname()
-    except OSError:  # pragma: no cover
+    except OSError:
         host = "unknown"
     return f"{host}:{os.getpid()}"
 
@@ -1086,10 +918,6 @@ _recorder_lock = threading.Lock()
 
 
 def get_recorder() -> TraceRecorder:
-    """取进程级记录器（首次调用时按默认配置创建）。
-
-    默认配置只有内存缓冲，不碰磁盘——所以在库模式下用也没有副作用。
-    """
     global _recorder
     if _recorder is not None:
         return _recorder
@@ -1100,7 +928,6 @@ def get_recorder() -> TraceRecorder:
 
 
 def init_recorder(settings: TraceSettings) -> TraceRecorder:
-    """按配置（重新）初始化单例。服务端启动时调用。"""
     global _recorder
     with _recorder_lock:
         old = _recorder
@@ -1111,7 +938,6 @@ def init_recorder(settings: TraceSettings) -> TraceRecorder:
 
 
 def reset_recorder() -> None:
-    """重置单例。测试隔离用。"""
     global _recorder
     with _recorder_lock:
         old = _recorder
