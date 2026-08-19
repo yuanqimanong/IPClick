@@ -134,7 +134,7 @@ class TestInlineTables:
     照旧在跑，直到下次重启才炸，那时人早忘了自己在网页上改过什么。
     """
 
-    SAMPLE = '[BROWSER]\nenabled = true\nviewport = { width = 1920, height = 1080 }\n'
+    SAMPLE = "[BROWSER]\nenabled = true\nviewport = { width = 1920, height = 1080 }\n"
 
     def test_updates_in_place(self):
         new, changes = set_values(self.SAMPLE, {"BROWSER.viewport": {"width": 1280}})
@@ -1303,8 +1303,15 @@ class TestTimezone:
     def test_record_iso_carries_an_offset(self):
         """不带偏移量的话浏览器只能猜，猜错就是差几个钟头。"""
         record = TraceRecord(
-            ts=1_755_000_000.0, uuid="u", node_id="n", adapter="curl_cffi",
-            method="GET", url="http://x", status_code=200, duration_ms=1, size=1,
+            ts=1_755_000_000.0,
+            uuid="u",
+            node_id="n",
+            adapter="curl_cffi",
+            method="GET",
+            url="http://x",
+            status_code=200,
+            duration_ms=1,
+            size=1,
         )
         assert re.search(r"[+-]\d{2}:\d{2}$", record.iso), f"没有时区偏移：{record.iso}"
         assert datetime.fromisoformat(record.iso).timestamp() == pytest.approx(1_755_000_000.0, abs=1)
@@ -1327,8 +1334,15 @@ class TestTimezone:
         from ipclick.web.templates import render_dashboard
 
         record = TraceRecord(
-            ts=1_755_000_000.0, uuid="u", node_id="n", adapter="curl_cffi",
-            method="GET", url="http://example.com/tz", status_code=200, duration_ms=1, size=1,
+            ts=1_755_000_000.0,
+            uuid="u",
+            node_id="n",
+            adapter="curl_cffi",
+            method="GET",
+            url="http://example.com/tz",
+            status_code=200,
+            duration_ms=1,
+            size=1,
         )
         html = render_dashboard({"recent": [record], "trace": {}}, "admin", "csrf", False)
         assert "<time datetime=" in html

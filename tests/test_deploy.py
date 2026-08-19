@@ -143,8 +143,7 @@ class TestPlan:
         """
         nodes = [{"id": f"node-{i}", "address": f"10.0.0.{i}:{19000 + i}"} for i in (1, 2, 3)]
         plans = [
-            build_plan(n, nodes=nodes, forward=True, auth_token="t", cluster_secret="s", version="0.5.0")
-            for n in nodes
+            build_plan(n, nodes=nodes, forward=True, auth_token="t", cluster_secret="s", version="0.5.0") for n in nodes
         ]
         grpc_ports = {p.port for p in plans}
         web_ports = [p.web_port for p in plans]
@@ -154,9 +153,7 @@ class TestPlan:
     def test_web_port_dodges_an_explicitly_listed_grpc_port(self):
         """偏移量算出来的值正好被某台占了时要让开，而不是照发。"""
         nodes = [{"id": "a", "address": "10.0.0.1:19001"}, {"id": "b", "address": "10.0.0.2:29001"}]
-        plan = build_plan(
-            nodes[0], nodes=nodes, forward=True, auth_token="t", cluster_secret="s", version="0.5.0"
-        )
+        plan = build_plan(nodes[0], nodes=nodes, forward=True, auth_token="t", cluster_secret="s", version="0.5.0")
         assert plan.web_port != 29001
         assert plan.web_port not in {19001, 29001}
 

@@ -657,7 +657,7 @@ def _live_control(current_ms: int) -> str:
     """
     buttons = "".join(
         f'<input type="radio" id="live-{ms}" name="live" value="{ms}"'
-        f'{" checked" if ms == current_ms else ""}>'
+        f"{' checked' if ms == current_ms else ''}>"
         f'<label for="live-{ms}">{esc(text)}</label>'
         for ms, text, _ in LIVE_INTERVALS
     )

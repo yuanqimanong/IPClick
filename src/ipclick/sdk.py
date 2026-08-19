@@ -51,6 +51,36 @@ def _as_float(value: Any, default: float) -> float:
     return result if result >= 0 else default
 
 
+#: 服务端并发已满时，gRPC 在客户端侧报出来的两种说法。
+#: 服务端 maximum_concurrent_rpcs 打满时会拒流（HTTP/2 RST_STREAM，错误码 7
+#: REFUSED_STREAM），gRPC 把它归到 UNAVAILABLE——和"连不上"用了同一个状态码。
+_REFUSED_MARKERS = ("refused_stream", "concurrent rpc limit", "too_many_pings")
+
+
+def unavailable_hint(details: str | None, port: int) -> str:
+    """UNAVAILABLE 的排障提示。按真实成因分流，而不是一律讲端口。
+
+    这个状态码在实践中有两种完全不同的成因，排查方向相反：
+
+    * **服务端拒流**——它活得好好的，只是在途 RPC 到顶了。高并发压测里这是
+      最常见的一种（实测默认配置 1000 并发时七成请求走这条路），要调的是
+      ``[SERVER].max_concurrent_rpcs``。
+    * **真的连不上**——进程没起、地址端口不对、防火墙拦了。0.5.0 换过默认端口，
+      所以这一档才需要那句端口提示。
+
+    此前不加区分地给所有 UNAVAILABLE 都附端口提示，会让人在服务端明明健在的
+    时候去查防火墙。
+    """
+    lowered = (details or "").lower()
+    if any(marker in lowered for marker in _REFUSED_MARKERS):
+        return (
+            "（服务端**并发已满**并主动拒流，不是连不上：它在途的 RPC 数已达 "
+            "[SERVER].max_concurrent_rpcs。请调大该项，或降低客户端并发。"
+            "服务端 CPU 往往还很空闲——这是准入上限，不是算力上限）"
+        )
+    return port_hint(port)
+
+
 #: gRPC channel 选项，同步与异步客户端共用
 CHANNEL_OPTIONS: list[tuple[str, Any]] = [
     ("grpc.max_send_message_length", _MAX_MESSAGE_LENGTH),
@@ -264,7 +294,7 @@ class ClientBase:
         # 的调用方仍然连 9527 就会握到一个 HTTP 服务上——gRPC 报出来的错误
         # （UNAVAILABLE / 握手失败）和"端口变了"这件事看不出任何关系。
         if code is grpc.StatusCode.UNAVAILABLE:
-            return TransportError(f"gRPC 调用失败 [{code}]: {details}{port_hint(self.port)}")
+            return TransportError(f"gRPC 调用失败 [{code}]: {details}{unavailable_hint(details, self.port)}")
         return TransportError(f"gRPC 调用失败 [{code}]: {details}")
 
     def _should_retry_rpc(self, error: grpc.RpcError, attempt: int) -> bool:
