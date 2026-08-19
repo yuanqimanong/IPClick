@@ -17,7 +17,14 @@ from typing import Any
 
 from typing_extensions import override
 
-from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader, retry
+from ipclick.adapters.base import (
+    DEFAULT_CHUNK_SIZE,
+    DownloaderAdapter,
+    StreamEvent,
+    StreamHeader,
+    aretry,
+    retry,
+)
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError
@@ -77,6 +84,8 @@ class NiquestsAdapter(DownloaderAdapter):
     """
 
     adapter_name: str = "niquests"
+    #: niquests 自带 AsyncSession。
+    supports_async: bool = True
 
     def __init__(self, settings: AdapterSettings | None = None):
         # 真正的 import 就发生在这里——"能不能用"的展示层走 find_spec，
@@ -88,6 +97,9 @@ class NiquestsAdapter(DownloaderAdapter):
         # 按 (proxy, verify) 缓存 Session，以复用连接池
         self._sessions: dict[tuple[str | None, bool], Any] = {}
         self._sessions_lock: threading.Lock = threading.Lock()
+        #: 异步 Session 按 (事件循环, proxy, verify) 缓存 —— 同 curl_cffi，
+        #: 连接池绑定在创建它的循环上，跨循环复用会出问题。
+        self._async_sessions: dict[tuple[int, str | None, bool], Any] = {}
         user_agent = _load_user_agent()
         self.ua_generator: Any = user_agent(platforms="desktop") if user_agent is not None else None
 
@@ -201,6 +213,50 @@ class NiquestsAdapter(DownloaderAdapter):
         except Exception as e:
             # 只记一行，堆栈交给 retry 装饰器最终失败时处理
             log.warning(f"niquests request failed for {url}: {e}")
+            raise
+
+    def _get_async_session(self, proxy: str | None, verify: bool) -> Any:
+        import asyncio
+
+        key = (id(asyncio.get_running_loop()), proxy, verify)
+        session = self._async_sessions.get(key)
+        if session is not None:
+            return session
+        session = _load_niquests().AsyncSession(
+            pool_connections=self.settings.max_keepalive_connections,
+            pool_maxsize=self.settings.max_connections,
+            retries=0,  # 重试由本项目的 aretry 装饰器统一负责
+        )
+        session.verify = verify
+        session.trust_env = bool(self.trust_env)
+        if proxy:
+            session.proxies = {"http": proxy, "https": proxy}
+        self._async_sessions[key] = session
+        return session
+
+    @override
+    @aretry()
+    async def adownload(self, url: str, **kwargs: Any) -> Response:
+        """niquests 的真异步实现。"""
+        self.reject_impersonate(kwargs.get("impersonate"))
+        method = str(kwargs.get("method", "GET")).upper()
+        if method not in _SUPPORTED_METHODS:
+            raise ValidationError(f"Unsupported HTTP method: {method}")
+
+        request_kwargs = self._request_kwargs(kwargs, self.parse_extra_kwargs(kwargs.get("kwargs")))
+        session = self._get_async_session(kwargs.get("proxy"), bool(kwargs.get("verify", True)))
+        try:
+            resp = await session.request(method, url, **request_kwargs)
+            return Response(
+                url=str(resp.url),
+                status_code=resp.status_code,
+                content=resp.content,
+                text=resp.text,
+                headers=dict(resp.headers),
+                raw_response=resp,
+            )
+        except Exception as e:
+            log.warning(f"niquests async request failed for {url}: {e}")
             raise
 
     @override

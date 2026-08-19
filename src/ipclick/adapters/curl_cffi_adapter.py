@@ -4,7 +4,14 @@ from typing import TYPE_CHECKING, Any
 
 from typing_extensions import override
 
-from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader, retry
+from ipclick.adapters.base import (
+    DEFAULT_CHUNK_SIZE,
+    DownloaderAdapter,
+    StreamEvent,
+    StreamHeader,
+    aretry,
+    retry,
+)
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError
@@ -247,6 +254,7 @@ class CurlCffiAdapter(DownloaderAdapter):
         return session
 
     @override
+    @aretry()
     async def adownload(self, url: str, **kwargs: Any) -> Response:
         """curl_cffi 的真异步实现，走 libcurl 的 multi 接口。
 

@@ -27,18 +27,30 @@
 - 新增 `async adownload()` —— 默认把同步 `download()` 丢 executor
 - 新增 `async adownload_stream()` —— 逐个搬分片，不 list() 化（否则丢掉流式的意义）
 
-### 🔄 阶段 1b：curl_cffi / niquests 的真异步实现
+### ✅ 阶段 1b：curl_cffi / niquests 的真异步实现
 - [x] `CurlCffiAdapter`：`AsyncSession`，`supports_async = True`
       - AsyncSession 按 **(事件循环, proxy, verify, impersonate)** 缓存 —— 必须带循环，
         AsyncCurl 绑定在创建它的循环上，跨循环复用会挂 "attached to a different loop"
       - 抽出 `_build_request_kwargs()` 给同步/异步共用（各写一份会失步，
         症状是"同一个请求同步能过异步过不了"，从表象看不出是参数差异）
       - **实测：异步 1351 QPS vs 同步 50 线程 500 QPS ＝ 2.7×**（单进程，600 次请求）
-- [ ] `NiquestsAdapter`：niquests 的 async API
-- [ ] 异步版 retry 装饰器（现在的 `retry()` 里是 `time.sleep`）
-- [ ] 测试
+- [x] `NiquestsAdapter`：`AsyncSession`，`supports_async = True`
+- [x] `aretry()` 异步重试装饰器 —— 用 `asyncio.sleep`。同步那个里的 `time.sleep`
+      在协程里会**阻塞整个事件循环**：不是拖慢这一个请求，是让同循环上所有在飞的
+      请求一起停住，默认退避 1+2+4 秒一次重试冻结 worker 七秒，而现象是
+      "毫不相干的请求也集体变慢"
+- [x] 测试（`tests/test_async_adapters.py`，9 个）
+      - 重点守两条：① 只实现同步的适配器 await 照样能用且**真并行**（不是退化成串行）
+        ② 流式回退**逐个搬**而不是先 list()（否则丢掉流式的意义，但接口看不出差别）
 
-### ⬜ 阶段 2：TaskService 异步化
+**阶段 1 实测**（单进程 600 次请求，目标 go-httpbin）：
+
+| 适配器 | 同步 50 线程 | 异步 | 提升 |
+|---|---:|---:|---:|
+| curl_cffi | 524 QPS | **1361 QPS** | **2.6×** |
+| niquests | 660 QPS | **913 QPS** | 1.4× |
+
+### 🔄 阶段 2：TaskService 异步化（下一步）
 - [ ] `Send` / `SendStream` / `SendBatch` / `Ping` → `async def`
 - [ ] 按 `supports_async` 分派：真异步 or executor 回退
 - [ ] 保留同步类供 async_mode=off 使用（两套并存，别删同步路径）
