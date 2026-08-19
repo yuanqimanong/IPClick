@@ -37,27 +37,16 @@ _DEFAULT_STREAM = False
 
 
 class CallerGone(Exception):
-    """调用方在我们开工前就断开了。
-
-    包内信号，不会出现在 gRPC 响应里——:meth:`TaskService._response_for_exception`
-    把它翻译成 CANCELLED。异步那条路（AsyncTaskService）要做同样的判断，所以
-    这个名字和 :func:`caller_still_waiting` 都不带下划线：它们是**包内跨模块的
-    约定**，不是模块私有。带下划线又跨模块引用，等于骗自己。
-    """
+    pass
 
 
 def caller_still_waiting(context: object) -> bool:
-    """调用方还在等吗。
-
-    探测不出来时按"还在等"处理：批量路径和测试里传的都是假 context，
-    误判成断开会让正常请求凭空失败。
-    """
     checker = getattr(context, "is_active", None)
     if not callable(checker):
         return True
     try:
         return bool(checker())
-    except Exception:  # pragma: no cover - 假 context 的兜底
+    except Exception:
         return True
 
 
@@ -65,27 +54,17 @@ FORWARD_HEADER = "ipclick-forwarded"
 
 
 def is_forwarded(context: object) -> bool:
-    """这次调用是别的节点转发过来的吗。
-
-    用 getattr 探测而不是直接调：批量路径传进来的是 _IsolatedContext，
-    测试里也常传各种假 context。
-    """
     getter = cast(Callable[[], Any] | None, getattr(context, "invocation_metadata", None))
     if not callable(getter):
         return False
     try:
         metadata: Any = getter() or ()
         return any(str(key).lower() == FORWARD_HEADER for key, _value in metadata)
-    except Exception:  # pragma: no cover - 假 context 的兜底
+    except Exception:
         return False
 
 
 def _build_trace(tr: RequestTrace | None) -> "task_pb2.Trace | None":
-    """把内部链路对象转成响应里的 Trace。
-
-    返回 None 时 protobuf 会把这个字段留空（而不是塞一条全零的 Trace），
-    调用方用 HasField("trace") 就能区分"服务端没记"和"记了但都是 0"。
-    """
     if tr is None:
         return None
     return task_pb2.Trace(
@@ -98,12 +77,6 @@ def _build_trace(tr: RequestTrace | None) -> "task_pb2.Trace | None":
 
 
 class _IsolatedContext:
-    """批量里给单个任务用的假 ServicerContext。
-
-    只吞掉状态码设置，不影响批量共享的那条流；但要把真实的 metadata 透过来，
-    否则批量任务的链路里会看不到转发标记。
-    """
-
     def __init__(self, metadata: tuple[tuple[str, str], ...] = ()) -> None:
         self._metadata: tuple[tuple[str, str], ...] = metadata
 
@@ -119,17 +92,6 @@ class _IsolatedContext:
 
 
 class TaskService(task_pb2_grpc.TaskServiceServicer):
-    """
-    重构后的任务处理服务
-
-    职责：
-    1. 处理gRPC请求
-    2. 选择合适的HTTP适配器
-    3. 执行下载任务
-    4. 转换响应格式
-    5. 错误处理和日志记录
-    """
-
     def __init__(self, config: Settings):
         self.config: Settings = config
 
@@ -171,22 +133,9 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             )
 
     def limiters_for_sharding(self) -> list[Any]:
-        """需要按集群规模分片的限流器。
-
-        异步子类会覆写：它实际用的是自己那个 asyncio 版限流器，而不是继承来的
-        同步 host_limiter。不留这个钩子的话，份额会被设到一个根本不参与限流的
-        对象上——**功能静默失效**，日志还会照常打出"分片已启用"。
-        """
         return [self.host_limiter]
 
     def _cache_key(self, name: str) -> str:
-        """把请求里写的适配器名归一成缓存键。
-
-        必须先把通用的 ``browser`` 解析成具体引擎名，否则 ``adapter="browser"``
-        和 ``adapter="playwright"`` 会各建一个适配器实例——而浏览器适配器每个实例
-        自带一个浏览器进程，于是同一个节点上跑着两个 chromium。集群里 3 个节点
-        就是 6 个，在小内存机器上直接把自己挤爆。
-        """
         if name == GENERIC_BROWSER_NAME:
             try:
                 return resolve_browser_adapter_name(self.browser_settings)
@@ -195,11 +144,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         return name
 
     def _get_cached_adapter(self, name: str) -> DownloaderAdapter:
-        """按名称取适配器，并缓存实例。
-
-        原实现只读不写这个缓存，于是每个请求都要新建一次适配器（含
-        ``UserAgent()`` 生成器），``cleanup()`` 也永远无事可做。
-        """
         key = self._cache_key(name)
         adapter = self._adapter_cache.get(key)
         if adapter is not None:
@@ -212,16 +156,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @override
     def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
-        """
-        处理gRPC任务请求
-
-        Args:
-            request: gRPC请求对象
-            context: gRPC上下文
-
-        Returns:
-            task_pb2.TaskResp: gRPC响应对象
-        """
         log.debug("Received request: {} for URL: {}", request.uuid, request.url)
         start_time = time.monotonic()
         method_name = METHOD_MAP.get(request.method, "GET")
@@ -272,14 +206,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     def _response_for_exception(
         self, exc: Exception, request: "task_pb2.ReqTask", tr: RequestTrace, context: ServicerContext
     ) -> "task_pb2.TaskResp":
-        """把处理过程中的异常映射成响应 + gRPC 状态码。
-
-        同步与异步两条路共用这一份。抽出来的理由不是省行数，而是这里的每一条
-        分支都携带**排障方向**：PERMISSION_DENIED 让人去看 SSRF 策略、
-        RESOURCE_EXHAUSTED 让人去调限流、FAILED_PRECONDITION 让人去看服务端
-        部署而不是自己的参数。两份拷贝迟早失步，而失步的表现是"同一个错误在
-        异步模式下把人指向了另一个方向"，比少一个分支更糟。
-        """
         if isinstance(exc, CallerGone):
             tr.status_code = -1
             tr.error = "调用方已断开"
@@ -319,12 +245,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @staticmethod
     def _decode_body(raw: str | bytes, field_name: str) -> Any:
-        """把线上的请求体还原成适配器能用的形式。
-
-        ``data`` 在 proto 里是 bytes（``json`` 仍是 string）。还原顺序：
-        JSON 对象 -> UTF-8 文本 -> 原始 bytes。最后那一档是关键——二进制体
-        （图片、gzip）解不成文本，必须原样交给 HTTP 库，而不是报错或损坏。
-        """
         if not raw:
             return None
         if isinstance(raw, bytes):
@@ -342,11 +262,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             return text
 
     def _build_download_kwargs(self, request: task_pb2.ReqTask) -> dict[str, Any]:
-        """把 protobuf 请求翻译成适配器参数。
-
-        单请求与流式两条路径共用，避免默认值处理（尤其是 proto3 显式存在性
-        那套逻辑）在两处各写一份而失步。
-        """
         method = METHOD_MAP.get(request.method, "GET")
 
         headers = dict(request.headers) if request.headers else None
@@ -397,7 +312,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     def _execute_download(
         self, adapter: DownloaderAdapter, request: task_pb2.ReqTask, tr: RequestTrace | None = None
     ) -> Response:
-        """执行一次（非流式）下载。"""
         waiting_since = time.monotonic()
         with self.host_limiter.acquire(request.url):
             if tr is not None:
@@ -405,10 +319,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             return adapter.download(request.url, **self._build_download_kwargs(request))
 
     def _limited_stream(self, url: str, stream: Iterator[StreamEvent]) -> Iterator[StreamEvent]:
-        """给流式下载套上 host 限流，并保证底层生成器最终被关闭。
-
-        额度在第一次取值时获取（此时才真正发出请求），随 RPC 结束一并释放。
-        """
         with self.host_limiter.acquire(url):
             try:
                 yield from stream
@@ -421,17 +331,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     def _build_grpc_response(
         request: task_pb2.ReqTask, response: Response, tr: RequestTrace | None = None
     ) -> task_pb2.TaskResp:
-        """
-        构建gRPC响应
-
-        Args:
-            request: 原始gRPC请求
-            response: 统一响应对象
-            tr: 链路信息，会作为 TaskResp.trace 一起返回
-
-        Returns:
-            task_pb2.TaskResp: gRPC响应对象
-        """
         return task_pb2.TaskResp(
             request_uuid=request.uuid,
             adapter=request.adapter,
@@ -448,7 +347,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     def _build_error_response(
         request: task_pb2.ReqTask, message: str, tr: RequestTrace | None = None
     ) -> task_pb2.TaskResp:
-        """构建一个表示失败的响应（状态码 -1，与适配器侧保持一致）。"""
         return task_pb2.TaskResp(
             request_uuid=request.uuid,
             adapter=request.adapter,
@@ -460,12 +358,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @override
     def SendStream(self, request: "task_pb2.ReqTask", context: ServicerContext) -> Iterator["task_pb2.TaskRespChunk"]:
-        """流式下载：先发 header，再分片发 body，最后发 trailer。
-
-        与 Send 的关键区别是响应体不会在服务端整个进内存——对大文件来说，
-        Send 会把 body 复制好几份（适配器的 content、protobuf 序列化缓冲、
-        gRPC 发送缓冲），而这里始终只有一个分片在内存里。
-        """
         log.debug("Received stream request: {} for URL: {}", request.uuid, request.url)
         start_time = time.monotonic()
         total_bytes = 0
@@ -599,12 +491,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     def SendBatch(
         self, request_iterator: Iterator["task_pb2.ReqTask"], context: ServicerContext
     ) -> Iterator["task_pb2.TaskResp"]:
-        """批量：客户端流式推任务，服务端按**完成顺序**流式返回。
-
-        并发度受 [SERVER].max_workers 约束——这里再开一个自己的线程池的话，
-        总并发会变成 max_workers × 批量数，把下游打爆。用 as_completed 让快的
-        先返回，而不是按提交顺序阻塞在慢请求上。
-        """
         pool = self._batch_pool()
         finished: queue.Queue[Future[task_pb2.TaskResp]] = queue.Queue()
         in_flight = 0
@@ -637,16 +523,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         log.info(f"Batch finished, {submitted} tasks")
 
     def _batch_pool(self) -> ThreadPoolExecutor:
-        """批量任务共用的线程池，懒建一次。
-
-        旧实现每次 ``SendBatch`` 都 ``with ThreadPoolExecutor(...)``，于是每一次
-        批量调用都要重新创建、再销毁最多 ``[SERVER].max_workers`` 个线程（默认
-        100）。批量本来就是"高频、每次很多任务"的用法，这份线程创建开销是白付的。
-        共用一个池之后，线程只在第一次真正需要时创建，之后一直复用。
-
-        并发度仍然受 ``[SERVER].max_workers`` 约束——这里再开一个不受约束的池的话，
-        总并发会变成 max_workers × 并发批量数，把下游打爆。
-        """
         pool = self._batch_executor
         if pool is not None:
             return pool
@@ -660,25 +536,10 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     def _handle_one(
         self, request: "task_pb2.ReqTask", metadata: tuple[tuple[str, str], ...] = ()
     ) -> "task_pb2.TaskResp":
-        """批量里的单个任务，复用 Send 的全部逻辑（含链路记录与安全校验）。
-
-        刻意传一个隔离的假 context：Send 在出错时会调 set_code/set_details，
-        若把批量共享的那个 context 传进去，一个任务的 URL 被 SSRF 拦截就会把
-        **整条批量流**标记成 PERMISSION_DENIED，其余任务的结果全部丢失。
-        每个任务的失败信息已经在它自己的 TaskResp.error_message 里了。
-        """
         return self.Send(request, cast(ServicerContext, cast(object, _IsolatedContext(metadata))))
 
     @override
     def Ping(self, request: "task_pb2.PingReq", context: ServicerContext) -> "task_pb2.PingResp":
-        """节点探测：验连通性与鉴权，不做任何业务动作。
-
-        能走到这个方法就说明鉴权拦截器已经放行了——这正是它相对
-        ``grpc.health.v1`` 的全部价值：健康检查刻意免鉴权，于是"连不上"和
-        "连上了但令牌不对"在它眼里长得一样，而这两件事的排查方向完全相反。
-
-        刻意不落链路记录：这是诊断动作，不是业务请求，混进请求流只会污染统计。
-        """
         _ = context
         if request.from_node:
             log.debug(f"收到来自节点 {request.from_node} 的探测")
@@ -693,23 +554,10 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @property
     def remote_install_allowed(self) -> bool:
-        """本节点允不允许别人远程装组件。**默认关**。
-
-        这一位不是形式主义：打开它等于"能调本节点 gRPC 的人可以在本机跑 pip"。
-        包名走白名单（只有 IPClick 自己声明的那五个 extras，绝不拼接输入），但那
-        仍然是从"能代发 HTTP 请求"到"能改本机 Python 环境"的一次实质扩权，必须由
-        这台机器的主人自己按下，而不是随某次升级默默获得。
-        """
         return bool(dict(self.config.get("CLUSTER", {})).get("allow_remote_install", False))
 
     @override
     def Component(self, request: "task_pb2.ComponentReq", context: ServicerContext) -> "task_pb2.ComponentResp":
-        """远程管理本节点上的可选组件。
-
-        走的是和 Web 端**同一个** :class:`~ipclick.web.installer.InstallManager`：
-        同一份白名单、同一条命令规划、同一个"一次只跑一个任务"的约束。另写一条
-        只在 RPC 上成立的安装路径，等于给自己留一个没被另外两个入口测到的分支。
-        """
         if not self.remote_install_allowed:
             context.set_code(grpc.StatusCode.PERMISSION_DENIED)
             context.set_details(
@@ -755,11 +603,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         )
 
     def _installer(self) -> Any:
-        """本节点的安装任务管理器。惰性建、进程内唯一。
-
-        唯一是必须的：``InstallManager`` 靠自己那把锁保证"同一时刻只跑一个任务"，
-        每次调用现建一个的话，两个并发请求就能同时往一个 site-packages 里写。
-        """
         if self._install_manager is None:
             from ipclick.web.installer import InstallManager
 
@@ -777,7 +620,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         return json_lib.dumps(snapshot(browser), ensure_ascii=False, default=str)
 
     def _component_job(self) -> "task_pb2.ComponentJob | None":
-        """当前（或最近一次）任务，转成 protobuf。"""
         current = self._installer().current()
         if not current:
             return None
@@ -799,11 +641,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @property
     def auth_required(self) -> bool:
-        """本节点有没有启用令牌鉴权。
-
-        对端要能看到这一位：一个**没设防**的节点意味着任何能连到它端口的人都能
-        借它发请求，而探测成功本身并不能区分"我的令牌对"和"它根本不验"。
-        """
         from ipclick.auth import load_tokens
         from ipclick.cluster.tokens import cluster_secret
 
@@ -812,15 +649,9 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @property
     def forward_enabled(self) -> bool:
-        """本节点是否开着服务端转发。基类恒为 False，转发子类覆盖。"""
         return False
 
     def cleanup(self) -> None:
-        """
-        清理资源
-
-        关闭所有适配器连接，释放资源
-        """
         log.info("Cleaning up TaskService resources...")
 
         pool, self._batch_executor = self._batch_executor, None
@@ -840,11 +671,6 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
 
 def _refresh_registry_after_install(job: Any) -> None:
-    """远程装完之后刷新适配器注册表，让新装的东西立刻可用。
-
-    和 Web 端那个回调做同一件事。失败时也刷——可能装了一半，此时该反映的是磁盘上
-    的真实情况，而不是任务开始前的那份快照。
-    """
     from ipclick.adapters import registry
 
     registry.refresh()
@@ -852,24 +678,20 @@ def _refresh_registry_after_install(job: Any) -> None:
 
 
 def _version() -> str:
-    """本进程的 IPClick 版本。取不到时报空串而不是抛错——Ping 的价值在于
-    "连得上、鉴权过"，版本号只是顺带的信息，不该因为它让探测整个失败。
-    """
     try:
         from ipclick import __version__
 
         return __version__
-    except Exception:  # pragma: no cover
+    except Exception:
         return ""
 
 
 def _batch_metadata(context: object) -> tuple[tuple[str, str], ...]:
-    """取批量流的 metadata，供每个子任务的隔离 context 复用。"""
     getter = cast(Callable[[], Any] | None, getattr(context, "invocation_metadata", None))
     if not callable(getter):
         return ()
     try:
         metadata: Any = getter() or ()
         return tuple((str(k), str(v)) for k, v in metadata)
-    except Exception:  # pragma: no cover
+    except Exception:
         return ()

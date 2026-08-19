@@ -1,18 +1,3 @@
-"""gRPC 标准健康检查（``grpc.health.v1``）。
-
-用标准协议而不是自定义 RPC，是为了让 Kubernetes 的 gRPC 探针、grpc_health_probe、
-以及各类服务网格开箱即用。P4 的集群节点探活也会复用这套。
-
-健康状态的语义：
-
-* ``SERVING``     —— 可以接收流量
-* ``NOT_SERVING`` —— 暂时不要给我发流量（如正在优雅停机）
-* ``SERVICE_UNKNOWN`` —— 查询了一个本进程没有注册的服务名
-
-停机时先把状态置为 ``NOT_SERVING`` 再真正 stop：负载均衡器据此把节点摘掉，
-在途请求还能在优雅期内跑完，而不是先掐连接再让上游发现。
-"""
-
 from __future__ import annotations
 
 from concurrent import futures
@@ -34,8 +19,6 @@ NOT_SERVING = health_pb2.HealthCheckResponse.NOT_SERVING
 
 
 class HealthReporter:
-    """包一层 grpc 官方的 HealthServicer，统一维护本项目关心的几个服务名。"""
-
     def __init__(self, enabled: bool = True, max_workers: int = 2):
         self.enabled: bool = enabled
         self._servicer: health.HealthServicer | None = (
@@ -49,7 +32,6 @@ class HealthReporter:
         return self._servicer
 
     def register(self, server: grpc.Server) -> None:
-        """把健康检查服务注册到 gRPC 服务器上。"""
         if self._servicer is None:
             log.info("健康检查未启用（[MONITOR].health_check = false）")
             return
@@ -57,11 +39,9 @@ class HealthReporter:
         log.debug("已注册 grpc.health.v1 健康检查服务")
 
     def set_serving(self) -> None:
-        """标记为可接收流量。"""
         self._set(SERVING)
 
     def set_not_serving(self) -> None:
-        """标记为不再接收新流量（优雅停机的第一步）。"""
         self._set(NOT_SERVING)
 
     def _set(self, status: int) -> None:
@@ -73,11 +53,6 @@ class HealthReporter:
         log.debug(f"健康状态 -> {name}")
 
     def enter_graceful_shutdown(self) -> None:
-        """进入优雅停机：先摘流量再停服务。
-
-        官方 servicer 提供的 enter_graceful_shutdown() 会把所有服务置为
-        NOT_SERVING 并拒绝后续状态变更，正是我们想要的语义。
-        """
         if self._servicer is None:
             return
         self._servicer.enter_graceful_shutdown()
@@ -91,21 +66,6 @@ def check_health(
     timeout: float = 5.0,
     tls: TLSSettings | None = None,
 ) -> tuple[bool, str]:
-    """以客户端身份查询某个 IPClick 服务端的健康状态。
-
-    健康检查不需要鉴权，因此这里不带令牌——供 CLI、Docker healthcheck
-    以及 P4 的集群节点探活复用。
-
-    Args:
-        target: ``host:port``
-        service: 要查询的服务名，默认查总体状态
-        timeout: 超时（秒）
-        tls: 目标服务端的 TLS 配置。服务端开了 TLS 而这里还用明文连，
-            探活会一直失败——集群会把健康节点全判成挂了。
-
-    Returns:
-        ``(是否健康, 状态描述)``
-    """
     try:
         settings = tls or TLSSettings()
         options: list[tuple[str, Any]] = [("grpc.enable_http_proxy", 0), *channel_options(settings)]
@@ -115,10 +75,8 @@ def check_health(
             else grpc.insecure_channel(target, options=options)
         )
         with channel_ctx as channel:
-            stub = health_pb2_grpc.HealthStub(channel)
-            response = stub.Check(  # pyright: ignore[reportAttributeAccessIssue]
-                health_pb2.HealthCheckRequest(service=service), timeout=timeout
-            )
+            stub: Any = health_pb2_grpc.HealthStub(channel)
+            response = stub.Check(health_pb2.HealthCheckRequest(service=service), timeout=timeout)
     except grpc.RpcError as e:
         code = e.code() if hasattr(e, "code") else None
         details = e.details() if hasattr(e, "details") else str(e)

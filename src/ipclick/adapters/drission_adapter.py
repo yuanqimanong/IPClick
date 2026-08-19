@@ -1,24 +1,3 @@
-"""DrissionPage 浏览器渲染适配器（Windows 上的默认引擎）。
-
-DrissionPage 直接走 CDP 控制本机的 Chrome/Chromium，不需要 Playwright，也不用
-额外下载浏览器——Windows 上基本都装了 Chrome，这让它成为那边最省事的选择。
-
-与 Playwright 系（:mod:`ipclick.adapters.browser_adapter`）的结构性差异：
-
-**没有 BrowserContext。** Playwright 可以在一个浏览器进程里开若干互相隔离的
-context，cookie / localStorage 各自独立。DrissionPage 只有 tab，同一个浏览器里
-所有 tab 共享一份 profile。对一个代任意调用方发请求的服务来说，那意味着上一个
-调用方的登录态会泄漏给下一个。这里的处理是：浏览器以 ``--incognito`` 启动，并且
-每个请求用完自己的 tab 就关掉，请求之间再显式清一次 cookie。
-
-**状态码要靠抓包拿。** ``tab.get()`` 只返回 bool，没有 HTTP 状态码。用
-``tab.listen`` 监听主文档那一条请求才能拿到 ``response.status``。
-
-**同步 API。** DrissionPage 本身是同步的、且不是线程安全的，所以这里同样把所有
-操作串到一个专属线程上，用队列投递——gRPC 请求落在线程池的任意线程上，直接并发
-访问同一个浏览器对象会出问题。
-"""
-
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -45,14 +24,13 @@ DRISSIONPAGE_MODULE = "DrissionPage"
 
 
 def _load_drission() -> tuple[Any, Any]:
-    """``(Chromium, ChromiumOptions)``，第一次用到时才 import。"""
     global _Chromium, _ChromiumOptions
     if _Chromium is _UNPROBED:
         try:
             from DrissionPage import Chromium, ChromiumOptions
 
             _Chromium, _ChromiumOptions = Chromium, ChromiumOptions
-        except ImportError:  # pragma: no cover - 取决于安装环境
+        except ImportError:
             _Chromium, _ChromiumOptions = None, None
     return _Chromium, _ChromiumOptions
 
@@ -63,12 +41,6 @@ _SHUTDOWN_TIMEOUT = 30.0
 
 
 class DrissionPageAdapter(DownloaderAdapter):
-    """基于 DrissionPage 的浏览器渲染适配器。
-
-    对外契约与 :class:`~ipclick.adapters.browser_adapter.BrowserAdapter` 一致：
-    只支持 GET、不能禁用重定向、不能带请求体，``automation_config`` 的键也一样。
-    """
-
     adapter_name: str = "DrissionPage"
 
     def __init__(
@@ -163,7 +135,6 @@ class DrissionPageAdapter(DownloaderAdapter):
         allowed_status_codes: list[int] | None = None,
         kwargs: str | None = None,
     ) -> Response:
-        """用真实浏览器打开页面，返回渲染后的 DOM。"""
         self.reject_impersonate(impersonate)
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
@@ -210,7 +181,6 @@ class DrissionPageAdapter(DownloaderAdapter):
         script: str | None,
         page_timeout: float,
     ) -> Response:
-        """在专属线程里跑。"""
         browser = self._ensure_browser()
         tab = browser.new_tab()
         try:
@@ -279,7 +249,6 @@ class DrissionPageAdapter(DownloaderAdapter):
 
     @override
     def close(self) -> None:
-        """关闭浏览器与工作线程。可重复调用。"""
         self._closed = True
         browser = self._browser
         self._browser = None
@@ -308,8 +277,6 @@ def _blocked_patterns(resources: tuple[str, ...] | list[str]) -> list[str]:
 
 
 def _scroll_to_bottom(tab: Any) -> None:
-    """滚到底触发懒加载。高度不再变化就停，同时设轮次上限——
-    无限滚动的页面永远不会"到底"。"""
     previous = -1
     for _ in range(20):
         height = tab.run_js("return document.body ? document.body.scrollHeight : 0")
@@ -321,14 +288,12 @@ def _scroll_to_bottom(tab: Any) -> None:
 
 
 def is_available() -> bool:
-    """DrissionPage 装了没（只看 Python 包，不管本机有没有 Chrome）。"""
     from ipclick.utils import module_probe
 
     return module_probe.installed(DRISSIONPAGE_MODULE)
 
 
 def __getattr__(name: str) -> Any:
-    """``DRISSIONPAGE_AVAILABLE`` 的兼容层，理由同 niquests_adapter。"""
     if name == "DRISSIONPAGE_AVAILABLE":
         return is_available()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

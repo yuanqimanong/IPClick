@@ -1,32 +1,3 @@
-"""服务端转发：入口节点把任务分发给集群里的其他节点。
-
-和客户端侧的 :class:`~ipclick.cluster.client.ClusterDownloader` 是**两种**集群
-形态，都保留：
-
-* **客户端分发**（``[CLUSTER].forward = "off"``，默认）。调用方自己持有全部节点
-  地址，直接连每一台。少一跳、不占入口带宽，适合调用方在内网、能连到所有节点。
-* **服务端转发**（``forward = "on"``）。调用方只知道一个地址（比如 A），A 按策略
-  挑节点：挑到自己就本地干，挑到别人就把 ``ReqTask`` **原样**转过去，拿到结果再
-  回给调用方。适合调用方在集群外、或者不想让调用方感知拓扑。
-
-设计上的几个关键点：
-
-**转发只有一跳。** 转发时带 ``ipclick-forwarded`` metadata；收到带这个标记的
-请求一律本地执行，绝不再转。这样"环路"在协议层面就不可能出现，也顺带让**任意
-节点都能当入口**——五台机器可以共用完全相同的配置文件，谁被访问谁就是入口。
-（对等入口的代价是每台都要能连到其他每台，内网互通的前提下这本来就成立。）
-
-**入口自己也干活。** 只要本节点在 ``nodes`` 列表里，它就参与轮询。不这么做的话
-入口机器只剩下转发，白白闲置一台。
-
-**转发的是 protobuf 原文。** 不解开成 DownloadTask 再重新组装——那样每加一个
-协议字段都得记着在这里补一遍，漏一个就是静默丢参数。原样转发天然对新字段免疫。
-
-**流式不转发。** ``SendStream`` 永远本地执行：把每个分片再经入口中转一次会让
-入口带宽翻倍、还多一跳延迟，而大文件恰恰是最不该这么干的场景。需要让子节点出
-流量就直连子节点（客户端分发模式）。
-"""
-
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -75,12 +46,6 @@ _NODE_FAULT_CODES = frozenset(
 
 @final
 class _DirectContext:
-    """点名派发到本机时用的假 ServicerContext。
-
-    刻意**不**带转发标记：这一跳就是终点，本来也不会再转。只吞掉状态码设置——
-    诊断路径的错误信息在返回的 TaskResp 里，不需要往一条并不存在的 RPC 流上写。
-    """
-
     def set_code(self, _code: object) -> None: ...
 
     def set_details(self, _details: str) -> None: ...
@@ -93,12 +58,6 @@ class _DirectContext:
 
 
 class ForwardingTaskService(TaskService):
-    """带服务端转发的 TaskService。
-
-    只覆写 :meth:`Send`。批量（``SendBatch``）在基类里是逐个调 ``Send`` 的，
-    所以批量里的任务会自动被分散到各节点上——这正是转发模式最划算的场景。
-    """
-
     def __init__(
         self,
         config: Settings,
@@ -139,7 +98,6 @@ class ForwardingTaskService(TaskService):
 
     @override
     def Send(self, request: task_pb2.ReqTask, context: ServicerContext) -> task_pb2.TaskResp:
-        """按策略决定本地执行还是转发。"""
         if is_forwarded(context):
             self._local_count += 1
             return super().Send(request, context)
@@ -185,24 +143,9 @@ class ForwardingTaskService(TaskService):
 
     @override
     def SendStream(self, request: task_pb2.ReqTask, context: ServicerContext) -> Iterator[task_pb2.TaskRespChunk]:
-        """流式一律本地执行，理由见模块开头。"""
         yield from super().SendStream(request, context)
 
     def send_to_node(self, request: task_pb2.ReqTask, node_id: str) -> task_pb2.TaskResp:
-        """**点名**把请求发给某个节点，跳过策略选择。
-
-        只给诊断用（Web 端「试一试」的"目标节点"）。刻意不走协议：给 ``ReqTask``
-        加一个 ``target_node`` 字段的话，那就成了正式能力，得考虑"点名的节点挂了
-        要不要转移"、"点名能不能穿透多跳"这些问题——而这里要的只是"验证我刚加的
-        那台机器配对没有"，一条内部路径就够。
-
-        没有故障转移是**有意的**：点名就是点名，转到别的机器上会让这次验证
-        失去意义。
-
-        Raises:
-            TransportError: 节点 id 不在列表里。
-            grpc.RpcError: 目标节点报错或不可达——原样上抛，诊断要看真实错误。
-        """
         node = self.cluster.node_by_id(node_id)
         if node is None:
             raise TransportError(f"节点 {node_id!r} 不在集群节点列表里，已有：{[n.id for n in self.cluster.nodes]}")
@@ -222,19 +165,6 @@ class ForwardingTaskService(TaskService):
         return response
 
     def reload_cluster(self, config: Settings) -> tuple[bool, str]:
-        """按新配置原地替换节点列表与路由状态，**不重启进程**。
-
-        0.3 里 ``ClusterConfig`` 和 ``NodePool`` 在构造时就建好存死了，生命周期
-        等于进程生命周期：``/nodes`` 页保存完只是改了文件，真正在干活的路由表
-        纹丝不动，所以页面上只能写"改完需要重启才生效"。
-
-        能热更新的是**不涉及监听端口**的部分：节点列表、权重、策略、阈值、
-        各节点的 token。监听地址属于 gRPC server 的构造参数，那个换不了——
-        但它本来也不会因为改节点列表而变。
-
-        Returns:
-            ``(是否有变化, 给人看的说明)``。
-        """
         section = dict(config.get("CLUSTER", {}))
         with self._reload_lock:
             try:
@@ -283,11 +213,6 @@ class ForwardingTaskService(TaskService):
                     log.debug(f"已关闭到节点 {node_id} 的转发连接")
 
     def _forward(self, state: NodeState, request: task_pb2.ReqTask) -> task_pb2.TaskResp:
-        """把请求原样转给某个节点，并把它的链路信息接回来。
-
-        Raises:
-            grpc.RpcError: 目标节点报错或不可达，由调用方决定换人还是上抛。
-        """
         node = state.node
         try:
             adapter_name = IPClickAdapter.from_pb(request.adapter).display_name
@@ -319,16 +244,6 @@ class ForwardingTaskService(TaskService):
             return response
 
     def _timeout_for(self, request: task_pb2.ReqTask) -> float:
-        """转发这一跳的截止时间。
-
-        必须**不小于子节点自己的预算**，否则入口先超时、子节点还在干活：入口以为
-        那台挂了，把它摘掉再换一台重发；被放弃的那台却不会停工，继续跑到自己的
-        预算结束，还占着一个浏览器。三个节点轮一遍就是三份重复工作同时压在一台
-        机器上——实测过入口 135 秒放弃后子节点又白跑了 161 秒。
-
-        浏览器请求的预算和 HTTP 请求完全不是一个量级（要算页面加载、脚本执行、
-        冷启动），所以这里要按适配器类型分别算。
-        """
         if self.cluster.forward_timeout > 0:
             return self.cluster.forward_timeout
 
@@ -354,16 +269,10 @@ class ForwardingTaskService(TaskService):
         return member.display_name in _BROWSER_ADAPTER_NAMES
 
     def _browser_budget(self) -> float:
-        """子节点渲染一次最多要多久（和 browser_adapter._budget_for 同一套账）。
-
-        取上界即可：这里只是用来把转发的截止时间放宽到"子节点可能真的需要"的
-        程度，宁可等久一点，也不要制造出重复渲染。
-        """
         s = self.browser_settings
         return s.page_load_timeout + s.script_timeout + _BROWSER_COLD_START + _BROWSER_OVERHEAD
 
     def _channel_for(self, node_id: str, host: str, port: int) -> grpc.Channel:
-        """取（或建）到某节点的 channel，按节点缓存以复用连接。"""
         channel = self._channels.get(node_id)
         if channel is not None:
             return channel
@@ -383,11 +292,9 @@ class ForwardingTaskService(TaskService):
     @property
     @override
     def forward_enabled(self) -> bool:
-        """给 Ping 用：让探测方看到"这台开着服务端转发"。"""
         return True
 
     def snapshot(self) -> dict[str, Any]:
-        """转发状态，供 Web 端与状态页展示。"""
         data = self._pool.snapshot()
         data.update(
             {
@@ -412,15 +319,6 @@ class ForwardingTaskService(TaskService):
 
 
 def resolve_self_id(cluster: ClusterConfig, server_host: str = "", server_port: int = 0) -> str:
-    """判断本进程对应 ``nodes`` 里的哪一项。
-
-    先看显式配置的 ``self_id``；没配就拿 ``[SERVER]`` 的监听端口与本机地址去比对。
-    自动识别是为了让五台机器能共用同一份配置文件——那种情况下 ``self_id``
-    只能靠环境变量区分，而端口＋本机 IP 的信息本来就有。
-
-    返回空串表示识别不出来。此时本节点只转发不执行，会打一条警告；即便如此也
-    不会成环——转发标记保证第二跳一定本地执行。
-    """
     if cluster.self_id:
         if cluster.nodes and cluster.node_by_id(cluster.self_id) is None:
             log.warning(
@@ -451,7 +349,6 @@ def resolve_self_id(cluster: ClusterConfig, server_host: str = "", server_port: 
 
 
 def _local_addresses() -> set[str]:
-    """本机可能被写进节点列表的地址集合。"""
     import socket
 
     addresses: set[str] = {"127.0.0.1", "localhost", "::1", "0.0.0.0", "[::]", ""}
@@ -460,7 +357,7 @@ def _local_addresses() -> set[str]:
         addresses.add(hostname.lower())
         _, _, ips = socket.gethostbyname_ex(hostname)
         addresses.update(ip.lower() for ip in ips)
-    except OSError as e:  # pragma: no cover - 取决于本机 DNS 配置
+    except OSError as e:
         log.debug(f"取本机地址失败，自动识别节点身份可能不准：{e}")
     return addresses
 
@@ -473,35 +370,16 @@ def _rpc_detail(error: grpc.RpcError) -> str:
 
 
 def _is_node_fault(error: grpc.RpcError) -> bool:
-    """这个错误是"节点有问题"（该换人）还是"请求本身有问题"（换人也一样）。
-
-    分类的依据和客户端故障转移一致：只有传输层与资源类错误值得换节点，
-    参数非法 / 鉴权失败 / 前置条件不满足换一台还是同样结果，换只会把同一个
-    错误重复 N 遍，还拖慢失败反馈。
-    """
     code = getattr(error, "code", lambda: None)()
     return code in _NODE_FAULT_CODES
 
 
 def _should_mark_unhealthy(error: grpc.RpcError) -> bool:
-    """这次失败要不要把节点标成 unhealthy（从而影响**后续所有请求**的路由）。
-
-    比 :func:`_is_node_fault` 严格：超时只说明**这一个请求**慢，不说明那台机器坏了。
-    一个耗时很长的渲染请求把一台完全健康的节点摘掉，然后流量全压到剩下的机器上、
-    让它们也开始超时——这是能把整个集群推倒的正反馈。
-
-    节点健康与否由后台探活（``grpc.health.v1``，连续 N 次才切状态）负责判定，
-    那是专门为此设计的通路；请求侧只在"连都连不上"这种铁证下才越过它。
-    """
     code = getattr(error, "code", lambda: None)()
     return code is grpc.StatusCode.UNAVAILABLE
 
 
 def _propagate(context: ServicerContext, error: grpc.RpcError) -> None:
-    """把子节点的状态码原样传给调用方。
-
-    不这么做的话，调用方看到的永远是"失败"而分不清是自己参数写错还是集群出问题。
-    """
     code = getattr(error, "code", lambda: None)()
     if code is not None:
         context.set_code(code)

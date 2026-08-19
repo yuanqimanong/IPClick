@@ -1,14 +1,3 @@
-"""Web 端的 HTML 渲染。
-
-手写字符串模板而不是引模板引擎：页面就几个，为此多一条依赖不值。
-代价是**每一处插值都必须自己转义**——:func:`esc` 是这里最重要的函数，
-节点 id、URL、错误信息、网页源码这些都来自配置或远端，一处漏转义就是 XSS。
-
-样式与脚本在 :mod:`ipclick.web.assets`，这里只管结构。0.4 的布局是
-**左导航 + 主内容 + 右状态栏**的 CSS Grid：0.3 是单栏纵向堆叠，总览页把服务器
-信息、各适配器、渲染引擎、集群、最近请求全挤在一条竖线上，只能一路往下滚。
-"""
-
 from typing import Any
 
 from ipclick.ports import DEFAULT_GRPC_PORT
@@ -22,12 +11,6 @@ DEFAULT_GRPC_PORT_HINT = DEFAULT_GRPC_PORT
 
 
 def _concurrency_shape(server: dict[str, Any]) -> str:
-    """一句话说清这个进程的并发形态，以及它对本页数字的影响。
-
-    多进程下**链路记录是每进程一份**，本页只看得到 0 号进程那一份。不说明的话
-    人会以为"记录丢了四分之三"，然后去查链路配置、查磁盘、查 SQLite——
-    而真相只是它本来就只统计了一个进程。
-    """
     processes = int(server.get("processes", 1) or 1)
     parts: list[str] = []
     parts.append(f"{processes} 进程" if processes > 1 else "单进程")
@@ -39,7 +22,6 @@ def _concurrency_shape(server: dict[str, Any]) -> str:
 
 
 def esc(text: Any) -> str:
-    """HTML 转义。所有插值都必须过这一道。"""
     return (
         str(text)
         .replace("&", "&amp;")
@@ -51,9 +33,6 @@ def esc(text: Any) -> str:
 
 
 def attr(text: Any) -> str:
-    """属性值转义。和 :func:`esc` 同一套规则，单独一个名字是为了在阅读时
-    一眼看出"这里是属性上下文"——属性里漏转义引号能直接跳出属性、注入事件处理器。
-    """
     return esc(text)
 
 
@@ -156,17 +135,11 @@ _default_theme = "light"
 
 
 def set_default_theme(theme: str) -> None:
-    """设置页面默认主题（``light`` / ``dark``）。由 WebServer 启动时调用。"""
     global _default_theme
     _default_theme = "dark" if theme == "dark" else "light"
 
 
 def _theme_attr(theme: str | None) -> str:
-    """``<html>`` 上的默认主题标记。
-
-    总是写出来（不像 0.5 之前那样"auto 时留空"）：引导脚本据此在第一帧之前就把
-    ``data-theme`` 定下来，避免暗色用户看到一闪而过的白屏。
-    """
     resolved = theme if theme in ("light", "dark") else _default_theme
     return f' data-default-theme="{attr(resolved)}"'
 
@@ -209,7 +182,6 @@ def _page(
     job_running: bool = False,
     theme: str | None = None,
 ) -> str:
-    """页面外壳：左导航 + 主内容（+ 右状态栏）。"""
     nav = "".join(
         f'<a href="{attr(path)}" class="{"on" if path == active else ""}">{_icon(icon)}<span>{esc(label)}</span></a>'
         for path, label, icon in NAV
@@ -406,11 +378,6 @@ def render_dashboard(snapshot: dict[str, Any], username: str, csrf: str, actions
 
 
 def dashboard_live(snapshot: dict[str, Any]) -> str:
-    """总览页里会自己刷新的那一块。
-
-    单独成函数是为了让 ``/fragment/dashboard`` 复用**同一段**渲染代码——
-    在 JS 里另写一份就是两套逻辑，迟早对不上。
-    """
     stats = dict(snapshot.get("trace") or {})
     process = dict(stats.get("process") or {})
     total = int(process.get("total", 0))
@@ -428,7 +395,6 @@ def dashboard_live(snapshot: dict[str, Any]) -> str:
 
 
 def _component_summary(components: list[dict[str, Any]]) -> str:
-    """右栏里的组件状态速览。详细的在 /components。"""
     if not components:
         return '<p class="note">—</p>'
     rows = "".join(
@@ -593,7 +559,6 @@ DEFAULT_LIVE_MS = 5000
 
 
 def live_label(ms: int) -> str:
-    """某一档的副标题说法。取不到就按秒数拼一句，不至于显示空白。"""
     for value, _, text in LIVE_INTERVALS:
         if value == ms:
             return text
@@ -601,16 +566,6 @@ def live_label(ms: int) -> str:
 
 
 def _live_control(current_ms: int) -> str:
-    """刷新频率的分段选择器。
-
-    用 ``radio + label`` 而不是一排 ``<button>``：
-    一是没有 JS 也能用（连同过滤条一起提交，选择留在 URL 里）；
-    二是键盘方向键天然能切换，``role="radiogroup"`` 的语义也是白送的。
-
-    **不能用行内 ``onchange``**——页面的 CSP 只放行了两段脚本的 sha256 哈希，
-    哈希覆盖不到事件处理器属性，写了会被静默拦掉（表现为点了没反应）。
-    事件在 :data:`ipclick.web.assets.SCRIPT_MAIN` 里用 ``addEventListener`` 绑。
-    """
     buttons = "".join(
         f'<input type="radio" id="live-{ms}" name="live" value="{ms}"'
         f"{' checked' if ms == current_ms else ''}>"
@@ -624,12 +579,6 @@ def _live_control(current_ms: int) -> str:
 
 
 def _live_status(current_ms: int) -> str:
-    """「正在刷新」的活体指示。
-
-    没有它的话，页面安静地待着时人分不清是"没有新请求"还是"刷新根本没在跑"——
-    上一版就因为这个被当成过坏了。圆点的脉动完全由 CSS 驱动，JS 只负责
-    改这行字和加 ``paused`` 类。
-    """
     paused = " paused" if not current_ms else ""
     return (
         f'<div class="livebar{paused}" id="live-bar">'
@@ -683,12 +632,6 @@ def trace_live(
     *,
     source: str = "memory",
 ) -> str:
-    """请求流里会自己刷新的那一块（指标 + 分布条 + 表格）。
-
-    ``/fragment/trace`` 直接返回它，前端只换这一块的 innerHTML。0.3 用的是
-    ``<meta refresh>`` 整页重载：每 3 秒滚动位置丢失、正在填的过滤条件被冲掉、
-    页面白闪一次。渲染仍然在服务端，所以不存在"JS 里那份和 Python 这份对不上"。
-    """
     process = dict(stats.get("process") or {})
     window = dict(stats.get("window") or {})
     recorder = dict(stats.get("recorder") or {})
@@ -739,11 +682,6 @@ def render_trace(
     live_ms: int = DEFAULT_LIVE_MS,
     fragment_url: str = "/fragment/trace",
 ) -> str:
-    """请求流页面。``live_ms`` 是刷新间隔（毫秒），0 表示关掉。
-
-    0.5.0 之前这里是个复选框、频率写死 3 秒。3 秒是个两头不讨好的值：盯着调
-    某个请求时嫌慢，开着当监控又太密。现在给 :data:`LIVE_INTERVALS` 那几档。
-    """
     process = dict(stats.get("process") or {})
     adapters = sorted({r.adapter for r in records} | set((process.get("by_adapter") or {}).keys()))
     adapter_options = "".join(
@@ -843,16 +781,6 @@ def render_test(
     curl_error: str = "",
     allow_scripts: bool = False,
 ) -> str:
-    """ "试一试"页面：填个 URL 就地发一次请求，看链路和源码。
-
-    请求走的是本进程的 TaskService，和真实调用方走的是**同一条**代码路径——
-    包括 SSRF 准入、限流、以及（开了转发时）分发到子节点。所以这里看到的
-    行为就是线上行为，而不是另写一套只在页面上成立的逻辑。
-
-    表单字段与 :meth:`ipclick.sdk.Downloader.request` 一一对应。常用的几项摊开，
-    其余收进「更多参数」——0.4 只有 5 个字段，于是"页面上试通了、代码里加个
-    proxy 就不通"这类问题根本验不出来，而那正是这一页该解决的。
-    """
     adapter_select = _adapter_select(choices, form.get("adapter", ""))
     method_options = "".join(
         f'<option value="{attr(m)}"{" selected" if form.get("method", "GET") == m else ""}>{esc(m)}</option>'
@@ -932,15 +860,6 @@ def render_test(
 
 
 def _adapter_select(choices: list[dict[str, Any]], selected: str) -> str:
-    """分组下拉框。
-
-    两条规则和 0.3 不同：
-
-    * **没装的也列出来**（``disabled`` + 安装命令），而不是从列表里消失。消失会
-      让对着文档看的人以为文档和实现对不上，也不知道到底支持哪些。
-    * ``browser`` 归到"浏览器渲染"组里并写明"自动选择引擎"，不和真实适配器名
-      混排——它不是第六个可选组件，是个占位值。
-    """
     groups: list[str] = []
     for group in choices:
         options: list[str] = []
@@ -974,11 +893,6 @@ IMPERSONATE_SUGGESTIONS: tuple[str, ...] = (
 
 
 def _checkbox(name: str, label: str, checked: bool, hint: str = "") -> str:
-    """带"我在表单里"标记的复选框。
-
-    没勾时浏览器**不提交**这个键，所以光看 ``name in form`` 分不清"没勾"和"这一页
-    压根没有这一项"。配置页早就靠一个同名隐藏标记解决了，这里同一套写法。
-    """
     hint_html = f'<span class="hint">{hint}</span>' if hint else ""
     return (
         f'<label class="check-inline"><input type="hidden" name="__present__{attr(name)}" value="1">'
@@ -988,12 +902,6 @@ def _checkbox(name: str, label: str, checked: bool, hint: str = "") -> str:
 
 
 def _body_kind_radios(selected: str) -> str:
-    """请求体按 raw 还是 JSON 发。
-
-    协议里 ``data`` 与 ``json`` 是两个字段且互斥，所以这不是可以省掉的细节：
-    发 ``json`` 时服务端会带上 ``Content-Type: application/json``，发 ``data``
-    不会。0.4 只有一个文本框，等于永远只能验前者。
-    """
     options = (("raw", "原样发送（data）"), ("json", "作为 JSON 发送（json）"))
     return "".join(
         f'<label class="check-inline"><input type="radio" name="body_kind" value="{attr(value)}"'
@@ -1003,11 +911,6 @@ def _body_kind_radios(selected: str) -> str:
 
 
 def _test_advanced(form: dict[str, str], *, allow_scripts: bool) -> str:
-    """「更多参数」折叠区：其余与 ``request()`` 对齐的字段。
-
-    默认折叠，但**填过东西就自动展开**——提交后回到页面却看不到自己设过的代理，
-    会让人以为那一项没生效。
-    """
     advanced_keys = (
         "cookies",
         "params",
@@ -1113,7 +1016,6 @@ def _test_advanced(form: dict[str, str], *, allow_scripts: bool) -> str:
 
 
 def _target_node_row(nodes: list[dict[str, Any]], selected: str) -> str:
-    """ "目标节点"下拉。没配集群就整行不显示——单机部署不该看到集群相关的控件。"""
     if not nodes:
         return ""
     forwarding = bool(nodes[0].get("forwarding"))
@@ -1201,12 +1103,6 @@ def render_components(
     active_node: str = "",
     remote: bool = False,
 ) -> str:
-    """可选组件：安装状态 + 装 / 卸。
-
-    0.3 里这是总览页上一张只读的「渲染引擎」表，而且**漏掉了 niquests**——它是
-    纯 HTTP 适配器，不属于"渲染引擎"，于是五个 extras 里有一个完全没有展示位。
-    现在按"HTTP 适配器 / 浏览器渲染"分组覆盖全部五个。
-    """
     http = [c for c in components if c.get("kind") == "http"]
     browser = [c for c in components if c.get("kind") == "browser"]
     running = bool(job and job.get("status") == "running")
@@ -1292,11 +1188,6 @@ def render_components(
 
 
 def _component_target(nodes: list[dict[str, Any]], active: str) -> str:
-    """「装到哪台机器」选择器。没配集群就整块不显示。
-
-    和「试一试」的目标节点是同一个心智模型：先选机器，再操作。集群里每台都要各自
-    装一遍适配器，而逐台 SSH 上去敲命令是部署时最烦的一步。
-    """
     if not nodes:
         return ""
     options = f'<option value=""{"" if active else " selected"}>本机</option>' + "".join(
@@ -1443,13 +1334,6 @@ def render_config(
     tab: str = "basic",
     cluster: dict[str, Any] | None = None,
 ) -> str:
-    """配置页。两个分页：基础设置 / 集群设置，右上角一个保存按钮。
-
-    0.4 是一整页平铺的 fieldset：一台单机部署的人要在集群、转发、节点这些和他
-    无关的项里翻找自己要改的超时；而组集群的人又得在配置页和另一个 ``/nodes``
-    页之间来回跳。分成两页之后各看各的，节点管理也并进了「集群设置」——它本来
-    就是集群配置的一部分。
-    """
     active = tab if tab in {key for key, _, _ in CONFIG_TABS} else "basic"
     subtitle = next(sub for key, _, sub in CONFIG_TABS if key == active)
 
@@ -1509,12 +1393,6 @@ def render_config(
 
 
 def _cluster_tab(cluster: dict[str, Any], sections: str, csrf: str, tab_field: str) -> str:
-    """「集群设置」分页。
-
-    自上而下就是组一个集群的顺序：先决定要不要转发（决定了它是不是集群），
-    再加机器，最后把每台机器该有的东西拿走。0.4 把这三件事分在两个页面上，
-    中间那步（加节点）还得先知道 ``/nodes`` 这个页面存在。
-    """
     nodes = list(cluster.get("nodes") or [])
     forward = bool(cluster.get("forward"))
     secret_ready = bool(cluster.get("secret_configured"))
@@ -1590,14 +1468,6 @@ def _cluster_tab(cluster: dict[str, Any], sections: str, csrf: str, tab_field: s
 
 
 def _node_card(node: dict[str, Any]) -> str:
-    """一台节点的卡片。
-
-    表单字段挂在页面上那个 id="config-form" 的表单里（HTML 的 form 属性），
-    所以这里不需要 csrf —— 那一份由宿主表单带。
-
-    展示 + 三个动作：测试连接（就地出结论）、拿部署材料、删除。编辑地址走的是
-    同一个表单——把 id/address/weight 做成可改的输入框，比"点编辑再弹一个框"少一步。
-    """
     node_id = str(node.get("id", ""))
     index = node.get("index", 0)
     is_self = bool(node.get("is_self"))
@@ -1629,12 +1499,6 @@ def _node_card(node: dict[str, Any]) -> str:
 
 
 def _add_node_dialog(csrf: str, tab_field: str, next_port: int) -> str:
-    """「添加节点」弹窗。
-
-    只要 IP 一项必填，其余给预置默认值——加机器是集群的日常操作，每次都让人把
-    端口、id、权重想一遍纯属拖慢。端口预填下一个没被占用的（见
-    :func:`ipclick.web.pages.next_node_port`），id 留空就用 ``host:port``。
-    """
     return f"""
   <div class="dialog" id="add-node" hidden>
     <div class="dialog-box">
@@ -1671,11 +1535,6 @@ def _add_node_dialog(csrf: str, tab_field: str, next_port: int) -> str:
 
 
 def _generated_secret(generated: dict[str, Any] | None) -> str:
-    """刚生成的机密。**只显示这一次**——取完即弃，刷新就没了。
-
-    刻意不落盘、不写进配置：机密的正规位置是 ``.env``，由人自己粘过去。
-    这也顺带保证了"不可再次查看"——服务端根本没留副本。
-    """
     if not generated:
         return ""
     shared = bool(generated.get("shared"))
@@ -1781,11 +1640,6 @@ def render_deploy(
     *,
     total_nodes: int,
 ) -> str:
-    """一台子节点的部署材料：两个文件 + 两种启动命令，都能复制或下载。
-
-    **只生成，不推送。** 加一个"把配置写到远端"的 RPC 就等于：拿下主控 = 能改所有
-    机器上的配置文件，包括 SSRF 拦截开关。生成的东西由人复制过去，攻击面一点没变。
-    """
     node_id = str(plan.get("node_id", ""))
     commands = "".join(
         f"""
@@ -1857,12 +1711,6 @@ def render_skill(
     description: str,
     install_dir: str,
 ) -> str:
-    """把技能包摊在页面上：装它的两条命令 + 全文 + 下载。
-
-    技能本身是随包分发的（``ipclick skill install`` 就够了），这一页解决的是
-    **发现**问题：管理端是运维唯一一定会打开的地方，"原来还能让 AI 直接用"这件事
-    必须在这里被看见，否则它只存在于 ``--help`` 的第七行里。
-    """
     body = f"""
   <div class="msg tip">
     技能包（Skill）是一份 Markdown：告诉 AI 代理<b>什么时候</b>该用 IPClick、<b>怎么用</b>。

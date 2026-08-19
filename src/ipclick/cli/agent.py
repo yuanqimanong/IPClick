@@ -1,27 +1,3 @@
-"""给程序（尤其是 AI 代理）调用的命令面。
-
-0.4 之前的 CLI 只服务于"人在终端里部署这套东西"：``init`` / ``run`` / ``health``
-/ ``config-info``。想让一个 AI 用上 IPClick，只有两条路——要么让它写 Python 调
-SDK，要么让它去点那个网页。前者要求宿主环境能跑任意 Python（很多代理不给），
-后者根本不是给程序用的。
-
-0.5 补上中间这一层：**每一件能在 Web 端做的观测与诊断，都有一条对应的命令**，
-输出是结构化的，退出码是分类的。形态上是"资源 + 动词"（``trace list`` /
-``node probe`` / ``component install``），和多数面向机器的 CLI 一致——这种形状对
-模型友好，因为它能从一个子命令的用法推断出另一个。
-
-三条贯穿全局的约定，见 :mod:`ipclick.cli.output`：
-
-* ``--json`` 时 stdout 上只有一个 JSON 文档，**失败也是**；
-* 退出码分类（0/1/3/4/5），指向"该往哪儿查"；
-* 响应体默认截断，别把调用方的上下文窗口撑爆。
-
-**这一层不是新的能力，是新的入口。** ``fetch`` 走的是和 SDK 完全相同的
-:class:`~ipclick.sdk.Downloader`，``component install`` 和 Web 端共用
-:func:`ipclick.web.installer.plan` 那份白名单。任何"只在 CLI 上成立"的分支都是
-bug——那意味着有一条没被另外两个入口测到的代码路径。
-"""
-
 from __future__ import annotations
 
 import base64
@@ -50,7 +26,6 @@ def config_option(func: Any) -> Any:
 
 
 def server_options(func: Any) -> Any:
-    """连服务端要用的三项。顺序反着写，因为装饰器是自下而上应用的。"""
     func = click.option("--token", default=None, help="gRPC 鉴权令牌（覆盖 IPCLICK_AUTH_TOKEN 与配置文件）")(func)
     func = click.option("--port", "-p", type=int, default=None, help="服务端端口（默认取配置）")(func)
     func = click.option("--host", default=None, help="服务端地址（默认取配置，[::]/0.0.0.0 会当成 127.0.0.1）")(func)
@@ -58,14 +33,6 @@ def server_options(func: Any) -> Any:
 
 
 def _load(config: Path | None, as_json: bool = False) -> Settings:
-    """读配置。读不出来直接退出——后面每一条命令都依赖它。
-
-    显式给了 ``-c`` 时会先自己校验一遍。:func:`~ipclick.config_loader.load_config`
-    对读不了 / 解析不了的文件是**跳过并打日志**（服务端的取舍：一个坏掉的可选配置
-    不该让进程起不来）。但对这一组命令那是最坏的行为——调用方以为在用自己指定的
-    配置，实际拿到的是内置默认值，然后对着一个"端口怎么不对"排查半天。显式指定
-    的文件必须要么生效、要么报错。
-    """
     if config is not None:
         import tomllib
 
@@ -83,11 +50,6 @@ def _load(config: Path | None, as_json: bool = False) -> Settings:
 
 
 def _quiet_logs() -> None:
-    """把日志压到 ERROR。
-
-    这些命令的 stdout 是结果、stderr 是提示，中间夹一串 INFO 只会让人（和解析
-    stderr 的脚本）以为出事了。真出错时 ERROR 仍然会打出来。
-    """
     from ipclick.utils.log_util import LogUtil
 
     LogUtil.init(level="ERROR")
@@ -103,10 +65,6 @@ def _server_port(config: Settings, port: int | None) -> int:
 
 
 def _parse_pairs(values: tuple[str, ...], separator: str, what: str) -> dict[str, str]:
-    """把 ``-H 'Name: value'`` / ``--param k=v`` 这类重复选项解析成字典。
-
-    分隔符只认**第一个**：``-H 'Referer: https://a/b'`` 里的第二个冒号属于值。
-    """
     out: dict[str, str] = {}
     for raw in values:
         key, sep, value = raw.partition(separator)
@@ -117,11 +75,6 @@ def _parse_pairs(values: tuple[str, ...], separator: str, what: str) -> dict[str
 
 
 def _read_body(value: str) -> bytes:
-    """``-d`` 的取值。``@路径`` 从文件读（``@-`` 读 stdin），其余按字面量。
-
-    和 curl 同一套写法。AI 生成的命令里请求体经常很大，逼它塞进一个 shell 参数
-    既会撞上 ARG_MAX，也会让引号转义出错。
-    """
     if not value.startswith("@"):
         return value.encode("utf-8")
     path = value[1:]
@@ -134,17 +87,6 @@ def _read_body(value: str) -> bytes:
 
 
 def _body_payload(content: bytes, limit: int) -> dict[str, Any]:
-    """响应体在 JSON 里怎么表示。
-
-    能解码成 UTF-8 就给文本；否则给 base64——图片、gzip、非 UTF-8 的表单都属于
-    后者，硬塞进 JSON 字符串只会得到一串替换字符，调用方还原不出原始字节。
-    ``body_truncated`` 必须显式给出：静默截断会让调用方把半截 HTML 当成完整页面。
-
-    文本和二进制的截断规则不一样，因为"半截"的价值不一样：**半截 HTML 还能看出
-    是什么页面，半截 base64 解不出任何东西**。所以文本按上限切一刀照给，二进制则
-    要么整份给、要么不给——超限时返回空串并说明去哪儿取，而不是发一段注定解码
-    失败的字符。
-    """
     try:
         decoded = content.decode("utf-8")
     except UnicodeDecodeError:
@@ -226,15 +168,6 @@ def fetch(
     ignore_status: bool,
     as_json: bool,
 ) -> None:
-    """通过 IPClick 服务端发一次请求。
-
-    走的是和 SDK 完全相同的路径——SSRF 准入、按 host 限流、开了转发时的分发都在。
-    这不是"CLI 版的 curl"，而是"命令行形态的 IPClick 客户端"。
-
-    \b
-    退出码：0 成功；1 拿到响应但状态码 >= 400（或 --ignore-status 时不判）；
-            3 连不上服务端；4 鉴权失败；5 参数被拒绝。
-    """
     import json as json_lib
 
     from ipclick.dto.models import HttpMethod, IPClickAdapter
@@ -374,12 +307,6 @@ def status(
     probe_nodes: bool,
     as_json: bool,
 ) -> None:
-    """服务端在不在、这台机器能干什么。
-
-    比 health 多的是"能干什么"：装了哪些适配器、浏览器本体就绪没、链路落盘
-    开没开、集群里有几个节点。一个 AI 在发第一个请求之前该先问这一句——否则它会
-    指定一个本机根本没装的适配器，然后对着 FAILED_PRECONDITION 猜半天。
-    """
     from ipclick.adapters.browser_settings import BrowserSettings
     from ipclick.auth import load_tokens
     from ipclick.components import snapshot as components_snapshot
@@ -476,15 +403,10 @@ def status(
 
 @click.group()
 def trace() -> None:
-    """查链路记录（只读 [TRACE].sqlite_path 那个库）。
-
-    只能查落盘的那部分。内存环形缓冲活在服务端进程里，别的进程够不到——
-    要看那一份请开 [TRACE].sqlite_enabled，或用 Web 端的「请求流」。
-    """
+    pass
 
 
 def _reader(config_data: Settings, port: int | None, as_json: bool) -> Any:
-    """按配置打开链路库。没开落盘 / 文件不在时直接退出并说清原因。"""
     from ipclick.trace import TraceReader, TraceSettings
 
     resolved_port = _server_port(config_data, port)
@@ -558,7 +480,6 @@ def trace_list(
     since: float | None,
     as_json: bool,
 ) -> None:
-    """列出最近的请求记录。"""
     _quiet_logs()
     config_data = _load(config, as_json)
     reader = _reader(config_data, port, as_json)
@@ -597,7 +518,6 @@ def trace_list(
 @click.option("--top", type=int, default=10, show_default=True, help="目标站点排行取前几名")
 @json_option
 def trace_stats(config: Path | None, port: int | None, days: int, top: int, as_json: bool) -> None:
-    """成功率、耗时、按天趋势、目标站点排行。"""
     _quiet_logs()
     config_data = _load(config, as_json)
     reader = _reader(config_data, port, as_json)
@@ -638,15 +558,10 @@ def trace_stats(config: Path | None, port: int | None, days: int, top: int, as_j
 
 @click.group()
 def node() -> None:
-    """集群节点：看列表、探连通性与鉴权。"""
+    pass
 
 
 def _port_open(host: str, port: int, timeout: float = 1.0) -> bool:
-    """那个端口上有没有人在听。
-
-    只做 TCP 连接，不发 HTTP：这里要回答的是"Web 端起没起"，而不是"它健不健康"。
-    连上就断，1 秒超时——status 是个要秒回的命令，不该为一个附带信息卡住。
-    """
     import socket
 
     try:
@@ -657,7 +572,6 @@ def _port_open(host: str, port: int, timeout: float = 1.0) -> bool:
 
 
 def _node_entries(config_data: Settings) -> list[dict[str, Any]]:
-    """配置里声明的节点。token 只报有没有，绝不回显。"""
     raw = config_data.get("CLUSTER", {}).get("nodes", []) or []
     out: list[dict[str, Any]] = []
     for index, entry in enumerate(raw):
@@ -676,7 +590,6 @@ def _node_entries(config_data: Settings) -> list[dict[str, Any]]:
 
 
 def _probe_one(config_data: Settings, entry: dict[str, Any], timeout: float) -> dict[str, Any]:
-    """探一个节点。绝不抛——这是诊断入口，失败也要变成可读的结论。"""
     from ipclick.cluster.node import Node
     from ipclick.cluster.probe import probe_node
     from ipclick.cluster.tokens import cluster_secret
@@ -700,7 +613,6 @@ def _probe_one(config_data: Settings, entry: dict[str, Any], timeout: float) -> 
 @config_option
 @json_option
 def node_list(config: Path | None, as_json: bool) -> None:
-    """列出 [CLUSTER].nodes 里声明的节点。"""
     _quiet_logs()
     config_data = _load(config, as_json)
     nodes = _node_entries(config_data)
@@ -735,10 +647,6 @@ def node_list(config: Path | None, as_json: bool) -> None:
 @click.option("--timeout", type=float, default=5.0, show_default=True, help="单次探测超时（秒）")
 @json_option
 def node_probe(config: Path | None, node_id: str, address: str, timeout: float, as_json: bool) -> None:
-    """探测节点：连得上吗、集群内部鉴权配对吗。
-
-    不给 NODE_ID 就探配置里的全部。任一节点不通时退出码为 1。
-    """
     _quiet_logs()
     config_data = _load(config, as_json)
 
@@ -778,18 +686,13 @@ def node_probe(config: Path | None, node_id: str, address: str, timeout: float, 
 
 @click.group()
 def component() -> None:
-    """可选组件（五个 extras）：看状态、装、卸、下浏览器本体。
-
-    和 Web 端的「组件」页共用同一份白名单与命令规划——包名永远来自常量表，
-    绝不拼接输入（见 ipclick.web.installer.plan）。
-    """
+    pass
 
 
 @component.command("list")
 @config_option
 @json_option
 def component_list(config: Path | None, as_json: bool) -> None:
-    """列出五个可选组件的安装状态。"""
     from ipclick.adapters.browser_settings import BrowserSettings
     from ipclick.components import snapshot as components_snapshot
     from ipclick.web.installer import detect_toolchain
@@ -820,7 +723,6 @@ def component_list(config: Path | None, as_json: bool) -> None:
 
 
 def _run_plan(op: str, extra: str, browser_kind: str, as_json: bool, dry_run: bool) -> None:
-    """装 / 卸的公共执行路径。"""
     from ipclick.web.installer import execute, plan
 
     prepared, reason = plan(op, extra, browser_kind=browser_kind)
@@ -882,7 +784,6 @@ def _run_plan(op: str, extra: str, browser_kind: str, as_json: bool, dry_run: bo
 @click.option("--dry-run", is_flag=True, default=False, help="只打印将要执行的命令，不真的装")
 @json_option
 def component_install(extra: str, dry_run: bool, as_json: bool) -> None:
-    """装一个组件的 Python 包（EXTRA：niquests / camoufox / patchright / playwright / drissionpage）。"""
     _quiet_logs()
     _run_plan("install", extra, "chromium", as_json, dry_run)
 
@@ -892,11 +793,6 @@ def component_install(extra: str, dry_run: bool, as_json: bool) -> None:
 @click.option("--dry-run", is_flag=True, default=False, help="只打印将要执行的命令，不真的卸")
 @json_option
 def component_uninstall(extra: str, dry_run: bool, as_json: bool) -> None:
-    """卸一个组件的 Python 包。
-
-    不动浏览器本体——那可能是 1 GB，从命令行递归删一个 GB 级目录是不可逆操作。
-    用 `component list` 看它在哪、占多大，自己决定要不要删。
-    """
     _quiet_logs()
     _run_plan("uninstall", extra, "chromium", as_json, dry_run)
 
@@ -913,17 +809,13 @@ def component_uninstall(extra: str, dry_run: bool, as_json: bool) -> None:
 @click.option("--dry-run", is_flag=True, default=False, help="只打印将要执行的命令")
 @json_option
 def component_browser(extra: str, kind: str, dry_run: bool, as_json: bool) -> None:
-    """下载浏览器本体（camoufox 约 1 GB，慢网络下可能十几分钟）。"""
     _quiet_logs()
     _run_plan("browser", extra, kind, as_json, dry_run)
 
 
 @click.group("config")
 def config_group() -> None:
-    """读生效配置。机密一律脱敏，只报"有没有"。
-
-    和 config-info 的分工：那一条是给人看的一屏摘要，这里是给程序读的原始值。
-    """
+    pass
 
 
 _SECRET_HINTS = ("token", "secret", "password", "auth_key", "passwd", "credential")
@@ -947,7 +839,6 @@ def _redact(value: Any, key: str = "") -> Any:
 @click.option("--section", "-s", default="", help="只看某一节，如 SERVER、DOWNLOADER.retry")
 @json_option
 def config_show(config: Path | None, section: str, as_json: bool) -> None:
-    """输出生效配置（机密已脱敏）。"""
     _quiet_logs()
     config_data = _load(config, as_json)
 
@@ -973,7 +864,6 @@ def config_show(config: Path | None, section: str, as_json: bool) -> None:
 @click.argument("path")
 @json_option
 def config_get(config: Path | None, path: str, as_json: bool) -> None:
-    """取一项配置的值，如 SERVER.port、DOWNLOADER.retry.max_attempts。"""
     _quiet_logs()
     config_data = _load(config, as_json)
 

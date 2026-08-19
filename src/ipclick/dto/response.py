@@ -9,12 +9,6 @@ from ipclick.exceptions import RequestError
 
 @dataclass
 class Response:
-    """
-    统一的HTTP响应类
-
-    用于封装所有HTTP适配器的响应，提供一致的接口
-    """
-
     url: str
     status_code: int
     content: bytes | None = None
@@ -26,7 +20,6 @@ class Response:
     attempts: int = 1
 
     def __post_init__(self):
-        """初始化后处理"""
         if self.text is None and self.content is not None:
             try:
                 self.text = self.content.decode("utf-8", errors="ignore")
@@ -38,39 +31,25 @@ class Response:
 
     @property
     def ok(self) -> bool:
-        """判断响应是否成功"""
         return 200 <= self.status_code < 300 and self.exception is None
 
     @property
     def is_success(self) -> bool:
-        """判断响应是否成功（ok的别名）"""
         return self.ok
 
     @property
     def is_redirect(self) -> bool:
-        """判断是否为重定向响应"""
         return 300 <= self.status_code < 400
 
     @property
     def is_client_error(self) -> bool:
-        """判断是否为客户端错误"""
         return 400 <= self.status_code < 500
 
     @property
     def is_server_error(self) -> bool:
-        """判断是否为服务端错误"""
         return 500 <= self.status_code < 600
 
     def json(self) -> Any:
-        """
-        解析JSON响应
-
-        Returns:
-            解析后的JSON数据（对象/数组/标量）
-
-        Raises:
-            ValueError: 当响应不是有效JSON时
-        """
         if not self.text:
             raise ValueError("Response has no text content")
 
@@ -80,13 +59,6 @@ class Response:
             raise ValueError(f"Response is not valid JSON: {e}") from e
 
     def raise_for_status(self) -> None:
-        """
-        如果响应状态码表示错误，抛出异常
-
-        Raises:
-            RequestError: 当状态码表示错误时。
-            Exception: 当适配器已捕获到底层异常时，原样抛出该异常。
-        """
         if self.exception:
             raise self.exception
 
@@ -97,12 +69,10 @@ class Response:
             raise RequestError(error_msg)
 
     def get_content_type(self) -> str | None:
-        """获取内容类型"""
         headers = self.headers or {}
         return headers.get("content-type") or headers.get("Content-Type")
 
     def get_encoding(self) -> str:
-        """获取编码类型"""
         content_type = self.get_content_type()
         if content_type and "charset=" in content_type:
             return content_type.split("charset=")[1].split(";")[0].strip()
@@ -110,18 +80,6 @@ class Response:
 
     @classmethod
     def error_response(cls, url: str, exception: Exception, status_code: int = -1, attempts: int = 1) -> "Response":
-        """
-        创建错误响应
-
-        Args:
-            url:  请求URL
-            exception: 异常对象
-            status_code: 状态码（默认-1表示网络错误）
-            attempts: 实际尝试次数
-
-        Returns:
-            Response: 错误响应对象
-        """
         return cls(
             url=url,
             status_code=status_code,
@@ -137,18 +95,6 @@ class Response:
     def success_response(
         cls, url: str, content: bytes = b"", status_code: int = 200, headers: dict[str, str] | None = None
     ) -> "Response":
-        """
-        创建成功响应
-
-        Args:
-            url: 请求URL
-            content: 响应内容
-            status_code: 状态码
-            headers: 响应头
-
-        Returns:
-            Response: 成功响应对象
-        """
         return cls(
             url=url,
             status_code=status_code,
@@ -160,7 +106,6 @@ class Response:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """转换为字典"""
         return {
             "url": self.url,
             "status_code": self.status_code,
@@ -174,10 +119,8 @@ class Response:
 
     @override
     def __str__(self) -> str:
-        """字符串表示"""
         return f"<Response [{self.status_code}] {self.url}>"
 
     @override
     def __repr__(self) -> str:
-        """详细字符串表示"""
         return f"Response(url={self.url!r}, status_code={self.status_code}, elapsed_ms={self.elapsed_ms}, ok={self.ok})"

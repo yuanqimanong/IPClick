@@ -1,30 +1,3 @@
-"""Web 端可编辑的配置项白名单。
-
-这个文件回答的是"网页能改什么"。名单是白名单而不是黑名单——漏写一项的后果是
-"改不了"（有人来问），而黑名单漏写一项的后果是"能改本不该改的"（没人会来问）。
-
-**刻意不可编辑**的几类，页面上只展示、要改就去改文件：
-
-* ``[SECURITY]`` 全部。令牌、TLS 证书路径、SSRF 三个开关（``block_private_networks``
-  / ``block_metadata_endpoints`` / ``allowed_schemes``）。这个服务能代任意 URL 发
-  请求，一个能从网页关掉内网拦截的管理端，等于给自己装了个 SSRF 跳板。
-* ``[WEB]`` 的用户名密码。改自己的登录凭据必须经过文件（那还要求有机器的 shell）。
-* ``[CLUSTER].secret`` 与节点的 ``token``。机密不进 toml，正规位置是 ``.env``。
-* ``[BROWSER].allow_scripts``。它等于允许调用方在服务端的浏览器里跑任意 JS，
-  而页面内的 JS 会自己发请求，``[SECURITY]`` 那套 URL 策略对它完全不起作用。
-* ``[BROWSER].executable_path``。它是喂给浏览器启动器的可执行文件路径——能从网页
-  写它，等于能让服务端进程去执行本机任意二进制。
-* ``[CLUSTER].allow_remote_install``。打开它之后，能调本节点 gRPC 的人就可以在这台
-  机器上跑 pip。这是从"能代发 HTTP 请求"到"能改本机 Python 环境"的实质提权，
-  必须由这台机器的主人在文件里点头。
-
-后三项和 ``[SECURITY]`` 那几个的共同点是：**它们都不是"配置"，是"授权"**。
-授权的开关不该和超时、线程数摆在同一个表单里，让人顺手划过去。
-
-节点列表（``[CLUSTER].nodes``）是**可编辑**的：加减机器是这套集群的日常操作，
-而且节点地址本身不是机密。但节点的 ``token`` 字段不接受从网页写入。
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -42,8 +15,6 @@ FieldKind = Literal["int", "float", "bool", "str", "choice"]
 @final
 @dataclass(frozen=True)
 class Field:
-    """一个可编辑项。"""
-
     section: str
     key: str
     label: str
@@ -57,15 +28,9 @@ class Field:
 
     @property
     def name(self) -> str:
-        """表单字段名。"""
         return f"{self.section}.{self.key}"
 
     def parse(self, raw: str) -> Any:
-        """把表单里的字符串转成配置值。
-
-        Raises:
-            ValidationError: 取值非法。宁可拒绝也不要写一个会让服务起不来的值。
-        """
         text = (raw or "").strip()
         if self.kind == "bool":
             return text.lower() in ("1", "true", "on", "yes")
@@ -549,22 +514,11 @@ CLUSTER_GROUPS: frozenset[str] = frozenset({"集群"})
 
 
 def groups_for(tab: str) -> tuple[tuple[str, tuple[Field, ...]], ...]:
-    """某个分页该显示哪些组。
-
-    分页只影响**展示**，不影响权限——两页提交的都是同一个 ``parse_form``，
-    白名单还是那一份。把它做成"按组名归类"而不是再列一张表，是为了加一组配置项
-    时不必记得同步两个地方；漏同步的症状是"新加的项在页面上找不到"。
-    """
     cluster = tab == "cluster"
     return tuple((name, fields) for name, fields in GROUPS if (name in CLUSTER_GROUPS) is cluster)
 
 
 def current_value(config: Any, field: Field) -> Any:
-    """取一项的当前生效值。配置里没写就回落到该项的默认值。
-
-    刻意不返回 None 让页面显示空白：那样用户一点保存就把空值写进配置文件，
-    等于在不知不觉中改了行为。
-    """
     node: Any = config
     for part in field.section.split("."):
         if not isinstance(node, dict):
@@ -576,14 +530,6 @@ def current_value(config: Any, field: Field) -> Any:
 
 
 def parse_form(form: dict[str, str]) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
-    """把提交的表单解析成写回用的结构。
-
-    只处理白名单里、且与当前提交值有关的字段；表单里出现的其他键一律忽略——
-    不能让一个手工构造的 POST 写进任意配置项。
-
-    Returns:
-        ``(更新内容, 需要重启的项, 错误信息)``。
-    """
     updates: dict[str, dict[str, Any]] = {}
     restart_needed: list[str] = []
     errors: list[str] = []
@@ -609,11 +555,6 @@ def parse_form(form: dict[str, str]) -> tuple[dict[str, dict[str, Any]], list[st
 
 
 def parse_nodes(form: dict[str, str]) -> list[dict[str, Any]]:
-    """从表单解析节点列表。
-
-    表单用 ``node_id_0`` / ``node_address_0`` … 这种带序号的命名，序号不连续也没关系
-    （删掉中间一行时就会不连续）。地址为空的行视为删除。
-    """
     indexes: set[int] = set()
     for key in form:
         if key.startswith("node_address_"):
@@ -646,7 +587,6 @@ def parse_nodes(form: dict[str, str]) -> list[dict[str, Any]]:
 
 
 def validate_nodes(nodes: list[dict[str, Any]]) -> list[str]:
-    """校验节点列表。返回错误信息列表（空表示通过）。"""
     from ipclick.cluster.node import Node
 
     errors: list[str] = []

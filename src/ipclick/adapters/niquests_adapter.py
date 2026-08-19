@@ -1,14 +1,3 @@
-"""niquests 适配器。
-
-``niquests`` 是 ``requests`` 的 drop-in 替代：API 完全一致，但底层换成
-``urllib3-future``，因而支持 **HTTP/2 与 HTTP/3**，而 requests 停在 HTTP/1.1。
-既然接口一样、能力更强，本项目直接用它替掉了原来的 niquests 适配器
-（``requests`` 适配器已移除，见 CHANGELOG）。
-
-可选依赖（``pip install "ipclick[niquests]"``）：它不像 curl_cffi 那样有浏览器
-指纹伪装，主要价值是 HTTP/3 和"用起来就是 requests"这份熟悉感。
-"""
-
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -45,7 +34,7 @@ def _load_niquests() -> Any:
             import niquests
 
             _niquests = niquests
-        except ImportError:  # pragma: no cover - 取决于安装环境
+        except ImportError:
             _niquests = None
     return _niquests
 
@@ -57,7 +46,7 @@ def _load_user_agent() -> Any:
             from fake_useragent import UserAgent
 
             _user_agent_cls = UserAgent
-        except ImportError:  # pragma: no cover - 取决于安装环境
+        except ImportError:
             _user_agent_cls = None
     return _user_agent_cls
 
@@ -68,14 +57,6 @@ _PASSTHROUGH_KWARGS = frozenset({"auth", "cert", "hooks"})
 
 
 class NiquestsAdapter(DownloaderAdapter):
-    """基于 ``niquests`` 的适配器。
-
-    相比 curl_cffi 的取舍：
-    - 没有浏览器指纹伪装（``impersonate`` 参数会被忽略）
-    - 支持 HTTP/2 与 HTTP/3（本项目里唯一支持 HTTP/3 的适配器）
-    - API 与 requests 完全一致，适合对接已有 requests 代码
-    """
-
     adapter_name: str = "niquests"
     supports_async: bool = True
 
@@ -161,7 +142,6 @@ class NiquestsAdapter(DownloaderAdapter):
         allowed_status_codes: list[int] | None = None,
         kwargs: str | None = None,
     ) -> Response:
-        """使用 niquests 执行 HTTP 请求。"""
         self.reject_impersonate(impersonate)
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
@@ -219,7 +199,6 @@ class NiquestsAdapter(DownloaderAdapter):
     @override
     @aretry()
     async def adownload(self, url: str, **kwargs: Any) -> Response:
-        """niquests 的真异步实现。"""
         self.reject_impersonate(kwargs.get("impersonate"))
         method = str(kwargs.get("method", "GET")).upper()
         if method not in _SUPPORTED_METHODS:
@@ -249,7 +228,6 @@ class NiquestsAdapter(DownloaderAdapter):
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         **kwargs: Any,
     ) -> Iterator[StreamEvent]:
-        """niquests 的真流式实现。"""
         method = str(kwargs.get("method", "GET")).upper()
         if method not in _SUPPORTED_METHODS:
             yield StreamHeader(url=url, status_code=-1, error=f"Unsupported HTTP method: {method}")
@@ -278,7 +256,6 @@ class NiquestsAdapter(DownloaderAdapter):
 
     @override
     def close(self) -> None:
-        """关闭所有缓存的 Session"""
         with self._sessions_lock:
             for session in self._sessions.values():
                 try:
@@ -289,24 +266,12 @@ class NiquestsAdapter(DownloaderAdapter):
 
 
 def is_available() -> bool:
-    """niquests 装了没。
-
-    走 find_spec 而不是 ``_niquests is not None``：后者只有在有人真的构造过一次
-    适配器之后才有意义，而这个函数恰恰是在那之前被问的。
-    """
     from ipclick.utils import module_probe
 
     return module_probe.installed(NIQUESTS_MODULE)
 
 
 def __getattr__(name: str) -> Any:
-    """``NIQUESTS_AVAILABLE`` 的兼容层。
-
-    0.3 里它是模块级常量，值在 import 那一刻就定死了。0.4 起改成每次问都重新
-    探测——运行时装完 niquests 不重启也能用。保留这个名字是为了不破坏
-    ``from ... import NIQUESTS_AVAILABLE`` 的写法，但那种写法拿到的仍是一个快照，
-    新代码请直接调 :func:`is_available`。
-    """
     if name == "NIQUESTS_AVAILABLE":
         return is_available()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

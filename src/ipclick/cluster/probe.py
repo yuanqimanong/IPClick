@@ -1,22 +1,3 @@
-"""就地探测一个集群节点：连得上吗、鉴权配对吗。
-
-要解决的是加完节点之后的那段空白：0.3 里节点填完只能等真实流量转发过去才发现
-连不上，而那时错误已经混在业务失败里了。
-
-**为什么不能只用 grpc.health.v1。** 健康检查刻意免鉴权（编排系统的探针通常拿不到
-密钥）。于是在它眼里，"那台机器没起来"和"起来了但我的令牌不对"长得一模一样——
-而这两件事的排查方向完全相反：前者去看进程和网络，后者去核对 ``.env`` 里的
-``IPCLICK_CLUSTER_SECRET``。所以这里探两层：
-
-1. **健康检查**（免鉴权）回答"连得上吗"。
-2. **Ping**（走鉴权）回答"令牌对吗"。它不做任何业务动作——探测不该在对端产生
-   一次真实抓取，那既慢又会污染对方的链路统计。
-
-第二层的返回码就是结论：``OK`` 通过；``UNAUTHENTICATED`` 令牌不匹配；
-``UNIMPLEMENTED`` 说明拦截器已经放行、只是对端还是 0.3（那个版本没有 Ping）。
-最后这一种恰恰证明鉴权是通的，得单独说，否则滚动升级期间会被误报成鉴权失败。
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -41,11 +22,6 @@ DEFAULT_PROBE_TIMEOUT = 5.0
 @final
 @dataclass(frozen=True)
 class ProbeResult:
-    """一次节点探测的结论。
-
-    ``reachable`` 与 ``authenticated`` 分开，因为它们指向完全不同的排查方向。
-    """
-
     node_id: str
     address: str
     reachable: bool
@@ -60,9 +36,6 @@ class ProbeResult:
 
     @property
     def ok(self) -> bool:
-        """整体算不算通过。鉴权没验过（本地没配密钥）不算失败——
-        内网全互信的部署是合法选择。
-        """
         return self.reachable and self.authenticated is not False
 
     def snapshot(self) -> dict[str, Any]:
@@ -90,7 +63,6 @@ def probe_node(
     timeout: float = DEFAULT_PROBE_TIMEOUT,
     from_node: str = "",
 ) -> ProbeResult:
-    """探一个节点。绝不抛异常——这是个诊断入口，任何失败都该变成可读的结论。"""
     settings = tls or TLSSettings()
     started = time.monotonic()
 
@@ -143,7 +115,7 @@ def _ping(
         )
     except grpc.RpcError as e:
         return _from_rpc_error(node, e, started)
-    except Exception as e:  # pragma: no cover - 兜底，诊断入口不该抛
+    except Exception as e:
         log.debug(f"探测节点 {node.id} 时出现意外错误：{e}")
         return ProbeResult(
             node_id=node.id,

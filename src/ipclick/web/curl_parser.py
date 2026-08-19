@@ -1,17 +1,3 @@
-"""把一条 ``curl`` 命令解析成「试一试」表单。
-
-价值全在一个动作上：浏览器 DevTools 里对着请求「复制为 cURL」，粘进来就能跑。
-手动把 URL、方法、十几个请求头、一段 body 逐个拆进表单，既慢又容易漏——而漏掉
-一个 header 往往就是"为什么我用 IPClick 抓不到、浏览器却可以"的答案。
-
-**不追求覆盖 curl 的全部参数。** curl 有两百多个选项，绝大多数与这里无关
-（连接复用、输出重定向、进度条…）。认得出常用的那十几个就够，认不出的一律
-忽略并**报给用户**——静默丢掉一个 ``--data-urlencode`` 比不支持它更糟。
-
-引号交给 :func:`shlex.split` 处理，不自己写状态机：DevTools 导出的命令里
-单引号包着 JSON、JSON 里又有双引号是常态，手写解析必然出错。
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -91,8 +77,6 @@ _KNOWN_METHODS = frozenset({"GET", "POST", "HEAD", "PUT", "PATCH", "DELETE", "OP
 @final
 @dataclass
 class ParsedCurl:
-    """解析结果。``notes`` 是要显示给用户看的"我没处理这些"。"""
-
     url: str = ""
     method: str = ""
     headers: dict[str, str] = field(default_factory=dict)
@@ -106,7 +90,6 @@ class ParsedCurl:
         return not self.error and bool(self.url)
 
     def as_form(self) -> dict[str, str]:
-        """转成「试一试」表单的字段。"""
         return {
             "url": self.url,
             "method": self.method or "GET",
@@ -117,7 +100,6 @@ class ParsedCurl:
 
 
 def parse_curl(command: str) -> ParsedCurl:
-    """解析一条 curl 命令。**绝不抛异常**——粘错东西是常态，要给可读的提示。"""
     text = (command or "").strip()
     if not text:
         return ParsedCurl(error="请先粘贴一条 curl 命令")
@@ -230,14 +212,12 @@ def _apply(result: ParsedCurl, target: str, value: str) -> None:
 
 
 def _join_body(existing: str, addition: str) -> str:
-    """curl 允许多个 -d，它们用 & 连起来（这是 form 编码的语义）。"""
     if not existing:
         return addition
     return f"{existing}&{addition}"
 
 
 def _is_bundled_bools(flag: str) -> bool:
-    """``-sS`` 这种把多个短开关粘在一起的写法。"""
     if len(flag) < 3 or flag.startswith("--"):
         return False
     return all(f"-{char}" in _BOOL_FLAGS for char in flag[1:])

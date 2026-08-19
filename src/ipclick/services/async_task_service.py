@@ -1,21 +1,3 @@
-"""``grpc.aio`` 下的任务服务（0.7.0，实验性）。
-
-和同步的 :class:`~ipclick.services.task_service.TaskService` **并存**，由
-``[SERVER].async_mode`` 选用哪一个。不是替换——同步那条路仍然是默认。
-
-为什么值得做：服务端原本是一请求一线程，实测 16 核机器上单进程只能用出
-1.5 个核，而线程切换与 GIL convoy 就占掉约 12% 的 GIL 时间。协程去掉的正是
-这一层：适配器层单独实测 curl_cffi 从 524 QPS（50 线程）涨到 1361 QPS。
-
-**协程解决不了的**：单进程仍然只能用一个核。要吃满多核还得靠
-``[SERVER].processes``（0.6.0 加的多进程分片）。两者叠加才是终态。
-
-继承 TaskService 而不是另起一份：适配器缓存、URL 准入、链路记录、响应组装、
-异常到 gRPC 状态码的映射全部复用。**只覆写四个 RPC 入口**，其余一行不改——
-两份拷贝迟早失步，而失步的表现是"同一个错误在异步模式下把人指向了另一个
-排障方向"，比少一个分支更糟。
-"""
-
 import asyncio
 from collections.abc import AsyncIterator
 import time
@@ -40,25 +22,12 @@ if TYPE_CHECKING:
 
 
 class AsyncTaskService(TaskService):
-    """异步版任务服务。只覆写 RPC 入口，其余复用父类。"""
-
     _loop: "asyncio.AbstractEventLoop | None" = None
 
     def bind_loop(self, loop: "asyncio.AbstractEventLoop") -> None:
         self._loop = loop
 
     def send_from_thread(self, request: "task_pb2.ReqTask", context: Any, timeout: float = 300.0) -> Any:
-        """从**非事件循环线程**发起一次请求，阻塞等结果。
-
-        专供 Web 管理端的「试一试」：那条路径跑在 HTTP 服务的工作线程里，
-        而 :meth:`Send` 是协程，直接调只会拿到一个没人 await 的 coroutine 对象
-        （而且 Python 只会在垃圾回收时警告一句 "coroutine was never awaited"，
-        页面上表现为静默失败）。
-
-        用 ``run_coroutine_threadsafe`` 投递回服务端的循环，并**带超时**：
-        循环若被什么东西卡住，这里不能无限期占着一个 HTTP 工作线程——那会让
-        整个管理端跟着挂掉，而人看到的只是页面转圈。
-        """
         loop = self._loop
         if loop is None or loop.is_closed():
             raise RuntimeError("异步服务端尚未就绪（事件循环未绑定），请稍后再试")
@@ -71,11 +40,10 @@ class AsyncTaskService(TaskService):
 
     @override
     def limiters_for_sharding(self) -> list[Any]:
-        """异步模式下真正生效的是 _async_limiter，不是继承来的 host_limiter。"""
         return [self._async_limiter]
 
     @override
-    async def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":  # pyright: ignore[reportIncompatibleMethodOverride]
+    async def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
         log.debug("Received request: {} for URL: {}", request.uuid, request.url)
         start_time = time.monotonic()
         method_name = METHOD_MAP.get(request.method, "GET")
@@ -121,11 +89,6 @@ class AsyncTaskService(TaskService):
     async def _aexecute_download(
         self, adapter: DownloaderAdapter, request: "task_pb2.ReqTask", tr: RequestTrace | None = None
     ) -> Response:
-        """执行一次下载。按适配器是否支持异步分派。
-
-        ``supports_async`` 为假时走基类的回退（同步实现丢进线程池）——那样拿不到
-        协程的好处，但**语义完全一致**，第三方适配器不用改一行就能在异步模式下跑。
-        """
         waiting_since = time.monotonic()
         async with self._async_limiter.acquire(request.url):
             if tr is not None:
@@ -134,7 +97,6 @@ class AsyncTaskService(TaskService):
 
     @property
     def _async_limiter(self) -> "AsyncHostLimiter":
-        """按 host 的异步限流闸门。惰性建：它内部的 asyncio 原语要在事件循环里造。"""
         limiter = self.__dict__.get("_async_limiter_cache")
         if limiter is None:
             limiter = build_async_limiter(dict(self.config.get("DOWNLOADER", {})))
@@ -142,25 +104,13 @@ class AsyncTaskService(TaskService):
         return limiter
 
     @override
-    async def SendStream(  # pyright: ignore[reportIncompatibleMethodOverride]
+    async def SendStream(
         self, request: "task_pb2.ReqTask", context: ServicerContext
     ) -> AsyncIterator["task_pb2.TaskRespChunk"]:
-        """流式下载。
-
-        目前直接复用父类的同步实现，逐个分片搬到线程池里取——响应体仍然不会
-        整个进内存（那是流式的核心性质），但这条路上每个在飞的流占一个线程。
-        流式请求本来就少而长，优先级低于 Send，留待后续。
-        """
         loop = asyncio.get_running_loop()
         iterator: Iterator[task_pb2.TaskRespChunk] = super().SendStream(request, context)
 
         def _next() -> "task_pb2.TaskRespChunk | None":
-            """取下一个分片，取完返回 None。
-
-            不用 sentinel 对象：那会让 yield 的类型被推成
-            ``TaskRespChunk | object``，签名对不上。这里 None 不是合法分片，
-            拿它当结束标记是安全的。
-            """
             return next(iterator, None)
 
         while True:
@@ -170,13 +120,7 @@ class AsyncTaskService(TaskService):
             yield chunk
 
     @override
-    async def SendBatch(self, request_iterator: Any, context: ServicerContext) -> AsyncIterator["task_pb2.TaskResp"]:  # pyright: ignore[reportIncompatibleMethodOverride]
-        """批量下载：结果按**完成顺序**产出，不是提交顺序。
-
-        异步版用 ``asyncio.as_completed`` 而不是线程池——批量本来就是"量大"的
-        场景，正是协程最划算的地方。并发度仍然沿用 ``[SERVER].max_workers``：
-        这里不受线程数限制，但下游目标站点受得了多少并没有因此改变。
-        """
+    async def SendBatch(self, request_iterator: Any, context: ServicerContext) -> AsyncIterator["task_pb2.TaskResp"]:
         semaphore = asyncio.Semaphore(self._batch_concurrency)
 
         async def one(req: "task_pb2.ReqTask") -> "task_pb2.TaskResp":
@@ -191,7 +135,7 @@ class AsyncTaskService(TaskService):
             yield await completed
 
     @override
-    async def Ping(self, request: "task_pb2.PingReq", context: ServicerContext) -> "task_pb2.PingResp":  # pyright: ignore[reportIncompatibleMethodOverride]
+    async def Ping(self, request: "task_pb2.PingReq", context: ServicerContext) -> "task_pb2.PingResp":
         return super().Ping(request, context)
 
 

@@ -1,24 +1,3 @@
-"""``grpc.aio`` 服务端（0.7.0，实验性，默认关）。
-
-由 ``[SERVER].async_mode`` 打开。与 :class:`~ipclick.server.IPClickServer` 并存，
-**不是替换**——同步那条路仍然是默认，且短期内不会变。
-
-为什么默认关（三条都是实打实会咬人的）：
-
-1. **第三方适配器的线程安全假设变了。** README 声明支持注册自定义适配器，
-   它们只实现同步 ``download()``。异步模式下这些实现被丢进 executor 跑：
-   功能一致，但原来是"一请求一线程、串行进入我的对象"，现在是线程池复用线程。
-   谁在适配器里用了 ``threading.local`` 做缓存，行为就变了，而且是静默的。
-2. **0.6.0 刚换过一次并发模型（多进程）。** 一个版本里连换两次，出了问题
-   没人分得清是哪一个引起的。
-
-（这里原先还列着第三条「Web 管理端「试一试」是同步调用」——本版已经解掉了：
-``AsyncTaskService.send_from_thread`` 用 ``run_coroutine_threadsafe`` 投递回
-事件循环，带超时且超时会取消在飞的请求。留着它会让人以为异步模式下管理端不能用。）
-
-0.7 收集真实反馈，0.8 再考虑翻默认值。
-"""
-
 import asyncio
 from concurrent import futures
 from typing import Any
@@ -35,20 +14,6 @@ from ipclick.utils.log_util import log
 
 
 class _AsyncAuthInterceptor(aio.ServerInterceptor):
-    """令牌鉴权的 aio 版。
-
-    复用同步拦截器的**令牌与判定函数**（``extract_token`` / ``token_matches`` 那套
-    常量时间比较、``is_exempt`` 的免鉴权前缀），只把外壳换成 aio 接口。
-    鉴权规则各写一份，就等着哪天异步模式悄悄放行了本该拒绝的调用——那种缺陷
-    不会报错，只会安静地少拦一些人。
-
-    ⚠️ 拒绝用的是 ``grpc.unary_unary_rpc_method_handler`` 而**不是** ``aio.``——
-    后者根本不存在（``grpc.aio`` 没有这个符号）。写成 ``aio.`` 的话，鉴权拒绝
-    路径会在运行时抛 AttributeError：非法调用不再拿到 UNAUTHENTICATED，而是
-    一个含糊的内部错误。这个洞是类型检查器发现的，正常测试跑不到——除非专门
-    测"异步模式下拒绝非法令牌"（见 tests/test_async_auth.py）。
-    """
-
     def __init__(self, delegate: TokenAuthInterceptor) -> None:
         self._delegate: TokenAuthInterceptor = delegate
 
@@ -87,13 +52,6 @@ def build_async_server(
     auth: TokenAuthInterceptor,
     reuseport: bool,
 ) -> aio.Server:
-    """按同步服务端的同一套参数造一个 aio server。
-
-    ``max_workers`` 在这里的含义**变了**，值得说清楚：同步模式下它是"同时能处理
-    多少请求"的硬上限（一请求一线程）；异步模式下协程不占线程，它只用于那个
-    兜底的 executor——即适配器没实现异步、要把同步 ``download()`` 丢进去跑时。
-    所以异步模式下把它调大不会提高并发上限，调小才会限制回退路径。
-    """
     interceptors: list[aio.ServerInterceptor] = []
     if auth.enabled:
         interceptors.append(_AsyncAuthInterceptor(auth))
@@ -129,17 +87,16 @@ async def serve_async(
     health_enabled: bool = True,
     **server_kwargs: Any,
 ) -> None:
-    """起一个 aio 服务端并等它终止。"""
     service.bind_loop(asyncio.get_running_loop())
 
     server = build_async_server(**server_kwargs)
     task_pb2_grpc.add_TaskServiceServicer_to_server(service, server)
 
     if health_enabled:
-        from grpc_health.v1 import health_pb2, health_pb2_grpc
-        from grpc_health.v1.health import aio as health_aio  # pyright: ignore[reportAttributeAccessIssue]
+        from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
-        servicer = health_aio.HealthServicer()
+        health_dynamic: Any = health
+        servicer = health_dynamic.aio.HealthServicer()
         health_pb2_grpc.add_HealthServicer_to_server(servicer, server)
         await servicer.set("", health_pb2.HealthCheckResponse.SERVING)
 

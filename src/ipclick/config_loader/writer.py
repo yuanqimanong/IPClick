@@ -1,17 +1,3 @@
-"""把配置改动写回 ``ipclick.toml``。
-
-**为什么是文本改写而不是"读成 dict 再整体 dump"**：那份默认配置里几乎每一项
-都带着解释——为什么默认是这个值、配错了会有什么症状。整体 dump 会把这些注释
-全部抹掉，而它们的价值远高于代码格式的整齐。所以这里做的是定点替换：找到那一行
-``key = 值``，只换等号右边，行尾注释、缩进、上下文一律保留。
-
-**能改什么由白名单决定**（见 :mod:`ipclick.web.editable`）。这个模块只负责
-"怎么改"，不负责"能不能改"——两件事分开，权限判断才不会散落在字符串处理里。
-
-写入是原子的：先写同目录下的临时文件，再 ``os.replace``。中途断电最多丢新内容，
-不会留下半个配置文件——那会让服务下次直接起不来。写之前留一份 ``.bak``。
-"""
-
 from __future__ import annotations
 
 import os
@@ -29,7 +15,6 @@ Scalar = str | int | float | bool
 
 
 def format_value(value: Any) -> str:
-    """把 Python 值格式化成 TOML 字面量。"""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
@@ -43,10 +28,6 @@ def format_value(value: Any) -> str:
 
 
 def _section_bounds(lines: list[str], section: str) -> tuple[int, int] | None:
-    """定位 ``[section]`` 的内容范围 ``(header_index, end_index)``。
-
-    ``end_index`` 是下一个节头的行号（或文件末尾），即该节内容的右开边界。
-    """
     header = re.compile(r"^\s*\[\s*" + re.escape(section) + r"\s*\]\s*(#.*)?$")
     any_header = re.compile(r"^\s*\[")
     start: int | None = None
@@ -66,14 +47,6 @@ _INLINE_TABLE_RE = re.compile(r"^(\s*[^=\s]+\s*=\s*)\{(.*)\}(\s*(?:#.*)?)$")
 
 
 def _split_inline_pairs(body: str) -> list[str] | None:
-    """按**顶层**逗号切开内联表的内容。
-
-    不能直接 ``body.split(",")``：引号里的逗号（``ua = "a,b"``）和嵌套结构里的
-    逗号（``args = [1, 2]``）都会被切错，切错就等于把配置改坏。
-
-    看不懂的结构一律返回 None，让调用方去走"明确报错"那条路——写坏一个配置文件
-    的代价远大于少支持一种写法。
-    """
     parts: list[str] = []
     current = ""
     depth = 0
@@ -105,14 +78,6 @@ def _split_inline_pairs(body: str) -> list[str] | None:
 
 
 def _set_in_inline_table(lines: list[str], parent: str, table: str, key: str, literal: str) -> bool:
-    """把 ``key = literal`` 写进 ``[parent]`` 里那个叫 ``table`` 的内联表。
-
-    改成了返回 True，没找到可安全编辑的内联表返回 False。
-
-    存在的理由：模板里有些子表是内联写法（``viewport = {{ width = 1920, height = 1080 }}``）
-    而不是独立的 ``[BROWSER.viewport]`` 节。对这种节按"找不到节就在末尾追加一个"
-    处理，会让同一个键被声明两次，产出的文件下次启动直接解析不了。
-    """
     bounds = _section_bounds(lines, parent)
     if bounds is None:
         return False
@@ -147,11 +112,6 @@ def _set_in_inline_table(lines: list[str], parent: str, table: str, key: str, li
 
 
 def _find_key(lines: list[str], start: int, end: int, key: str) -> int | None:
-    """在 ``[start, end)`` 里找 ``key = ...`` 的行号。
-
-    只认没被注释掉的赋值行——模板里有大量 ``# key = ...`` 的示例，
-    误把它们当成生效配置去改的话，改完还是不生效。
-    """
     pattern = re.compile(r"^(\s*)" + re.escape(key) + r"\s*=")
     for index in range(start, end):
         if pattern.match(lines[index]):
@@ -160,10 +120,6 @@ def _find_key(lines: list[str], start: int, end: int, key: str) -> int | None:
 
 
 def _split_comment(text: str) -> tuple[str, str]:
-    """把一行赋值语句的值部分和行尾注释分开。
-
-    要顾及字符串里的 ``#``（如 ``color = "#fff"  # 主题色``），所以要跟踪引号。
-    """
     in_string = False
     quote = ""
     escaped = False
@@ -188,15 +144,6 @@ def _split_comment(text: str) -> tuple[str, str]:
 
 
 def set_values(text: str, updates: dict[str, dict[str, Any]]) -> tuple[str, list[str]]:
-    """在 TOML 文本里定点设置若干值。
-
-    Args:
-        text: 原始 TOML 全文。
-        updates: ``{节名: {键: 值}}``。节名可以是 ``"A.b"`` 这种子表。
-
-    Returns:
-        ``(新文本, 变更说明列表)``。
-    """
     lines = text.splitlines(keepends=True)
     changes: list[str] = []
 
@@ -242,7 +189,6 @@ def set_values(text: str, updates: dict[str, dict[str, Any]]) -> tuple[str, list
 
 
 def format_nodes(nodes: list[dict[str, Any]]) -> str:
-    """把节点列表格式化成 ``nodes = [...]`` 的多行内联表数组。"""
     if not nodes:
         return "nodes = []\n"
     out = ["nodes = [\n"]
@@ -259,12 +205,6 @@ def format_nodes(nodes: list[dict[str, Any]]) -> str:
 
 
 def set_nodes(text: str, nodes: list[dict[str, Any]]) -> str:
-    """整块替换 ``[CLUSTER].nodes``。
-
-    这一项不能定点改单行——它是个跨多行的数组。所以找到 ``nodes = [`` 到配平的
-    ``]`` 之间的区域整块换掉。数组里可能有注释掉的示例行，一起被换掉是对的：
-    界面上看到的节点列表就该是文件里的节点列表。
-    """
     lines = text.splitlines(keepends=True)
     bounds = _section_bounds(lines, "CLUSTER")
     block = format_nodes(nodes)
@@ -293,24 +233,6 @@ def set_nodes(text: str, nodes: list[dict[str, Any]]) -> str:
 
 
 def save(path: Path, text: str, *, backup: bool = True) -> Path | None:
-    """原子写入，并可留一份备份。写之前先确认它还是合法 TOML。
-
-    **为什么要校验。** 这个模块是按行做文本编辑的，不是"读成对象再序列化回去"——
-    那样做会把注释和排版全丢掉，而这个文件里的注释是给人看的主要内容。代价是
-    存在产出非法 TOML 的可能：:func:`set_values` 遇到只以**内联表**形式存在的节
-    （``viewport = {{ width = 1920 }}``）会在文件末尾追加一个 ``[BROWSER.viewport]``
-    表头，于是同一个键被声明两次，文件下次启动直接解析不了。
-
-    这种事故的形状特别糟：写入是成功的，界面提示"已保存"，服务照旧在跑，
-    直到下一次重启才炸——那时候人早就不记得自己在网页上改过什么了。所以在这里
-    拦一道：宁可保存失败并说清原因，也不要写出一个开不了机的配置。
-
-    Returns:
-        备份文件路径；没做备份则为 None。
-
-    Raises:
-        ConfigError: 内容不是合法 TOML，或写入失败（目录不可写、磁盘满等）。
-    """
     path = Path(path)
     try:
         _ = tomllib.loads(text)
@@ -341,15 +263,6 @@ def save(path: Path, text: str, *, backup: bool = True) -> Path | None:
 
 
 def target_path(config_path: str | Path | None = None, port: int | None = None) -> Path:
-    """该往哪个文件写。
-
-    绝不写包内的 default_config.toml——那是随包分发的模板，改它会在下次
-    ``pip install --upgrade`` 时被覆盖，而且会影响同机的其他项目。
-
-    查找顺序和 :func:`~ipclick.config_loader.loader.candidate_names` 保持一致：
-    带端口时先找 ``ipclick-<端口>.toml``。两边不一致的后果是"页面上改的和进程
-    实际读的不是同一个文件"，而那种错位在界面上完全看不出来。
-    """
     from ipclick.config_loader.loader import DEFAULT_CONFIG_PATH, candidate_names
 
     if config_path:

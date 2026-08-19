@@ -1,22 +1,3 @@
-"""可选组件清单：五个 extras 的元信息、安装状态与分类。
-
-这份清单是**唯一**的事实来源。此前"IPClick 到底支持哪些可选组件"散在四个地方
-（``pyproject.toml`` 的 extras、``browser_engines.INSTALL_HINTS``、注册表的 if、
-Web 端那张只有渲染引擎的表），于是：
-
-* niquests 是纯 HTTP 适配器，不属于"渲染引擎"，Web 端**完全没有**它的位置；
-* 没装的组件直接从「试一试」的下拉框里消失，对着文档看的人会觉得实现对不上；
-* 通用占位值 ``browser`` 和真实适配器名混在同一层级，看起来像第六个 extra。
-
-现在三处都从这里生成：状态展示、安装/卸载、下拉框分组。
-
-两级安装状态
-------------
-**Python 包**和**浏览器本体**是两件事，必须分开报——只报一个的话，
-``pip install "ipclick[camoufox]"`` 但没 fetch 的机器会显示"已安装"，而第一次
-请求会卡几分钟去下 1 GB 然后超时。
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -33,8 +14,6 @@ ComponentKind = Literal["http", "browser"]
 @final
 @dataclass(frozen=True)
 class Component:
-    """一个可选组件（= ``pyproject.toml`` 里的一个 extra）。"""
-
     name: str
     extra: str
     modules: tuple[str, ...]
@@ -105,13 +84,11 @@ GENERIC_BROWSER = "browser"
 
 
 def package_status(component: Component) -> tuple[bool, str | None]:
-    """``(Python 包装了没, 版本号)``。走 find_spec，因此卸载也能如实反映。"""
     installed = all(module_probe.installed(m) for m in component.modules)
     return installed, module_probe.version(component.distribution) if installed else None
 
 
 def status(component: Component, browser: BrowserSettings | None = None) -> dict[str, Any]:
-    """一个组件的完整状态，给 Web 端直接用。"""
     installed, version = package_status(component)
     body: bool | None = None
     detail = ""
@@ -135,19 +112,10 @@ def status(component: Component, browser: BrowserSettings | None = None) -> dict
 
 
 def snapshot(browser: BrowserSettings | None = None) -> list[dict[str, Any]]:
-    """全部组件的状态，按 :data:`COMPONENTS` 的顺序。"""
     return [status(c, browser) for c in COMPONENTS]
 
 
 def adapter_choices(browser: BrowserSettings | None = None) -> list[dict[str, Any]]:
-    """「试一试」下拉框的分组数据。
-
-    两条和 0.3 不同的规则：
-
-    * **没装的也要列出来**，置灰并附上安装命令，而不是从列表里消失。消失会让
-      对着文档看的人以为文档和实现对不上，也不知道 IPClick 到底支持哪些。
-    * ``browser`` 单独成项并写明"引擎由服务端自动选"，不和真实组件名混排。
-    """
     resolved = browser or BrowserSettings()
     enabled = resolved.enabled
     try:

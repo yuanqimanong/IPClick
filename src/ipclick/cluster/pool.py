@@ -1,9 +1,3 @@
-"""节点池：维护节点状态、后台探活、按策略选节点。
-
-探活复用 P2-2 实现的 ``grpc.health.v1`` —— 这也是当初把健康检查排在集群
-之前做的原因。
-"""
-
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -21,11 +15,6 @@ from ipclick.utils.log_util import log
 
 
 class NodePool:
-    """一组 IPClick 服务端节点。
-
-    线程安全：请求线程调 :meth:`acquire`，后台探活线程调 :meth:`probe_once`。
-    """
-
     def __init__(
         self,
         config: ClusterConfig,
@@ -57,7 +46,6 @@ class NodePool:
             self.start()
 
     def start(self) -> None:
-        """启动后台探活线程。可重复调用。"""
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
@@ -66,7 +54,6 @@ class NodePool:
         log.debug(f"集群探活已启动，{len(self._states)} 个节点，间隔 {self.config.probe_interval}s")
 
     def stop(self) -> None:
-        """停止后台探活线程。"""
         self._stop.set()
         thread = self._thread
         if thread is not None and thread.is_alive():
@@ -82,11 +69,6 @@ class NodePool:
             self._notify_health()
 
     def on_health_change(self, callback: Callable[[int], None]) -> None:
-        """注册"每轮探测之后"的回调，参数是当前健康节点数。
-
-        复用探测节拍而不是另起一个定时器：两个独立的周期任务看到的节点状态
-        会错开，而"限流份额"和"路由决策"依据的存活数不一致是很难查的一类问题。
-        """
         self._health_callbacks.append(callback)
 
     def _notify_health(self) -> None:
@@ -98,11 +80,6 @@ class NodePool:
                 log.warning(f"健康状态回调失败：{e}")
 
     def refresh_nodes(self, *, force: bool = False) -> bool:
-        """重新解析节点列表。返回节点集合是否有变化。
-
-        按 id 复用已有的 NodeState——直接重建会把每个节点的健康计数与请求统计
-        清零，那样任何"连续 N 次"的判定都永远达不到，熔断和恢复双双失效。
-        """
         interval = self._discovery_config.refresh_interval
         if not force and interval <= 0:
             return False
@@ -136,19 +113,6 @@ class NodePool:
         return True
 
     def replace(self, config: ClusterConfig) -> tuple[list[str], list[str]]:
-        """原地换掉节点列表、策略与阈值。返回 ``(新增的 id, 移除的 id)``。
-
-        这是"改完节点不用重启"的底座。相对 :meth:`refresh_nodes` 的区别是数据
-        来源：那个是节点**发现**（DNS 定期重解析），这个是**配置**被人改了。
-
-        两点必须做对：
-
-        * **按 id 复用已有的 NodeState。** 直接重建会把每个节点的健康计数与请求
-          统计清零，那样任何"连续 N 次"的判定都永远达不到，熔断和恢复双双失效。
-        * **DNS 发现模式下不动节点列表。** 那种部署里节点是解析出来的，
-          ``[CLUSTER].nodes`` 只是个占位，用它去覆盖等于把发现结果丢掉。
-          此时只更新策略与阈值。
-        """
         with self._lock:
             self.config = config
             self.balancer = create_balancer(config.strategy)
@@ -178,11 +142,6 @@ class NodePool:
         return added, removed
 
     def probe_once(self) -> None:
-        """对所有节点探一次活。
-
-        串行探测：节点数通常是个位数，为此再开一个线程池不划算，而且探活本身
-        有超时保护。真到几十个节点再改成并发。
-        """
         for state in self._states:
             if self._stop.is_set():
                 return
@@ -202,23 +161,10 @@ class NodePool:
             return [s for s in self._states if s.is_available]
 
     def state_for(self, node_id: str) -> NodeState | None:
-        """按 id 取节点状态，**不管它健不健康**。
-
-        点名派发（Web 端的诊断路径）要用：一个被标成 unhealthy 的节点恰恰是最
-        需要点名试一次的那个，用 :meth:`available` 去找会把它过滤掉。
-        """
         with self._lock:
             return next((s for s in self._states if s.node.id == node_id), None)
 
     def acquire(self, exclude: set[str] | None = None) -> NodeState:
-        """选一个可用节点。
-
-        Args:
-            exclude: 本次请求已经试过、要跳过的节点 id（故障转移时用）。
-
-        Raises:
-            TransportError: 没有可用节点。
-        """
         exclude = exclude or set()
         candidates = [s for s in self.available() if s.node.id not in exclude]
 
@@ -235,7 +181,6 @@ class NodePool:
         return self.balancer.pick(candidates)
 
     def snapshot(self) -> dict[str, Any]:
-        """给状态页用的整体快照。"""
         states = [s.snapshot() for s in self._states]
         return {
             "strategy": self.balancer.name,

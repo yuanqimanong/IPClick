@@ -28,34 +28,34 @@ from ipclick.sdk import Downloader
 try:
     __version__ = importlib.metadata.version("ipclick")
     __author__ = importlib.metadata.metadata("ipclick")["Author"]
-except importlib.metadata.PackageNotFoundError:  # pragma: no cover - 仅在未安装时走到
+except importlib.metadata.PackageNotFoundError:
     __version__ = "1.0.0"
     __author__ = "元气码农少女酱"
 
 
-__all__ = [  # noqa: RUF022 - 按用途分组比字母序更易读
-    "Downloader",
-    "get_downloader",
-    "close_all_downloaders",
-    "downloader",
-    "create_client",
-    "DownloadTask",
-    "DownloadResponse",
-    "ResponseTrace",
-    "Response",
-    "HttpMethod",
-    "IPClickAdapter",
-    "ProxyConfig",
-    "IPClickError",
-    "ConfigError",
+__all__ = [
     "AdapterError",
     "AuthenticationError",
     "ClientClosedError",
-    "TransportError",
-    "RequestError",
-    "ValidationError",
-    "URLNotAllowedError",
+    "ConfigError",
+    "DownloadResponse",
+    "DownloadTask",
+    "Downloader",
     "HostLimitTimeout",
-    "__version__",
+    "HttpMethod",
+    "IPClickAdapter",
+    "IPClickError",
+    "ProxyConfig",
+    "RequestError",
+    "Response",
+    "ResponseTrace",
+    "TransportError",
+    "URLNotAllowedError",
+    "ValidationError",
     "__author__",
+    "__version__",
+    "close_all_downloaders",
+    "create_client",
+    "downloader",
+    "get_downloader",
 ]

@@ -1,29 +1,3 @@
-"""Web 端的 CSS 与 JavaScript。
-
-从 :mod:`ipclick.web.templates` 拆出来，理由很简单：那边是"页面长什么结构"，
-这边是"页面长什么样、怎么动"。混在一个文件里的话，改一行按钮样式要在两千行
-HTML 拼接中间找那段 CSS。
-
-零前端依赖仍然成立
-------------------
-没有模板引擎、没有框架、没有打包工具，也没有任何外部资源。布局是纯 CSS Grid，
-交互是几十行原生 JS。0.3 时页面里**一行 JS 都没有**（自动刷新靠
-``<meta refresh>``），0.4 加了——因为有三件事没有 JS 就做不好：
-
-* **切主题。** 0.5 起是明确的两态（亮 / 暗），不再有"跟随系统"——那一档靠
-  ``prefers-color-scheme``，而它取决于浏览器读不读得到桌面偏好，Linux 上常常读
-  不到并静默回落成亮色。一个失败时毫无迹象的开关比没有这个开关更糟。
-* **装依赖要轮询。** ``camoufox fetch`` 要下 1 GB，只能后台跑 + 查状态。
-* **请求流实时刷新。** ``<meta refresh>`` 每 3 秒重载整页：滚动位置丢失、
-  正在填的过滤条件被冲掉、页面白闪。换成局部替换之后这三条全没了。
-
-CSP 用哈希而不是 'unsafe-inline'
---------------------------------
-脚本是写死在源码里的常量，所以可以算出它的 sha256 放进
-``script-src``。这样即使某处转义漏了、注入进一行 ``<script>``，它也执行不了——
-而 ``'unsafe-inline'`` 会把这层保护整个让开。
-"""
-
 from __future__ import annotations
 
 import base64
@@ -878,31 +852,11 @@ SCRIPT_MAIN = """
 
 
 def sha256_source(script: str) -> str:
-    """算 CSP 的 ``'sha256-...'`` 源表达式。
-
-    浏览器算的是 ``<script>`` 标签**内部的字节**，所以这里的输入必须和最终写进
-    HTML 的字符串**逐字节一致**——前后多一个换行都会让哈希对不上，页面上表现为
-    脚本被静默拦掉（主题切换没反应、安装任务不轮询）。因此模板里插入脚本时不做
-    任何缩进或美化。
-    """
     digest = hashlib.sha256(script.encode("utf-8")).digest()
     return f"'sha256-{base64.b64encode(digest).decode('ascii')}'"
 
 
 def csp() -> str:
-    """页面的 Content-Security-Policy。
-
-    ``script-src`` 用两段内联脚本的哈希，而不是 ``'unsafe-inline'``：脚本是源码
-    里的常量，哈希能精确放行它们，同时让任何注入进来的 ``<script>`` 执行不了。
-
-    ``style-src`` 仍然是 ``'unsafe-inline'``：页面里有大量 ``style="width:37%"``
-    这类**属性**（分布条、趋势图的宽度），而哈希覆盖不了行内样式属性，那需要
-    ``'unsafe-hashes'``——那个口子比 ``'unsafe-inline'`` 还含糊。样式注入的危害
-    也远小于脚本注入。
-
-    ``connect-src 'self'`` 是新加的：0.4 有了 fetch（轮询安装状态、实时刷新），
-    要把它限死在本源，免得万一被注入了什么东西能往外发数据。
-    """
     return (
         "default-src 'none'; "
         f"script-src {sha256_source(SCRIPT_BOOT)} {sha256_source(SCRIPT_MAIN)}; "
