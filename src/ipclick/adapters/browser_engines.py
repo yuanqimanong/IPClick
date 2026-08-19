@@ -40,13 +40,8 @@ from ipclick.utils import module_probe
 from ipclick.utils.log_util import log
 
 
-#: "还没试过 import"。区别于 None（"试过了，没装"）——后者不该再重试，
-#: 而测试也靠直接把这几个全局量设成 None 来模拟"没装"。
 _UNPROBED: Any = object()
 
-#: 三个第三方入口的**懒加载缓存**。0.3 时这里是模块级 try/except import，
-#: 那让"装没装"的结论在进程启动那一刻就固化了（见 :mod:`ipclick.utils.module_probe`）。
-#: 现在状态展示走 find_spec，真正的 import 推迟到第一次要启动浏览器时。
 _playwright_api: Any = _UNPROBED
 _patchright_api: Any = _UNPROBED
 _camoufox_new_browser: Any = _UNPROBED
@@ -112,18 +107,14 @@ def _camoufox_not_installed_error() -> type[Exception]:
     return _camoufox_not_installed or _NeverRaised
 
 
-#: 引擎名 -> 探测用的**顶层**模块名。传子模块名会让 find_spec 去 import 父包，
-#: 那就又有副作用了（见 :mod:`ipclick.utils.module_probe`）。
 ENGINE_MODULES: dict[str, tuple[str, ...]] = {
     "playwright": ("playwright",),
     "patchright": ("patchright",),
-    # camoufox 是 Playwright 的包装，两者都得在
     "camoufox": ("camoufox", "playwright"),
     "drissionpage": ("DrissionPage",),
 }
 
 
-#: 引擎名 -> 缺失时的安装提示
 INSTALL_HINTS: dict[str, str] = {
     "playwright": 'pip install "ipclick[playwright]" && playwright install chromium',
     "patchright": 'pip install "ipclick[patchright]" && patchright install chromium',
@@ -131,14 +122,10 @@ INSTALL_HINTS: dict[str, str] = {
     "drissionpage": 'pip install "ipclick[drissionpage]"（还需本机已装 Chrome/Chromium）',
 }
 
-#: 走 Playwright API 的引擎。DrissionPage 不在此列。
 PLAYWRIGHT_FAMILY: frozenset[str] = frozenset({"playwright", "patchright", "camoufox"})
 
-#: 全部引擎名
 ENGINE_NAMES: frozenset[str] = PLAYWRIGHT_FAMILY | {"drissionpage"}
 
-#: 自带指纹伪装的引擎。对它们不要在 context 上强行覆盖 viewport / User-Agent——
-#: 那会和它生成的指纹自相矛盾，反而更容易被识别出来。
 FINGERPRINT_MANAGED: frozenset[str] = frozenset({"camoufox"})
 
 
@@ -191,15 +178,6 @@ def refresh() -> None:
         _browser_ready_cache.clear()
 
 
-#: 浏览器本体探测结果的缓存。键是 ``(引擎, executable_path, 内核,
-#: PLAYWRIGHT_BROWSERS_PATH)``——这四样决定了要去哪个目录找什么。
-#:
-#: 为什么要缓存：每次探测都是实打实的文件系统扫描（``ms-playwright`` 目录要扫
-#: 两层）。0.3 时这只在渲染总览页时发生一次；0.4 的总览每 5 秒局部刷新一次，
-#: 不缓存就是每 5 秒把那几个目录再翻一遍，而结论只有装/卸的时候才会变。
-#:
-#: 那个环境变量也进键，是因为它直接改变查找位置——不进键的话，同一进程里换了
-#: 它（容器启动脚本、测试）会拿到上一次的结论。:func:`refresh` 会整个清掉。
 _browser_ready_cache: dict[tuple[str, str, str, str], tuple[bool | None, str]] = {}
 _browser_ready_lock = threading.Lock()
 
@@ -217,7 +195,6 @@ def browser_ready(engine: str, settings: BrowserSettings | None = None) -> tuple
     误报成没装（那会让人去重装一遍已经装好的东西）。
     """
     resolved = settings or BrowserSettings()
-    # executable_path 可能是 None（未配置），归一成空串再进键
     key = (
         engine,
         resolved.executable_path or "",
@@ -235,8 +212,6 @@ def browser_ready(engine: str, settings: BrowserSettings | None = None) -> tuple
 
 
 def _probe_browser(engine: str, resolved: BrowserSettings) -> tuple[bool | None, str]:
-    # 显式指定了可执行文件就以它为准——这是容器里复用系统浏览器的标准做法，
-    # 此时各引擎自己的下载目录有没有东西都不重要。
     if resolved.executable_path:
         exists = os.path.isfile(resolved.executable_path)
         return exists, f"[BROWSER].executable_path = {resolved.executable_path}" + ("" if exists else "（文件不存在）")
@@ -280,8 +255,6 @@ def _camoufox_browser_ready() -> tuple[bool | None, str]:
     except ImportError:
         return None, "camoufox 包未安装"
     except Exception as e:
-        # CamoufoxNotInstalled / UnsupportedVersion 都在这里——共同含义是"本体没就绪"，
-        # 而 camoufox 的异常类型不稳定，按类型 catch 反而更脆
         return False, f"未下载（{type(e).__name__}），需要 python -m camoufox fetch"
     if not os.path.isfile(path):
         return False, f"{path} 不存在，需要 python -m camoufox fetch"
@@ -327,8 +300,6 @@ def _playwright_browser_ready(engine: str, kind: str) -> tuple[bool | None, str]
         return False, f"{directory} 不存在（未执行 {engine} install）"
     try:
         first_level = sorted(directory.iterdir())
-        # 先扫第一层，再扫第一层里那些目录的下一层。分两趟写而不是嵌进一个
-        # 生成器表达式里：那种写法要读三遍才能看出"两层深度"这件事。
         for entry in first_level:
             if entry.is_dir() and entry.name.startswith(kind):
                 return True, str(entry)
@@ -352,7 +323,6 @@ def _system_chrome_ready() -> tuple[bool | None, str]:
         if found:
             return True, found
     if sys.platform == "win32":
-        # Windows 上通常不在 PATH 里，查默认安装位置
         for candidate in (
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -363,7 +333,6 @@ def _system_chrome_ready() -> tuple[bool | None, str]:
         candidate = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         if os.path.isfile(candidate):
             return True, candidate
-    # PATH 里没有不等于机器上没有（可能装在别处），所以是"未知"而不是"没有"
     return None, "PATH 里没找到 Chrome/Chromium；若装在别处请设 [BROWSER].executable_path"
 
 
@@ -374,7 +343,6 @@ class EngineStatus:
 
     engine: str
     package: bool
-    #: 浏览器本体是否就绪。None = 查不出来
     browser: bool | None
     detail: str = ""
 
@@ -441,11 +409,6 @@ def _chromium_launch_options(settings: BrowserSettings) -> dict[str, Any]:
     if settings.executable_path:
         options["executable_path"] = settings.executable_path
 
-    # 这里刻意**不**设启动级代理。playwright 文档里那个
-    # proxy={"server": "per-context"} 的写法是给旧版 chromium 的：现在每个
-    # context 单独设代理已经能直接生效，而一旦设了那个占位值，没配代理的
-    # context 会去连一个叫 "per-context" 的代理，所有直连请求全部
-    # ERR_PROXY_CONNECTION_FAILED。
     return options
 
 
@@ -459,8 +422,6 @@ async def launch(engine: str, settings: BrowserSettings) -> LaunchedBrowser:
     """
     status = engine_status(engine, settings)
     if not status.ready:
-        # 这一步同时挡住了"浏览器本体没下"的情况。挡在这里是刻意的：camoufox 的
-        # 默认行为是缺本体就当场开始下（1.3 GB），而这里已经在 gRPC 的请求线程上了。
         raise AdapterError(
             f"浏览器引擎 {engine!r} 不可用（{status.label}）："
             f"{status.detail or INSTALL_HINTS.get(engine, '缺少依赖')}。"
@@ -519,35 +480,22 @@ async def _launch_camoufox(settings: BrowserSettings) -> LaunchedBrowser:
     options: dict[str, Any] = {"headless": settings.headless}
     if settings.args:
         options["args"] = list(settings.args)
-    # **总是**显式传 executable_path，这是关键。
-    #
-    # 不传的话 camoufox 会自己去 launch_path() -> camoufox_path(download_if_missing=True)
-    # 解析路径，缺本体就当场开始下载（本机实测 1.3 GB，2 分钟能下 440 MB）。
-    # 那一刻我们已经在 gRPC 的请求线程上：请求必然超时，超时返回后下载还在后台跑。
-    # 光在前面加检查不够——我们的检查和它的解析可能不一致（环境变量、多版本目录），
-    # 一旦不一致就又会走到下载分支。传路径进去才是结构上排除这条路。
     options["executable_path"] = settings.executable_path or _camoufox_executable()
     if settings.locale:
         options["locale"] = settings.locale
     if settings.humanize:
         options["humanize"] = settings.humanize
-    # geoip 让时区 / 语言 / 经纬度与代理出口 IP 对上。只有配置级代理能这么做——
-    # 请求级代理是 context 上设的，那时指纹早已生成。
     if settings.proxy_gateway:
         options["proxy"] = {"server": settings.proxy_gateway}
         if settings.geoip:
             options["geoip"] = True
 
-    # 先取好异常类型：懒加载的 getter 不该在 except 子句里求值，那会让
-    # "解析异常类型时自己抛异常"变成一个极难读懂的失败。
     not_installed = _camoufox_not_installed_error()
 
     driver = await _playwright_async_api()().start()
     try:
         browser = await _camoufox_async_new_browser()(driver, **options)
     except not_installed as e:
-        # 兜底：launch() 已经查过一次，走到这里说明检查和实际用的路径不一致
-        # （比如两次调用之间目录被删了）。绝不能让它退化成静默下载 1.3 GB。
         await driver.stop()
         raise AdapterError(f"Camoufox 浏览器本体未就绪：{e}。请先执行 python -m camoufox fetch") from e
     except Exception as e:

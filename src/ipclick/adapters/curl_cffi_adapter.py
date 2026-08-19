@@ -21,7 +21,6 @@ from ipclick.utils.log_util import log
 if TYPE_CHECKING:
     from curl_cffi.requests import ProxySpec
 
-# 可选依赖：缺失时降级为 None，由 __init__ 抛 AdapterError。
 # 标成 Any 是为了让"模块或 None"这种运行时形态不必到处写 type: ignore。
 _curl_cffi: Any
 _curl_opt: Any
@@ -29,7 +28,7 @@ _impersonate_mod: Any
 _user_agent_cls: Any
 
 try:
-    from curl_cffi import CurlOpt as _curl_opt  # CurlOpt 在顶层包，不在 .requests 下
+    from curl_cffi import CurlOpt as _curl_opt
     import curl_cffi.requests as _curl_cffi
     from curl_cffi.requests import impersonate as _impersonate_mod
 except ImportError:  # pragma: no cover - 取决于安装环境
@@ -49,7 +48,6 @@ FAKE_UA_AVAILABLE: bool = _user_agent_cls is not None
 
 _SUPPORTED_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
 
-# 允许调用方通过 kwargs 透传给 curl_cffi 的参数
 _PASSTHROUGH_KWARGS = frozenset({"ja3", "akamai", "default_headers", "http_version", "interface", "cert"})
 
 
@@ -65,8 +63,6 @@ class CurlCffiAdapter(DownloaderAdapter):
     """
 
     adapter_name: str = "curl_cffi"
-    #: curl_cffi 自带 AsyncSession（libcurl 的 multi 接口），是本项目里
-    #: 第一个能真正吃到协程收益的适配器。
     supports_async: bool = True
 
     def __init__(self, settings: AdapterSettings | None = None):
@@ -75,21 +71,14 @@ class CurlCffiAdapter(DownloaderAdapter):
 
         super().__init__(settings)
 
-        # curl_cffi特有配置
         self.impersonate: str | None = DEFAULT_CHROME
         self.ja3: str | None = None
         self.akamai: str | None = None
 
-        # 按 (proxy, verify, impersonate) 缓存 Session，以复用连接
         self._sessions: dict[tuple[str | None, bool, str | None], Any] = {}
         self._sessions_lock: threading.Lock = threading.Lock()
-        #: 异步 Session 按 (事件循环, proxy, verify, impersonate) 缓存。
-        #: **必须带上事件循环**：AsyncSession 内部的 AsyncCurl 绑定在创建它的
-        #: 循环上，跨循环复用会挂在"attached to a different loop"上——而多进程
-        #: 模式下每个 worker 进程各有一个循环，测试里也常常一个用例一个循环。
         self._async_sessions: dict[tuple[int, str | None, bool, str | None], Any] = {}
 
-        # User Agent生成器
         self.ua_generator: Any = _user_agent_cls(platforms="desktop") if _user_agent_cls is not None else None
 
     def _get_session(self, proxy: str | None, verify: bool, impersonate: str | None) -> Any:
@@ -112,10 +101,6 @@ class CurlCffiAdapter(DownloaderAdapter):
                     "trust_env": bool(self.trust_env),
                     "timeout": self.settings.download_timeout,
                 }
-                # 调用方显式指定了代理时，必须同时清空 no-proxy 列表。
-                # libcurl 会自行读取环境里的 no_proxy/NO_PROXY，命中的目标会
-                # 绕过我们设置的代理直连并返回 200——代理被静默丢弃，
-                # 调用方还以为走了代理。空字符串表示"没有任何主机免代理"。
                 if proxy and _curl_opt is not None:
                     session_kwargs["curl_options"] = {_curl_opt.NOPROXY: ""}
                 self._sessions[key] = _curl_cffi.Session(**session_kwargs)
@@ -142,8 +127,6 @@ class CurlCffiAdapter(DownloaderAdapter):
         而失步的表现是"同一个请求同步能过、异步过不了"，从症状根本看不出
         是参数组装的差异。
         """
-        # 以前这里是无条件 json.loads(kwargs)，kwargs 为空串时直接抛
-        # JSONDecodeError，而且解析结果压根没被用到。
         extra = self.parse_extra_kwargs(source.get("kwargs"))
 
         built: dict[str, Any] = {
@@ -154,12 +137,6 @@ class CurlCffiAdapter(DownloaderAdapter):
             "json": source.get("json"),
             "timeout": source.get("timeout") or self.timeout,
             "allow_redirects": source.get("allow_redirects", True),
-            # 不转发 stream：curl_cffi 在 stream=True 时返回未消费的流式响应，
-            # 我们随后读 .content 得到的是 b''，而 status_code 仍是 200、
-            # exception 仍是 None——调用方完全无从察觉整个响应体已经丢失。
-            # 服务端本来就要把响应体整个塞进一条 protobuf 消息，没有真正的流式
-            # 通路可言（见 README「尚未实现」），所以这里与 niquests 适配器保持一致：
-            # 忽略该参数，等真正支持 server-streaming RPC 时再一并实现。
         }
         for key in _PASSTHROUGH_KWARGS:
             if key in extra:
@@ -227,7 +204,6 @@ class CurlCffiAdapter(DownloaderAdapter):
             )
 
         except Exception as e:
-            # 不打完整堆栈：retry 会重试多次，每次一份 traceback 会淹没日志。
             log.warning(f"curl_cffi request failed for {url}: {e}")
             raise
 

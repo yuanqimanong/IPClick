@@ -41,33 +41,25 @@ from typing import Any, final
 from ipclick.utils.log_util import log
 
 
-#: 内存环形缓冲的默认容量。500 条 × 约 400 字节 ≈ 200KB，可以忽略。
 DEFAULT_MEMORY_SIZE = 500
 
-#: SQLite 写队列容量。按 5000 条 / 批量 200 算，够扛十几秒的写入尖峰。
 DEFAULT_QUEUE_SIZE = 5000
 
-#: 一次事务最多攒多少条。攒批是 SQLite 写入吞吐的关键（逐条 commit 会慢两个数量级）。
 _BATCH_SIZE = 200
 
-#: 攒批的最长等待。低流量时不能让记录一直卡在队列里看不到。
 _FLUSH_INTERVAL = 0.5
 
-#: 清理过期数据的间隔（秒）。按天保留，一小时一次足够。
 _RETENTION_INTERVAL = 3600.0
 
-#: 跨天聚合的缓存有效期（秒）。请求流页每 3 秒刷新一次，而这些数字描述的是
-#: 一个 30 天的窗口——"3 秒新"没有意义，重复算却很贵。
 WINDOW_CACHE_TTL = 10.0
 
-#: URL 截断长度。爬虫的 URL 可能带很长的查询串，全存进去会让库膨胀得毫无必要。
 _URL_MAX_LEN = 512
 
 
 def classify_status(status_code: int) -> str:
     """把状态码归成有限的几类。"""
     if status_code < 0:
-        return "failure"  # 连接层失败，没拿到 HTTP 响应
+        return "failure"
     if status_code < 300:
         return "2xx"
     if status_code < 400:
@@ -196,10 +188,8 @@ class TraceSettings:
     sqlite_enabled: bool = False
     sqlite_path: str = "ipclick-trace.db"
     retention_days: int = 30
-    #: 只记失败的请求。成功量极大又只关心异常时打开，能把库缩小一两个数量级。
     only_errors: bool = False
     queue_size: int = DEFAULT_QUEUE_SIZE
-    #: 记录 URL。默认记——查问题基本都要它。介意的话可以关，关掉后只留 host。
     record_url: bool = True
     node_id: str = ""
 
@@ -218,18 +208,12 @@ class TraceSettings:
             memory_size=_int("memory_size", defaults.memory_size, 0),
             sqlite_enabled=bool(section.get("sqlite_enabled", defaults.sqlite_enabled)),
             sqlite_path=str(section.get("sqlite_path", defaults.sqlite_path) or defaults.sqlite_path),
-            # 0 表示永久保留
             retention_days=_int("retention_days", defaults.retention_days, 0),
             only_errors=bool(section.get("only_errors", defaults.only_errors)),
             queue_size=_int("queue_size", defaults.queue_size, 100),
             record_url=bool(section.get("record_url", defaults.record_url)),
             node_id=node_id or str(section.get("node_id", "") or ""),
         )
-
-
-# --------------------------------------------------------------------------- #
-# 聚合计数器
-# --------------------------------------------------------------------------- #
 
 
 @final
@@ -321,10 +305,6 @@ class Counters:
             }
 
 
-# --------------------------------------------------------------------------- #
-# SQLite 落盘
-# --------------------------------------------------------------------------- #
-
 _COLUMNS = (
     "ts",
     "uuid",
@@ -340,16 +320,11 @@ _COLUMNS = (
     "queued_ms",
     "error",
     "stream",
-    # 单独存一列而不是查询时从 url 现算：SQL 里没有 URL 解析函数，自己用
-    # instr/substr 拼出来的那套和 host_of 对不齐（端口、IPv6 字面量），
-    # 于是"排行榜里的 host"和"限流用的 host"会是两个东西。
     "host",
 )
 
 _INSERT_SQL = f"INSERT INTO traces ({', '.join(_COLUMNS)}) VALUES ({', '.join('?' * len(_COLUMNS))})"
 
-#: 建表。索引单独放在 _SCHEMA_INDEXES —— 它们可能引用后加的列，
-#: 必须等迁移补完列之后再建，否则在老库上会 "no such column"。
 _SCHEMA_TABLE = """
 CREATE TABLE IF NOT EXISTS traces (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -381,7 +356,6 @@ CREATE INDEX IF NOT EXISTS idx_traces_host ON traces(host, ts DESC);
 """
 
 
-#: 记录"谁在写这个库"的标记文件后缀。
 _CLAIM_SUFFIX = ".owner"
 
 
@@ -425,8 +399,6 @@ def _release_database(marker: str) -> None:
     if not marker:
         return
     with contextlib.suppress(OSError):
-        # 只删自己写的那一份：进程被 kill -9 时标记会留下，
-        # 下次启动靠 _process_alive 把它认成陈旧记录。
         if Path(marker).read_text(encoding="utf-8").strip() == str(os.getpid()):
             Path(marker).unlink()
 
@@ -438,8 +410,6 @@ def _process_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if sys.platform == "win32":  # pragma: no cover - 平台相关
-        # Windows 上 os.kill(pid, 0) 会直接终止进程而不是探测，绝不能用。
-        # 没有零依赖的可靠探测手段，那就按"可能还在"处理。
         return True
     try:
         os.kill(pid, 0)
@@ -478,16 +448,11 @@ class TraceReader:
 
     def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
         if readonly:
-            # uri 模式的 mode=ro 能保证查询绝不可能写坏数据文件
             conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=5.0)
         else:
             conn = sqlite3.connect(self.path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         return conn
-
-    # -------------------------------------------------------------- #
-    # 读
-    # -------------------------------------------------------------- #
 
     def query(
         self,
@@ -509,9 +474,6 @@ class TraceReader:
             where.append("adapter = ?")
             params.append(adapter)
         if keyword:
-            # LIKE 里 % 和 _ 是通配符，而 URL 里这两个字符都很常见
-            # （/api_v2/、utm_source=）。不转义的话 "api_v2" 会匹配到 "apiXv2"，
-            # 用户以为筛出来的是精确子串，实际不是。
             where.append("url LIKE ? ESCAPE '\\'")
             params.append(f"%{_escape_like(keyword)}%")
         clause = _status_clause(status_class)
@@ -596,7 +558,6 @@ class TraceReader:
                         "failed": int(r["total"]) - int(r["ok"] or 0),
                         "avg_ms": round(float(r["avg_ms"] or 0), 1),
                     }
-                    # unixepoch + localtime：按本地日期分组，否则跨时区看起来会错一天
                     for r in conn.execute(
                         """SELECT date(ts, 'unixepoch', 'localtime') AS day,
                                   COUNT(*) AS total,
@@ -693,32 +654,16 @@ class SQLiteSink(TraceReader):
         self._thread: threading.Thread = threading.Thread(target=self._run, name="ipclick-trace", daemon=True)
         self._thread.start()
 
-    # -------------------------------------------------------------- #
-    # 建库
-    # -------------------------------------------------------------- #
-
     def _init_db(self) -> None:
         parent = os.path.dirname(self.path)
         if parent:
             os.makedirs(parent, exist_ok=True)
         conn = self._connect()
         try:
-            # WAL：读写互不阻塞。这是"Web 端在查的同时还能继续写"的前提。
             _ = conn.execute("PRAGMA journal_mode=WAL")
-            # NORMAL：不为每次 commit 做 fsync。断电可能丢最后几条链路记录——
-            # 对可观测性数据这个代价换来的吞吐提升是划算的。
             _ = conn.execute("PRAGMA synchronous=NORMAL")
-            # 增量整理：按天 DELETE 之后用 incremental_vacuum 回收页面。
-            # 不用 VACUUM——它要独占锁并重写整个文件，库大了会把服务卡住。
-            #
-            # ⚠️ 这条 PRAGMA 只对**新建**的库生效，且必须在建表之前执行（所以它
-            # 在 _SCHEMA_TABLE 上面）。已经存在的库改不了 auto_vacuum 模式，
-            # 语句会被静默忽略，_purge() 里的 incremental_vacuum 也就成了空操作
-            # ——文件不会再缩小，但删数据、查询、保留期都照常工作。真要回收
-            # 旧库的空间，只能停服后手动 VACUUM 重建。
             _ = conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
             _ = conn.executescript(_SCHEMA_TABLE)
-            # 先补列再建索引：索引可能引用后加的列
             self._migrate(conn)
             _ = conn.executescript(_SCHEMA_INDEXES)
             conn.commit()
@@ -738,11 +683,6 @@ class SQLiteSink(TraceReader):
         existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(traces)")}
         if "host" not in existing:
             _ = conn.execute("ALTER TABLE traces ADD COLUMN host TEXT")
-            # 老行的 host 用 SQL 现补一次：写法和 host_of 对不齐的边角情况
-            # （端口、IPv6）在这里可以接受——它只影响历史数据的排行分组，
-            # 新写入的行走的是 host_of。
-            # 不含 "://" 的行是 record_url = false 时写的，url 里存的**已经是**
-            # host，原样用——和 TraceRecord.host 的兜底保持一致。
             _ = conn.execute(
                 "UPDATE traces SET host = CASE"
                 "  WHEN instr(url, '://') = 0 THEN COALESCE(NULLIF(url, ''), '-')"
@@ -753,10 +693,6 @@ class SQLiteSink(TraceReader):
                 " END WHERE host IS NULL"
             )
             log.info("链路记录库已补上 host 列（用于目标站点排行）")
-
-    # -------------------------------------------------------------- #
-    # 写
-    # -------------------------------------------------------------- #
 
     def submit(self, record: TraceRecord) -> None:
         """入队，绝不阻塞。队列满就丢并计数。"""
@@ -778,7 +714,7 @@ class SQLiteSink(TraceReader):
                 )
 
     def _run(self) -> None:
-        next_retention = 0.0  # 启动后立即清一次
+        next_retention = 0.0
         while True:
             batch = self._drain()
             if batch is None:
@@ -786,9 +722,6 @@ class SQLiteSink(TraceReader):
             if batch:
                 self._write(batch)
             if self.failed:
-                # 落盘已经废了（磁盘满、权限、库损坏），继续转下去只会对每一批
-                # 重复同一个错误、刷满日志。submit() 也已经不再入队，这个线程
-                # 没有活可干了——退出，记录降级成只有内存缓冲。
                 break
             now = time.monotonic()
             if now >= next_retention:
@@ -816,7 +749,6 @@ class SQLiteSink(TraceReader):
             except queue.Empty:
                 break
             if item is None:
-                # 关闭信号：先把手上这批写完，再退出
                 if batch:
                     self._write(batch)
                 return None
@@ -832,7 +764,6 @@ class SQLiteSink(TraceReader):
             finally:
                 conn.close()
         except sqlite3.Error as e:
-            # 写链路日志失败绝不能影响下载。降级成"只有内存缓冲"并说清原因。
             self.failed = True
             log.error(f"链路记录写入失败，已停止落盘（内存记录不受影响）: {e}")
             return
@@ -850,7 +781,6 @@ class SQLiteSink(TraceReader):
                 removed = cur.rowcount
                 conn.commit()
                 if removed > 0:
-                    # 回收 DELETE 释放的页面。分批做，不独占锁。
                     _ = conn.execute("PRAGMA incremental_vacuum(1000)")
                     conn.commit()
                     log.info(f"链路记录清理：删除 {removed} 条超过 {self.retention_days} 天的记录")
@@ -863,7 +793,6 @@ class SQLiteSink(TraceReader):
         if self._closed:
             return
         self._closed = True
-        # 队列满时塞不进关闭信号，只能等超时——线程是 daemon，进程退出不受影响
         with contextlib.suppress(queue.Full):
             self._queue.put_nowait(None)
         self._thread.join(timeout=timeout)
@@ -893,11 +822,6 @@ def _status_clause(status_class: str) -> str:
         "failure": "status_code < 0",
         "failed": "status_code < 0 OR status_code >= 400",
     }.get(status_class, "")
-
-
-# --------------------------------------------------------------------------- #
-# 记录器
-# --------------------------------------------------------------------------- #
 
 
 @final
@@ -934,7 +858,6 @@ class TraceRecorder:
         self.counters: Counters = Counters()
         self._recent: list[TraceRecord] = []
         self._recent_lock: threading.Lock = threading.Lock()
-        #: 跨天聚合的短 TTL 缓存，键是天数。见 stats()。
         self._window_cache: dict[int, tuple[float, dict[str, Any]]] = {}
         self._window_lock: threading.Lock = threading.Lock()
         self.sink: SQLiteSink | None = None
@@ -949,13 +872,8 @@ class TraceRecorder:
                 retention = f"{self.settings.retention_days} 天" if self.settings.retention_days else "永久"
                 log.info(f"链路记录落盘已启用: {self.sink.path}（保留 {retention}）")
             except (sqlite3.Error, OSError) as e:
-                # 建不了库就退回纯内存，服务照常起。
                 log.error(f"链路记录落盘启用失败，退回内存模式: {e}")
                 self.sink = None
-
-    # -------------------------------------------------------------- #
-    # 埋点
-    # -------------------------------------------------------------- #
 
     @contextmanager
     def track_request(
@@ -1008,7 +926,6 @@ class TraceRecorder:
             with self._recent_lock:
                 self._recent.append(record)
                 if len(self._recent) > self.settings.memory_size:
-                    # 一次多丢一点，避免每条都做一次列表搬移
                     overflow = len(self._recent) - self.settings.memory_size
                     del self._recent[:overflow]
         if self.sink is not None:
@@ -1019,10 +936,6 @@ class TraceRecorder:
 
     def record_rejected(self, reason: str) -> None:
         self.counters.record_rejected(reason)
-
-    # -------------------------------------------------------------- #
-    # 查询（给 Web 端）
-    # -------------------------------------------------------------- #
 
     def recent(
         self,
@@ -1168,7 +1081,6 @@ def _default_node_id() -> str:
     return f"{host}:{os.getpid()}"
 
 
-#: 进程级单例。埋点处直接用，不必层层传递。
 _recorder: TraceRecorder | None = None
 _recorder_lock = threading.Lock()
 

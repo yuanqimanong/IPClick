@@ -26,7 +26,6 @@ from typing_extensions import override
 from ipclick.utils.log_util import log
 
 
-#: 页面自动刷新间隔（秒）
 _REFRESH_SECONDS = 5
 
 _STATUS_COLORS = {
@@ -173,7 +172,6 @@ def make_handler(snapshot_provider: Callable[[], dict[str, Any]]) -> type[BaseHT
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
-            # 状态页是实时数据，不该被任何中间层缓存
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
@@ -194,9 +192,6 @@ def make_handler(snapshot_provider: Callable[[], dict[str, Any]]) -> type[BaseHT
             else:
                 self._send(404, b"not found", "text/plain; charset=utf-8")
 
-        # 只读页面：显式拒绝所有写方法，而不是靠"没实现"来隐式拒绝。
-        # BaseHTTPRequestHandler 对未定义的方法返回 501，语义上不如 405 准确，
-        # 也不能借机说明"为什么不支持"。
         def _reject_write(self) -> None:
             self._send(405, "本页只读，变更请改配置文件".encode(), "text/plain; charset=utf-8")
 

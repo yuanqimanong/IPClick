@@ -52,13 +52,11 @@ class SQLiteAdapter(DatabaseAdapter):
             db_path: SQLite 数据库文件路径
             table_name: 存储日志的表名，默认为 'logs'
         """
-        # 表名会被拼进 SQL，不能来自不受信任的输入
         if not table_name.isidentifier():
             raise ValueError(f"非法的表名: {table_name!r}（只允许标识符字符）")
 
         self.db_path: str = db_path
         self.table_name: str = table_name
-        # 之前算出了 sql_path 却仍用原始 db_path 建连接，相对路径的解析等于白做
         sql_path = PathUtil.resolve_path(db_path)
         PathUtil.ensure_parent_dir(sql_path)
         self.conn: Connection = sqlite3.connect(str(sql_path), check_same_thread=False, timeout=10.0)
@@ -98,7 +96,7 @@ class SQLiteAdapter(DatabaseAdapter):
         """
         record = log_message.record
 
-        timestamp = record["time"].isoformat()  # 时间转换为 ISO 字符串
+        timestamp = record["time"].isoformat()
         level = record["level"].name
         message = record["message"]
         file = record["file"].path
@@ -186,8 +184,6 @@ def _validate_format(value: object) -> str | None:
     return text
 
 
-#: 常见的日志级别别名。loguru 的级别表里没有它们，但用户会这么写——
-#: 尤其 WARN，几乎所有别的日志库都收。挡在这里比让服务起不来强。
 _LEVEL_ALIASES = {"WARN": "WARNING", "FATAL": "CRITICAL", "ERR": "ERROR", "TRACE": "TRACE"}
 
 
@@ -213,23 +209,9 @@ class LogUtil:
 
     _configurations: ClassVar[dict[str, dict[str, Any]]] = {}
     _default_logger_name: ClassVar[str] = "default"
-    #: 调用栈回溯层数：让日志里的文件/行号指向**调用方**，而不是这层封装。
-    #:
-    #: 曾经是 2，因为那时每个方法都套了 @ensure_configured 装饰器，wrapper
-    #: 自己也占一层栈。装饰器去掉之后栈就少了一层——不跟着改的话，每条日志
-    #: 都会指到"调用方的调用方"，而这种错位在日志里看着完全正常，极难发现。
     _depth: ClassVar[int] = 1
-    #: 缓存的 ``logger.opt(depth=...)`` 实例。
-    #:
-    #: 这一句每次调用都会新建一个 Logger 对象，实测 0.77μs——占了整个
-    #: LogUtil.debug 调用（1.74μs）的 44%，而 depth 是个常量，没有任何理由
-    #: 每条日志重算一次。服务端热路径上每请求要打两条日志，这笔钱一直在付。
-    #: init() 与 remove_logger() 会把它置空，重新配置后自动重建。
     _emitter: ClassVar[Any] = None
-    # 只移除本类自己注册的 handler。作为库，不能在 import 时 logger.remove()
-    # 把宿主应用配置好的 loguru handler 一并清掉。
     _own_handler_ids: ClassVar[set[int]] = set()
-    # loguru 自带的默认 handler 是否已摘除（见 _drop_loguru_default_handler）
     _dropped_default_handler: ClassVar[bool] = False
 
     def __init__(self, logger_name: str | None = None):
@@ -250,7 +232,7 @@ class LogUtil:
         log_file: str | Path | None = None,
         base_dir: Path | None = None,
         rotation: str = "10 MB",
-        retention: str | int = "30 days",  # str 表示时间跨度，int 表示保留的文件个数
+        retention: str | int = "30 days",
         adapter: DatabaseAdapter | None = None,
         **kwargs: Any,
     ) -> None:
@@ -278,15 +260,10 @@ class LogUtil:
             "| <level>{message}</level>"
         )
         level = level.upper()
-        # loguru 只认 WARNING，不认 WARN——而"warn"是几乎所有日志库都收的写法，
-        # 配置模板自己一度也把它列为合法值。传进去会抛
-        # `ValueError: Level 'WARN' does not exist`，而它发生在 IPClickServer
-        # 构造期间，表现为"改了个日志级别，服务就起不来了"。收下这个别名。
         level = _LEVEL_ALIASES.get(level, level)
 
         cls._drop_loguru_default_handler()
 
-        # 如果已经存在这个日志器的配置，先移除旧的handler
         if logger_name in cls._configurations:
             cls._remove_handlers(cls._configurations[logger_name]["handler_ids"])
 
@@ -302,8 +279,6 @@ class LogUtil:
         handler_ids.append(console_handler)
 
         if log_file:
-            # 目录 / 文件两种写法都合法，区分在 resolve_log_file 里（见那里的说明）。
-            # 别在这里图省事只补扩展名——那会把 "logs/" 改写成同级的 "logs.log"。
             resolved_path = PathUtil.resolve_log_file(log_file, base_dir)
 
             PathUtil.ensure_parent_dir(resolved_path)
@@ -328,10 +303,8 @@ class LogUtil:
             )
             handler_ids.append(adapter_handler)
 
-        # 重新配置过就让缓存的 emitter 失效（_depth 也可能被改过）
         cls._emitter = None
 
-        # 保存配置
         cls._own_handler_ids.update(handler_ids)
         cls._configurations[logger_name] = {
             "handler_ids": handler_ids,
@@ -361,7 +334,7 @@ class LogUtil:
     def _remove_handlers(cls, handler_ids: list[int]) -> None:
         """移除本类注册过的 handler，忽略已被外部移除的。"""
         for handler_id in handler_ids:
-            with contextlib.suppress(ValueError):  # 可能已被外部移除
+            with contextlib.suppress(ValueError):
                 logger.remove(handler_id)
             cls._own_handler_ids.discard(handler_id)
 
@@ -392,7 +365,6 @@ class LogUtil:
             format=_validate_format(config.get("format")),
             log_file=None if output in ("stdout", "stderr", "") else output,
             rotation=f"{max_size} MB",
-            # max_backups 是"保留几个历史文件"，loguru 的 retention 传 int 正是此意
             retention=int(rotation_config.get("max_backups", 5)),
         )
 
@@ -406,7 +378,6 @@ class LogUtil:
         if logger_name in cls._configurations:
             cls._remove_handlers(cls._configurations[logger_name]["handler_ids"])
             del cls._configurations[logger_name]
-            # 配置没了，下次调用要重新走 _ensure_configured
             cls._emitter = None
 
     @classmethod
@@ -432,8 +403,6 @@ class LogUtil:
         """
         if logger_name not in cls._configurations:
             cls.init(logger_name=logger_name)
-
-    # ==================== 核心日志方法 ====================
 
     @classmethod
     def trace(cls, message: str, *args: Any, **kwargs: Any) -> None:
@@ -468,5 +437,4 @@ class LogUtil:
         cls._emit().exception(message, *args, **kwargs)
 
 
-# 快捷方式
 log = LogUtil()

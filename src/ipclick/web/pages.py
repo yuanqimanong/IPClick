@@ -39,44 +39,22 @@ from ipclick.web.templates import (
 )
 
 
-#: "试一试"页面最多显示多少字节源码。再多的话浏览器渲染会卡，
-#: 而看源码这件事看前几十 KB 基本就够判断了。
 TEST_BODY_LIMIT = 256 * 1024
 
-#: "试一试"页面允许的超时上限（秒）。页面是同步等结果的，
-#: 让它能等十分钟等于给自己留一个占满 worker 的口子。
 TEST_TIMEOUT_MAX = 120.0
 
-#: "试一试"页面允许的重试次数上限。同一个理由：一次点击最多占用
-#: ``TEST_TIMEOUT_MAX × (上限 + 1)`` 秒，再高就该去命令行发了。
-#: 页面上的提示文案是 :data:`ipclick.web.templates.TEST_RETRIES_MAX_HINT`，
-#: 两者由 tests/test_web_pages.py 盯着不许失步。
 TEST_RETRIES_MAX = 5
 
-#: 请求流一页最多多少条。
 TRACE_LIMIT_MAX = 1000
 
-#: 「试一试」的结果最多暂存几条（Post/Redirect/Get 用）。
-#: 只是为了让重定向后的那一次 GET 能取到，不是历史记录——历史看请求流。
 TEST_RESULT_KEEP = 20
 
-#: 生成的机密最多暂存几条。取完即弃，这个数只是防止有人狂点生成把内存占满。
 SECRET_KEEP = 8
 
-#: 粘贴的 curl 命令长度上限。DevTools 导出的最长也就几 KB，
-#: 给到 64 KB 足够宽松，同时挡住"往这里贴一个文件"。
 CURL_MAX_LEN = 64 * 1024
 
-#: 远程组件操作的 RPC 超时（秒）。
-#:
-#: 只覆盖"把任务交出去"这一下，不是等它装完——装是异步的，主控随后轮询。
-#: 给得比普通探测宽是因为对端可能正忙（它是个在干活的节点），但也不能没有上限。
 REMOTE_COMPONENT_TIMEOUT = 15.0
 
-#: 「添加节点」时预填端口的起点。
-#:
-#: 刻意和主控自己那两个默认端口（9527 Web / 9528 gRPC）分开一个号段：混在一起时，
-#: 人看到 9529 分不清"这是谁的"。从 19001 起数，一眼就知道是子节点。
 NODE_PORT_BASE = 19001
 
 
@@ -101,8 +79,6 @@ class _WebContext:
         return True
 
     def invocation_metadata(self) -> tuple[tuple[str, str], ...]:
-        # 刻意不带转发标记：从页面发的请求就该和外部调用方一样，
-        # 该分发就分发——否则"试一试"验不出集群到底通不通。
         return ()
 
 
@@ -123,45 +99,21 @@ class WebPages:
         runtime_ports: dict[str, int] | None = None,
     ):
         self.config: Settings = config
-        #: 进程**实际**在听的端口，键为配置项名（``SERVER.port`` / ``WEB.port``）。
-        #:
-        #: 配置页读的是**文件**（见 :func:`ipclick.web.editable.current_value`），那是
-        #: 它的正确职责——那一格是"要写回文件的值"。但 ``ipclick run --port X`` 不改
-        #: 文件，于是页面显示 9528、进程实际在 X 上，而页面对此一个字都不说。
-        #: 这里存的是第二个数字，只用于**显示**，不参与写回。
         self.runtime_ports: dict[str, int] = dict(runtime_ports or {})
         self.recorder: TraceRecorder = recorder
         self.task_service: TaskService | None = task_service
         self._cluster_snapshot: Any = cluster_snapshot
-        #: 保存节点之后调一次，让改动**立即生效**而不是等重启。由服务端注入
-        #: （它才有权重建转发路由与观测池）。
         self._on_cluster_changed: Callable[[], tuple[bool, str]] | None = on_cluster_changed
         from ipclick.config_loader.writer import target_path
 
-        # 和进程实际读的那个文件保持一致：带 --port 起的实例读的是
-        # ipclick-<端口>.toml，页面要是写回 ipclick.toml 就成了"改了没反应"。
         self.config_path: Path = target_path(config_path, cli_port)
-        #: 上一次保存的结果，渲染完就清掉（POST 之后直接渲染，不做重定向——
-        #: 重定向就得把消息塞进会话或 URL，前者要加状态、后者会被复制粘贴传播）
         self._messages: list[str] = []
         self._errors: list[str] = []
-        #: 「试一试」的结果暂存区（Post/Redirect/Get 用）。
-        #:
-        #: POST 完直接渲染的话，用户按 F5 就会把整次请求重新提交一遍——而这一页
-        #: 的一次提交可能是几十秒的真实浏览器渲染。等久了按 F5 恰恰是最常见的动作。
-        #: 只留最近几条，按 token 取，取完即弃。
         self._test_results: OrderedDict[str, tuple[dict[str, str], dict[str, Any]]] = OrderedDict()
         self._test_lock: threading.Lock = threading.Lock()
-        #: 刚生成的机密。**取完即弃**——"只显示一次"这件事就是靠这个 pop 保证的，
-        #: 服务端不留任何副本。
         self._generated: OrderedDict[str, dict[str, Any]] = OrderedDict()
-        #: 依赖安装任务。装完自动刷新探测缓存与适配器注册表。
         self.installer: InstallManager = InstallManager()
         self.installer.on_finished = self._after_install
-
-    # ------------------------------------------------------------------ #
-    # 请求流
-    # ------------------------------------------------------------------ #
 
     def _query_records(self, query: dict[str, str]) -> tuple[list[TraceRecord], str, dict[str, str]]:
         filters = {
@@ -233,10 +185,6 @@ class WebPages:
             ],
         }
 
-    # ------------------------------------------------------------------ #
-    # 试一试
-    # ------------------------------------------------------------------ #
-
     def _adapter_choices(self) -> list[dict[str, Any]]:
         """「试一试」下拉框的分组数据。
 
@@ -288,7 +236,6 @@ class WebPages:
         cluster = getattr(service, "cluster", None) if service is not None else None
         nodes = list(getattr(cluster, "nodes", ()) or [])
         if not nodes:
-            # 没开转发时本进程没有 cluster 对象，直接读配置
             try:
                 from ipclick.cluster.node import ClusterConfig
 
@@ -357,23 +304,17 @@ class WebPages:
             return {"error_only": True, "error": str(e)}
 
         target = (form.get("target_node") or "").strip()
-        # 显式标注：下面两条分支一条返回 TaskResp、一条经 getattr 拿到的是 Any，
-        # 不标注的话类型检查器会把两者并成 object，后面每一处 response.xxx 都报错。
         response: task_pb2.TaskResp
         try:
             if target:
                 response = self._send_to_node(request, target)
             else:
-                # 异步服务端上 Send 是协程，直接调只会拿到一个没人 await 的
-                # coroutine 对象——页面上表现为静默失败，只有 GC 时才警告一句。
-                # 所以走 send_from_thread 把它投递回服务端的事件循环。
-                # 同步服务上没有这个方法，自然回退到直接调 Send。
                 sender = getattr(self.task_service, "send_from_thread", None)
                 if callable(sender):
                     response = cast("task_pb2.TaskResp", sender(request, cast(Any, _WebContext())))
                 else:
                     response = self.task_service.Send(request, cast(Any, _WebContext()))
-        except Exception as e:  # 页面不该因为一次试探而 500
+        except Exception as e:
             log.exception(f"试一试请求失败：{e}")
             return {"error_only": True, "error": _readable_error(e, target)}
 
@@ -446,11 +387,6 @@ class WebPages:
 
         timeout = max(1.0, min(TEST_TIMEOUT_MAX, _as_number(form.get("timeout"), 30.0, "超时")))
 
-        # 重试次数默认 0 —— 诊断路径不继承服务端的生产重试策略。
-        # 不显式设的话会回落到 [DOWNLOADER.retry].max_attempts（默认 3），一次点击
-        # 就变成 4 次完整请求：浏览器渲染下实测把一次点击拖到 296 秒，而用户想知道
-        # 的只是"这个网址现在能不能抓"，要看的是**第一次**失败的真实原因。
-        # 现在这一项摆到了页面上，想验重试行为的人可以自己调高。
         retries = int(max(0, min(TEST_RETRIES_MAX, _as_number(form.get("max_retries"), 0, "重试次数"))))
 
         request = task_pb2.ReqTask(
@@ -466,7 +402,6 @@ class WebPages:
         if retries:
             request.retry_backoff_seconds = max(0.0, _as_number(form.get("retry_backoff"), 1.0, "重试退避"))
 
-        # 指纹伪装只对 curl_cffi 有意义；留空时服务端按 "chrome" 处理
         if adapter is IPClickAdapter.CURL_CFFI:
             request.impersonate = (form.get("impersonate") or "").strip()
 
@@ -481,9 +416,6 @@ class WebPages:
         if codes:
             request.allowed_status_codes.extend(codes)
 
-        # 浏览器渲染专属。automation_script 还要服务端开了 [BROWSER].allow_scripts
-        # 才会执行——这里照发，让服务端给出那条明确的拒绝理由，而不是页面上先拦一道
-        # 说法不同的。
         if config_json := (form.get("automation_config") or "").strip():
             try:
                 _ = json_lib.loads(config_json)
@@ -521,7 +453,6 @@ class WebPages:
             name, sep, value = line.partition("=")
             if sep and name.strip():
                 request.cookies[name.strip()] = value.strip()
-        # params 在协议里是一个字符串字段（服务端按 JSON 解析），不是 map
         pairs: dict[str, str] = {}
         for line in (form.get("params") or "").splitlines():
             name, sep, value = line.partition("=")
@@ -549,10 +480,6 @@ class WebPages:
             raise ValidationError("选了「用配置文件里的 [PROXY]」，但那一节没有配 host / tunnel_server")
         return resolved
 
-    # ------------------------------------------------------------------ #
-    # 组件
-    # ------------------------------------------------------------------ #
-
     def components_page(self, username: str, csrf: str, *, node_id: str = "") -> str:
         """组件页。``node_id`` 非空时展示的是**那台子节点**的情况。
 
@@ -575,8 +502,6 @@ class WebPages:
                 remote.get("components") or [],
                 username,
                 csrf,
-                # 对端的工具链我们看不到（那要再加一个字段），而这一行的用途是
-                # "确认装到哪个环境去了"——远程时那是对端的事，如实说不知道。
                 toolchain=f"节点 {node_id} 自己的环境",
                 job=remote.get("job"),
                 messages=messages,
@@ -605,10 +530,6 @@ class WebPages:
             active_node="",
             remote=False,
         )
-
-    # ------------------------------------------------------------------ #
-    # AI 接入
-    # ------------------------------------------------------------------ #
 
     def skill_markdown(self) -> str:
         """技能正文。``/skill.md`` 直接吐它，页面里也嵌同一份。"""
@@ -767,10 +688,6 @@ class WebPages:
         registry.refresh()
         log.debug(f"依赖任务 {getattr(job, 'title', '')} 结束，已刷新组件状态与适配器注册表")
 
-    # ------------------------------------------------------------------ #
-    # 配置
-    # ------------------------------------------------------------------ #
-
     def _groups(self, tab: str = "basic") -> list[tuple[str, list[dict[str, Any]]]]:
         groups: list[tuple[str, list[dict[str, Any]]]] = []
         for title, fields in groups_for(tab):
@@ -890,10 +807,6 @@ class WebPages:
             "next_port": self._next_node_port(),
         }
 
-    # ------------------------------------------------------------------ #
-    # 子节点部署材料
-    # ------------------------------------------------------------------ #
-
     def _deploy_plans(self) -> list[Any]:
         """每台节点的部署材料。
 
@@ -967,7 +880,6 @@ class WebPages:
             }
             while len(self._generated) > SECRET_KEEP:
                 _ = self._generated.popitem(last=False)
-        # 只记生成了什么，绝不记值本身——日志经常被收集到集中式系统里
         log.info(f"Web 端生成了新的 {spec.label}（{spec.env}），值只在页面上显示一次")
         return token
 
@@ -990,23 +902,12 @@ class WebPages:
 
         tab = form.get("tab", "basic")
         updates, restart_needed, errors = parse_form(form)
-        # 只保留**真的变了**的项。
-        #
-        # 表单一次会把整页的字段都提交上来，而 parse_form 不知道旧值是什么，
-        # 于是每次保存都报"7 项已写回、这 7 项需要重启"——改一个日志级别却被告知
-        # 要重启，人只会开始无视这句提示，而它在真需要重启时是唯一的信号。
         updates, restart_needed = self._changed_only(updates, restart_needed)
 
-        # 转发开关。复选框天然只有"勾了/没勾"，而配置里是 "on"/"off" 字符串，
-        # 所以单独映射一次而不是硬塞进 Field 的 bool 类型——后者会把
-        # forward = true 写进 toml，那个值 ClusterConfig 不认。
         if "__present__CLUSTER.forward_on" in form:
             updates.setdefault("CLUSTER", {})["forward"] = "on" if "CLUSTER.forward_on" in form else "off"
             restart_needed.append("服务端转发")
 
-        # 表单里出现过任何一个 node_address_N，就说明这次提交带着节点网格——
-        # 哪怕解析出来是空列表。这两件事必须分开：清空最后一台机器的地址是
-        # "把它删掉"，而不是"这次没改节点"，后者会让最后一台永远删不掉。
         has_node_grid = tab == "cluster" and any(k.startswith("node_address_") for k in form)
         nodes = parse_nodes(form) if has_node_grid else []
         if has_node_grid:
@@ -1033,11 +934,9 @@ class WebPages:
         if has_node_grid:
             self._messages[0] += f"，{len(nodes)} 个节点"
         if restart_needed:
-            # 如实说：改完没反应会让人以为保存失败，然后反复点保存
             self._messages.append("这些项要重启 ipclick 才生效：" + "、".join(sorted(set(restart_needed))))
         self._apply_live(updates)
         log.info(f"Web 端保存配置：{'; '.join(changes) or '（仅节点）'}")
-        # 重新读一遍文件，让页面显示的是文件里真实的内容
         self._reload_config()
         if tab == "cluster":
             self._hot_reload_cluster()
@@ -1108,7 +1007,6 @@ class WebPages:
                 changed.setdefault(section, {})[key] = value
                 if field is not None and field.restart:
                     labels.append(field.label)
-        # 转发开关不在 FIELDS 里（它是个映射出来的合成项），照原样保留
         for label in restart_needed:
             if label == "服务端转发" and "CLUSTER" in changed and "forward" in changed["CLUSTER"]:
                 labels.append(label)
@@ -1203,10 +1101,6 @@ class WebPages:
                 record_url=bool(trace_updates.get("record_url", self.recorder.settings.record_url)),
             )
 
-    # ------------------------------------------------------------------ #
-    # 节点
-    # ------------------------------------------------------------------ #
-
     def _nodes(self) -> list[dict[str, Any]]:
         from ipclick.cluster.node import ClusterConfig
         from ipclick.cluster.tokens import cluster_secret
@@ -1259,7 +1153,6 @@ class WebPages:
         )
         return {
             "ok": result.ok,
-            # "连上了但对方没设防"要单独标出来：它算通过，但绝不该被当成一切正常
             "warn": result.ok and result.remote_auth_required is False,
             "title": _probe_title(result),
             "detail": f"{result.detail}（{result.elapsed_ms} ms）",
@@ -1275,10 +1168,6 @@ class WebPages:
         from ipclick.cluster.node import ClusterConfig
 
         return ClusterConfig.from_config(dict(self.config.get("CLUSTER", {}))).nodes
-
-    # ------------------------------------------------------------------ #
-    # 杂项
-    # ------------------------------------------------------------------ #
 
     def _read_config_text(self) -> str:
         """读要改的那个文件。不存在就从随包的模板起一份——否则第一次保存会
@@ -1324,7 +1213,6 @@ class WebPages:
         return {
             "trace": self.recorder.stats(),
             "recent": self.recorder.recent(limit=12),
-            # 五个 extras 全在这里（0.3 只有四个"渲染引擎"，niquests 完全没有展示位）
             "components": snapshot(browser),
             "active_engine": active,
             "config_path": str(self.config_path),
@@ -1346,7 +1234,6 @@ def _job_from_pb(job: Any) -> dict[str, Any]:
         "returncode": job.returncode,
         "elapsed": job.elapsed_seconds,
         "progress": {
-            # 服务端用 -1 表达"量不出来"（proto3 的 double 没有 null）
             "percent": None if percent < 0 else round(percent, 1),
             "done_bytes": job.done_bytes,
             "speed": round(job.speed_bytes),
@@ -1364,7 +1251,6 @@ def _readable_component_error(error: Any, node_id: str) -> str:
     details = (getattr(error, "details", lambda: "")() or "").strip()
 
     if code is grpc.StatusCode.PERMISSION_DENIED:
-        # 对端已经把该说的说清楚了（要改哪一项、为什么默认关），原样透出
         return details or f"节点 {node_id} 未开启远程组件管理"
     if code is grpc.StatusCode.UNIMPLEMENTED:
         return f"节点 {node_id} 的版本低于 0.5，没有远程组件管理接口——先把那台升级上来"

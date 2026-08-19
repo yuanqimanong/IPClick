@@ -23,7 +23,6 @@ from pathlib import Path
 from ipclick.utils.log_util import log
 
 
-#: 默认查找的文件名
 DEFAULT_ENV_FILENAME = ".env"
 
 _ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\"}
@@ -76,7 +75,6 @@ def parse_env(text: str) -> dict[str, str]:
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             quote = value[0]
             value = value[1:-1]
-            # 单引号是字面量，不做转义处理（同 shell）
             if quote == '"':
                 value = _unescape(value)
         else:
@@ -137,8 +135,6 @@ def load_dotenv(path: str | Path | None = None, *, override: bool = False) -> di
     try:
         text = env_file.read_text(encoding="utf-8")
     except OSError:
-        # 读不到就当没有。这里不能抛——.env 是可选的便利设施，
-        # 权限问题不该让整个服务起不来。
         return {}
 
     applied: dict[str, str] = {}

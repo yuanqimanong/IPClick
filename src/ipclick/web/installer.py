@@ -47,19 +47,12 @@ from ipclick.utils.log_util import log
 
 JobStatus = Literal["running", "succeeded", "failed"]
 
-#: 单个任务的输出最多留多少行。``camoufox fetch`` 的进度条能刷出上万行，
-#: 全留着既没用又占内存；出错时真正有用的信息总在最后。
 _OUTPUT_LINES = 300
 
-#: 任务超时（秒）。camoufox 的本体约 1 GB，慢网络下十几分钟是正常的；
-#: 但也不能没有上限——一个卡死的子进程会一直占着线程和一把锁。
 _TIMEOUT = 45 * 60
 
-#: 完成的任务保留多久（秒）。页面轮询要能取到结果，但没必要留一整天。
 _RETAIN = 30 * 60
 
-#: 目录大小的采样间隔（秒）。1 秒够让数字看起来在动，又不至于把一个几万文件的
-#: 目录反复 walk 到成为负担（实测 ms 级）。
 _SAMPLE_INTERVAL = 1.0
 
 
@@ -80,13 +73,9 @@ class Progress:
     进程卡死一模一样。这个类存在的全部理由就是把那两种情况区分开。
     """
 
-    #: 0–100；量不出来时为 None（此时前端画不确定态的条）
     percent: float | None = None
-    #: 目标目录当前有多大（字节）
     done_bytes: int = 0
-    #: 最近一次采样算出的速度（字节/秒）
     speed: float = 0.0
-    #: 给人看的一句话，如 "下载中" / "解压中"
     phase: str = ""
 
     def snapshot(self) -> dict[str, Any]:
@@ -110,10 +99,7 @@ class Job:
     returncode: int | None = None
     started_at: float = field(default_factory=time.time)
     finished_at: float = 0.0
-    #: 进度。装包类任务量不出字节数，只会有从输出里解析到的百分比（常常也没有）。
     progress: Progress = field(default_factory=Progress)
-    #: 这次任务是怎么规划出来的。采样线程靠它知道该盯哪个目录。
-    #: 不进 :meth:`snapshot`——那是给页面的，里面不该有内部对象。
     plan: Plan | None = None
     _output: deque[str] = field(default_factory=lambda: deque(maxlen=_OUTPUT_LINES))
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -126,9 +112,6 @@ class Job:
         会被挤出保留窗口，而那正是出问题时唯一要看的东西。
         """
         percent = _parse_percent(line)
-        # 阶段名从**任意**一行取，不只是进度行。playwright 把
-        # "Downloading Chromium …" 和那条 |■■■| 进度条分成两行输出，只看进度行
-        # 的话永远读不到阶段。
         phase = _parse_phase(line)
         with self._lock:
             if phase:
@@ -148,8 +131,6 @@ class Job:
         return {
             "id": self.id,
             "title": self.title,
-            # 命令原样展示：用户要能核对"到底往哪个环境装了什么"，
-            # 也方便他复制到终端里自己重跑一遍。
             "command": " ".join(self.command),
             "status": self.status,
             "returncode": self.returncode,
@@ -159,21 +140,10 @@ class Job:
         }
 
 
-#: 从一行输出里抠百分比。
-#:
-#: 覆盖 rich（``━━━ 45.2%``）、pip（``45%``）、playwright（``|████ | 45% of 150 MiB``）
-#: 这几种写法——它们都把数字紧挨着一个 ``%``。要求前面是空白或方框类字符，是为了
-#: 不把 URL 里的 ``%E8`` 之类转义序列误当成进度。
 _PERCENT_RE = re.compile(r"(?:^|[\s|\[（(━█▉▊▋▌▍▎▏]) ?(\d{1,3}(?:\.\d+)?)\s?%")
 
-#: ``512.0/1.1 GB`` 这种"已完成/总量"。
-#:
-#: camoufox 的进度条**不显示百分比**——它用 rich 的 ``DownloadColumn``，渲染出来是
-#: ``0.4/1.0 kB``。只认 ``%`` 的话，那 1 GB 下载全程都解析不到任何进度，而它恰恰是
-#: 最需要进度的那一个。
 _RATIO_RE = re.compile(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*([KMGT]?i?B)\b", re.IGNORECASE)
 
-#: 剥掉 ANSI 转义序列（含 CSI 与 OSC）。给子进程 FORCE_COLOR 之后输出里全是这些。
 _ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
 
 
@@ -198,16 +168,11 @@ def _parse_percent(line: str) -> float | None:
         done, total = float(ratio.group(1)), float(ratio.group(2))
     except ValueError:  # pragma: no cover
         return None
-    # 单位只出现在末尾（rich 两边共用一个单位），所以直接比数值即可
     if total <= 0 or done < 0 or done > total:
         return None
     return done / total * 100
 
 
-#: 进度行里那个阶段名 -> 给人看的说法。
-#:
-#: camoufox 下 1 GB 之后还要**解压** 1 GB，后者同样要几分钟。两段都只显示"进行中"
-#: 的话，用户会以为进度条走到 100% 又回到 0% 是出了什么问题。
 _PHASES: tuple[tuple[str, str], ...] = (
     ("downloading", "下载中"),
     ("extracting", "解压中"),
@@ -232,7 +197,6 @@ class Toolchain:
     """用哪条命令装包。"""
 
     kind: Literal["pip", "uv"]
-    #: 可执行部分，如 ``(python, -m, pip)`` 或 ``(uv, pip)``
     executable: tuple[str, ...]
 
     def command(self, verb: str, *args: str) -> tuple[str, ...]:
@@ -309,7 +273,6 @@ def extra_requirements(extra: str) -> tuple[str, ...]:
     found: list[str] = []
     for entry in declared:
         requirement, _, condition = entry.partition(";")
-        # 标记里可能写成 extra == "x" 或 extra=='x'，两种引号都认
         normalized = condition.replace("'", '"').strip()
         if marker in normalized:
             found.append(requirement.strip())
@@ -329,11 +292,6 @@ def _install_targets(component: Component) -> tuple[tuple[str, ...], str]:
     )
 
 
-# --------------------------------------------------------------------------- #
-# 命令规划
-# --------------------------------------------------------------------------- #
-
-#: 支持的动作。
 InstallOp = Literal["install", "uninstall", "browser"]
 
 
@@ -377,7 +335,6 @@ def plan(op: str, extra: str, *, browser_kind: str = "chromium") -> tuple[Plan |
             return None, f"{component.name} 用的是本机已装的 Chrome，不需要下载浏览器本体"
         installed, _ = _package_state(component)
         if not installed:
-            # 先装包再下本体，顺序反了必然失败，不如直接说清楚
             return None, f"请先安装 {component.name} 的 Python 包，再下载浏览器本体"
         command = _browser_command(component, browser_kind)
         if command is None:
@@ -395,8 +352,6 @@ def plan(op: str, extra: str, *, browser_kind: str = "chromium") -> tuple[Plan |
         targets, note = _install_targets(component)
         return Plan("install", component, f"安装 {component.name}", toolchain.command("install", *targets), note), ""
 
-    # 只卸这一个发行版。刻意不追着卸它的依赖：那些可能被别的东西共用，
-    # 连坐卸掉会把环境搞坏，而这里的目的只是"让这个组件不再可用"。
     command = toolchain.command("uninstall", *_uninstall_flags(toolchain), component.distribution)
     return Plan("uninstall", component, f"卸载 {component.name}", command), ""
 
@@ -457,7 +412,7 @@ def execute(
     """
     on_line(f"$ {' '.join(command)}")
     try:
-        process = subprocess.Popen(  # 命令来自白名单常量，shell=False
+        process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -467,7 +422,6 @@ def execute(
             env=_child_env(),
         )
     except OSError as e:
-        # 命令根本起不来（找不到可执行文件、没有执行权限）——原样透出
         on_line(f"无法执行命令：{e}")
         return -1
 
@@ -498,13 +452,7 @@ class InstallManager:
         self._current: Job | None = None
         self._lock: threading.Lock = threading.Lock()
         self._seq: int = 0
-        #: 任务成功后调一次，用来刷新适配器注册表与安装状态缓存。
-        #: 由调用方注入，这样这个模块不必知道 registry 的存在。
         self.on_finished: Any = None
-
-    # ------------------------------------------------------------------ #
-    # 对外动作
-    # ------------------------------------------------------------------ #
 
     def install(self, extra: str) -> tuple[bool, str]:
         """装一个 extra 的 Python 包。"""
@@ -529,10 +477,6 @@ class InstallManager:
             return False, reason
         return self._start(prepared)
 
-    # ------------------------------------------------------------------ #
-    # 状态
-    # ------------------------------------------------------------------ #
-
     def current(self) -> dict[str, Any] | None:
         """正在跑的任务；没有就返回最近一个已完成的。
 
@@ -556,10 +500,6 @@ class InstallManager:
     def busy(self) -> bool:
         with self._lock:
             return self._current is not None
-
-    # ------------------------------------------------------------------ #
-    # 执行
-    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _lookup(extra: str) -> Component | None:
@@ -608,15 +548,6 @@ class InstallManager:
         if root is None:
             return None
 
-        # 基线在**起线程之前**量，不是在线程里量。
-        #
-        # 报的是"这次任务写了多少"而不是目录总大小：playwright 与 patchright 共用
-        # ms-playwright，里面可能已经躺着另一个的 600 MB，报总量的话 patchright
-        # 刚开始下就显示"已写入 638 MB"——那个数字比它要下的东西还大。
-        #
-        # 而基线必须早于子进程的第一个字节。放在线程里量的话，线程被调度得晚一点
-        # （机器忙、GIL 争用）就会把子进程已经写下去的部分算进基线，于是进度永远
-        # 显示 0。这个竞态在真实下载里罕见（要几分钟），却正因为罕见才难查。
         baseline = _dir_size(root)
 
         def sample() -> None:
@@ -626,8 +557,6 @@ class InstallManager:
                 now = time.monotonic()
                 elapsed = max(0.001, now - last_at)
                 job.progress.done_bytes = max(0, size - baseline)
-                # 速度按两次采样之间的增量算。负数（解压完删临时文件）当 0——
-                # 界面上出现一个负速度只会让人以为读错了。
                 job.progress.speed = max(0.0, (size - last_size) / elapsed)
                 last_size, last_at = size, now
 
@@ -646,8 +575,6 @@ class InstallManager:
         level = log.info if job.status == "succeeded" else log.warning
         level(f"Web 端任务结束：{job.title} -> {job.status}（退出码 {returncode}）")
 
-        # 装完/卸完立刻刷新状态，用户不用再去点一次「刷新状态」。
-        # 失败时也刷：可能是装了一半，此时展示的必须是磁盘上的真实情况。
         callback = self.on_finished
         if callback is not None:
             try:
@@ -674,8 +601,6 @@ def _package_state(component: Component) -> tuple[bool, str | None]:
     return package_status(component)
 
 
-#: playwright / patchright 能装的内核。用白名单是因为这个值最终会进命令行——
-#: 它来自 ``[BROWSER].browser`` 配置，而配置是可以从 Web 端改的。
 _BROWSER_KINDS = frozenset({"chromium", "firefox", "webkit"})
 
 
@@ -687,7 +612,6 @@ def _browser_command(component: Component, kind: str = "chromium") -> tuple[str,
     两者不一致时浏览器会下到别处去，症状是"明明下过了却还说没就绪"。
     """
     if component.extra == "camoufox":
-        # camoufox 只有 Firefox 一个内核，也就没有"装哪个"这回事
         return (sys.executable, "-m", "camoufox", "fetch")
     if component.extra in ("playwright", "patchright"):
         target = kind if kind in _BROWSER_KINDS else "chromium"
@@ -740,12 +664,9 @@ def playwright_revisions(engine: str) -> list[tuple[Path, int]]:
             name, revision = entry.get("name"), entry.get("revision")
             if not name or not revision:
                 continue
-            # 清单里写 chromium-headless-shell，磁盘上却是
-            # chromium_headless_shell-1223 —— 目录名把名字里的连字符换成了下划线。
-            # 两种拼法都收，漏掉的后果是那一份体积算不进去（页面上显示得偏小）。
             revisions.add(f"{name}-{revision}")
             revisions.add(f"{name.replace('-', '_')}-{revision}")
-    except Exception as e:  # 包没装、清单格式变了、读不了
+    except Exception as e:
         log.debug(f"读不到 {engine} 的 browsers.json，无法区分 revision：{e}")
         return []
 
@@ -758,8 +679,6 @@ def playwright_revisions(engine: str) -> list[tuple[Path, int]]:
 
 def _browser_root(component: Component) -> Path | None:
     if component.extra == "camoufox":
-        # 不调 camoufox 自己的 camoufox_path()：它默认 download_if_missing=True，
-        # 连"查一下装没装"都能让它开始下 1 GB（见 browser_engines 里的详细说明）。
         base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
         if sys.platform == "win32":
             base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")

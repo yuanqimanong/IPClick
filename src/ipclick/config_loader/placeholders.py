@@ -24,13 +24,8 @@ from __future__ import annotations
 from typing import Any
 
 
-#: 占位符字面量
 PORT_PLACEHOLDER = "{port}"
 
-#: 支持占位符的配置项：``节 -> (键, ...)``。
-#:
-#: 刻意只覆盖这两项而不是"所有看起来像路径的值"：证书路径、可执行文件路径
-#: 那些按端口分离没有任何意义，无差别替换只会制造惊吓。
 PORT_AWARE_KEYS: dict[str, tuple[str, ...]] = {
     "TRACE": ("sqlite_path",),
     "LOG": ("output",),

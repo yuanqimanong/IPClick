@@ -62,8 +62,6 @@ def _as_float(value: Any, field: str, default: float, *, minimum: float = 0.0) -
     """
     if value is None:
         return default
-    # bool 要在数字之前挡掉：float(True) 是 1.0，于是 per_host_qps = true
-    # 会变成"每秒 1 个请求"——一个没人想要、也没人看得出来的值。
     if isinstance(value, bool):
         raise ConfigError(f"[DOWNLOADER] {field} 期望数字，得到布尔值 {value!r}")
     try:
@@ -94,17 +92,11 @@ def _as_int(value: Any, field: str, default: int, *, minimum: int = 0) -> int:
 class LimiterSettings:
     """来自 ``[DOWNLOADER.concurrency]`` 与 ``[DOWNLOADER.rate_limit]``。"""
 
-    #: 单个 host 的并发上限。0 = 不限制
     per_host_max_concurrent: int = 0
-    #: 单个 host 每秒最多发起几个请求。0 = 不限制
     per_host_qps: float = 0.0
-    #: 令牌桶容量（突发额度）。0 = 取 ceil(per_host_qps)，即最多攒够一秒的量
     per_host_burst: int = 0
-    #: 等待额度的上限（秒）。超时抛 HostLimitTimeout，而不是一直占着 worker 线程
     wait_timeout: float = 30.0
-    #: host 条目空闲多久后回收（秒）。爬虫会碰到无穷多域名，不回收就是内存泄漏
     idle_ttl: float = 300.0
-    #: 同时跟踪的 host 上限。超过就强制清一次空闲条目
     max_tracked_hosts: int = 10_000
 
     @property
@@ -173,10 +165,8 @@ class _HostSlot:
     __slots__ = ("active", "last_used", "lock", "semaphore", "tokens", "updated_at", "waiting")
 
     def __init__(self, max_concurrent: int, burst: int):
-        # max_concurrent == 0 表示不限并发，此时不建信号量
         self.semaphore: threading.Semaphore | None = threading.Semaphore(max_concurrent) if max_concurrent else None
         self.lock: threading.Lock = threading.Lock()
-        # 令牌桶初始装满，否则服务刚起来的第一批请求会被无谓地拖慢
         self.tokens: float = float(burst)
         self.updated_at: float = time.monotonic()
         self.active: int = 0
@@ -197,17 +187,10 @@ class HostLimiter:
 
     def __init__(self, settings: LimiterSettings | None = None):
         self.settings: LimiterSettings = settings or LimiterSettings()
-        #: 客户端分发（forward="off"）下本节点分到的 QPS 份额。
-        #: None = 不分片（单机，或服务端转发——那时入口节点算的就是全局的）。
-        #: 由 set_cluster_size() 动态更新：节点上下线时份额跟着变。
         self._share_qps: float | None = None
         self._slots: dict[str, _HostSlot] = {}
         self._slots_lock: threading.Lock = threading.Lock()
         self._last_sweep: float = time.monotonic()
-
-    # ------------------------------------------------------------------ #
-    # 额度
-    # ------------------------------------------------------------------ #
 
     def set_cluster_size(self, live_nodes: int) -> None:
         """告知当前存活节点数，据此重算本节点的 QPS 份额。
@@ -264,7 +247,6 @@ class HostLimiter:
         settings = self.settings
         host = host_of(url) if settings.enabled else ""
         if not host:
-            # 未启用限流，或 URL 里根本没有主机名（后者会在别处被拦下）
             yield
             return
 
@@ -273,8 +255,6 @@ class HostLimiter:
 
         acquired = self._acquire_concurrency(slot, host, deadline)
         try:
-            # 令牌紧挨着真正的请求再取：先拿并发槽能保证上限不被突破，
-            # 后取令牌能让"每秒 N 个"限的是真实发出去的请求。
             self._acquire_token(slot, host, deadline)
             yield
         finally:
@@ -295,7 +275,6 @@ class HostLimiter:
             slot.waiting += 1
         try:
             remaining = deadline - time.monotonic()
-            # timeout<=0 时 Semaphore.acquire 会当成"阻塞等待"，必须显式走非阻塞
             got = slot.semaphore.acquire(timeout=remaining) if remaining > 0 else slot.semaphore.acquire(blocking=False)
         finally:
             with slot.lock:
@@ -326,7 +305,6 @@ class HostLimiter:
                 if slot.tokens >= 1.0:
                     slot.tokens -= 1.0
                     return
-                # 还差多少令牌，就得等多久
                 wait = (1.0 - slot.tokens) / qps
 
             if now + wait > deadline:
@@ -335,17 +313,11 @@ class HostLimiter:
                 )
             time.sleep(wait)
 
-    # ------------------------------------------------------------------ #
-    # 条目管理
-    # ------------------------------------------------------------------ #
-
     def _slot_for(self, host: str) -> _HostSlot:
         with self._slots_lock:
             slot = self._slots.get(host)
             if slot is None:
                 self._maybe_sweep_locked()
-                # 初始令牌数也按分片后的容量：拿 settings.burst 的话，每个新出现的
-                # host 一上来就白送一整份未分片的突发额度。
                 slot = _HostSlot(self.settings.per_host_max_concurrent, math.ceil(self.effective_burst))
                 self._slots[host] = slot
             slot.last_used = time.monotonic()
@@ -368,7 +340,6 @@ class HostLimiter:
             del self._slots[host]
 
         if over_limit and len(self._slots) >= self.settings.max_tracked_hosts:
-            # 全都在用，说明配置和实际负载不匹配——只提醒，不强行踢掉在途请求
             log.warning(
                 f"限流器跟踪的 host 数已达上限 {self.settings.max_tracked_hosts} 且均在使用中，"
                 f"请调大 [DOWNLOADER.concurrency].max_tracked_hosts"

@@ -25,7 +25,6 @@ from ipclick.ports import DEFAULT_GRPC_PORT
 from ipclick.utils.log_util import log
 
 
-#: 支持的发现方式
 DISCOVERY_MODES: frozenset[str] = frozenset({"static", "dns"})
 
 
@@ -42,11 +41,8 @@ class DiscoveryConfig:
     """来自 ``[CLUSTER].discovery``。"""
 
     mode: str = "static"
-    #: dns 模式：要解析的域名
     dns_name: str = ""
-    #: dns 模式：解析出来的地址统一用这个端口
     port: int = DEFAULT_GRPC_PORT
-    #: 重新解析的间隔（秒）。0 表示只在启动时解析一次。
     refresh_interval: float = 30.0
 
     @classmethod
@@ -100,7 +96,6 @@ class DnsDiscovery:
 
     def __init__(self, config: DiscoveryConfig, resolver: Any = None):
         self._config: DiscoveryConfig = config
-        # 注入点，便于测试；默认用标准库
         self._resolver: Any = resolver or socket.getaddrinfo
         self._last: tuple[Node, ...] = ()
 
@@ -128,8 +123,6 @@ class DnsDiscovery:
                 return self._last
             raise ConfigError(f"集群域名 {name} 没有解析出任何地址")
 
-        # id 用 address：DNS 里没有稳定的节点标识，用地址做 id 才能在多次解析
-        # 之间对上同一个节点、保住它的健康状态
         nodes = tuple(Node(id=f"{host}:{port}", host=host, port=port) for host in sorted(addresses))
         if nodes != self._last:
             log.info(f"{name} 解析到 {len(nodes)} 个节点：{', '.join(n.address for n in nodes)}")

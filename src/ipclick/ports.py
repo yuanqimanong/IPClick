@@ -24,13 +24,10 @@ gRPC 服务端   9527   9528   让位
 from __future__ import annotations
 
 
-#: gRPC 服务端默认监听端口。
 DEFAULT_GRPC_PORT = 9528
 
-#: Web 管理端默认监听端口。
 DEFAULT_WEB_PORT = 9527
 
-#: 0.4 及更早的默认值，只用来生成升级提示。
 LEGACY_GRPC_PORT = 9527
 LEGACY_WEB_PORT = 9530
 

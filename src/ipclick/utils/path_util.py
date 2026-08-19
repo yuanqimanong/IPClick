@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 
 
-#: ``[LOG].output`` 填的是**目录**时，在其下生成的日志文件名。
 DEFAULT_LOG_FILENAME = "ipclick.log"
 
 
@@ -25,7 +24,6 @@ class PathUtil:
         if path_obj.is_absolute():
             return path_obj
 
-        # 相对路径需要base_dir
         if base_dir is None:
             base_dir = Path.cwd()
 
@@ -69,8 +67,6 @@ class PathUtil:
         任何错。日志是排障的基础设施，在这里静默配错的代价远大于别处。
         """
         resolved = PathUtil.resolve_path(path, base_dir)
-        # 两条判据缺一不可：写法上像目录（目录可能还没建），或者它已经是个目录
-        # （用户没写结尾的斜杠，但意图很明确）。
         if PathUtil.looks_like_directory(path) or resolved.is_dir():
             return resolved / default_name
         return resolved if resolved.suffix else resolved.with_suffix(".log")

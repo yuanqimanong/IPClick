@@ -31,16 +31,10 @@ from ipclick.exceptions import AdapterError, ValidationError
 from ipclick.utils.log_util import log
 
 
-# 可选依赖：**懒加载**，缺失时降级为 None，由 __init__ 抛 AdapterError。
-#
-# 为什么不在模块级 import：那会把"装没装"的结论固化在进程启动那一刻，
-# 运行时 pip install niquests 之后不重启进程就永远看不到它
-# （详见 :mod:`ipclick.utils.module_probe`）。
 _UNPROBED: Any = object()
 _niquests: Any = _UNPROBED
 _user_agent_cls: Any = _UNPROBED
 
-#: 探测用的顶层模块名
 NIQUESTS_MODULE = "niquests"
 
 
@@ -70,7 +64,6 @@ def _load_user_agent() -> Any:
 
 _SUPPORTED_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
 
-# 允许调用方通过 kwargs 透传的参数
 _PASSTHROUGH_KWARGS = frozenset({"auth", "cert", "hooks"})
 
 
@@ -84,21 +77,15 @@ class NiquestsAdapter(DownloaderAdapter):
     """
 
     adapter_name: str = "niquests"
-    #: niquests 自带 AsyncSession。
     supports_async: bool = True
 
     def __init__(self, settings: AdapterSettings | None = None):
-        # 真正的 import 就发生在这里——"能不能用"的展示层走 find_spec，
-        # 执行路径仍然老老实实 import 一次。
         if _load_niquests() is None:
             raise AdapterError('niquests is not installed. Install it with: pip install "ipclick[niquests]"')
 
         super().__init__(settings)
-        # 按 (proxy, verify) 缓存 Session，以复用连接池
         self._sessions: dict[tuple[str | None, bool], Any] = {}
         self._sessions_lock: threading.Lock = threading.Lock()
-        #: 异步 Session 按 (事件循环, proxy, verify) 缓存 —— 同 curl_cffi，
-        #: 连接池绑定在创建它的循环上，跨循环复用会出问题。
         self._async_sessions: dict[tuple[int, str | None, bool], Any] = {}
         user_agent = _load_user_agent()
         self.ua_generator: Any = user_agent(platforms="desktop") if user_agent is not None else None
@@ -113,15 +100,13 @@ class NiquestsAdapter(DownloaderAdapter):
             if key not in self._sessions:
                 session = _load_niquests().Session()
                 session.verify = verify
-                # 与另外两个适配器保持一致：默认不继承环境里的 HTTP_PROXY，
-                # 代理必须由调用方显式指定。
                 session.trust_env = bool(self.trust_env)
                 if proxy:
                     session.proxies = {"http": proxy, "https": proxy}
                 adapter = _load_niquests().adapters.HTTPAdapter(
                     pool_connections=self.settings.max_keepalive_connections,
                     pool_maxsize=self.settings.max_connections,
-                    max_retries=0,  # 重试由本项目的 retry 装饰器统一负责
+                    max_retries=0,
                 )
                 session.mount("http://", adapter)
                 session.mount("https://", adapter)
@@ -143,8 +128,6 @@ class NiquestsAdapter(DownloaderAdapter):
             "json": kwargs.get("json"),
             "files": kwargs.get("files"),
             "allow_redirects": bool(kwargs.get("allow_redirects", True)),
-            # niquests（同 requests）的 timeout 传单值时同时作用于连接与读取；
-            # 拆成 (连接, 读取) 才能让 [DOWNLOADER].connect_timeout 真正生效。
             "timeout": (self.settings.connect_timeout, kwargs.get("timeout") or self.timeout),
         }
         for key in _PASSTHROUGH_KWARGS:
@@ -211,7 +194,6 @@ class NiquestsAdapter(DownloaderAdapter):
                 raw_response=resp,
             )
         except Exception as e:
-            # 只记一行，堆栈交给 retry 装饰器最终失败时处理
             log.warning(f"niquests request failed for {url}: {e}")
             raise
 
@@ -225,7 +207,7 @@ class NiquestsAdapter(DownloaderAdapter):
         session = _load_niquests().AsyncSession(
             pool_connections=self.settings.max_keepalive_connections,
             pool_maxsize=self.settings.max_connections,
-            retries=0,  # 重试由本项目的 aretry 装饰器统一负责
+            retries=0,
         )
         session.verify = verify
         session.trust_env = bool(self.trust_env)

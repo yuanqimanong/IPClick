@@ -42,8 +42,6 @@ if TYPE_CHECKING:
 class AsyncTaskService(TaskService):
     """异步版任务服务。只覆写 RPC 入口，其余复用父类。"""
 
-    #: 服务端运行所在的事件循环。由 serve_async 在启动时绑定。
-    #: Web 管理端跑在自己的线程里，要把协程投递回这里才能执行。
     _loop: "asyncio.AbstractEventLoop | None" = None
 
     def bind_loop(self, loop: "asyncio.AbstractEventLoop") -> None:
@@ -68,25 +66,8 @@ class AsyncTaskService(TaskService):
         try:
             return future.result(timeout=timeout)
         except TimeoutError:
-            # 页面已经不等了，这次下载就不该继续跑完：它还占着限流额度、
-            # 一条连接和目标站点的一次配额，而结果没有任何人要。
-            # cancel() 会沿 _chain_future 传到循环里那个 Task 上。
             future.cancel()
             raise
-
-    # ------------------------------------------------------------------ #
-    # RPC 入口
-    #
-    # 下面四个方法把父类的同步签名覆写成协程，类型检查器会报
-    # reportIncompatibleMethodOverride —— **它是对的**：AsyncTaskService 不能
-    # 替换 TaskService 使用。这里逐个抑制而不是关掉整条规则，也不是假装没这回事。
-    #
-    # 为什么仍然这么写：两个类由 [SERVER].async_mode 在启动时二选一，进程里
-    # 永远只存在其中一个，不存在"拿到一个不知道是哪种"的调用点——除了 Web 端，
-    # 而那一处已经在运行时挡住了（pages.py 走 getattr(svc, "send_from_thread")，
-    # 并有测试守着）。改成继承一个不含 RPC 方法的共享基类才是正解，但那要重排
-    # 一个 954 行文件的结构，而受影响的是**默认的同步路径**——留作后续独立重构。
-    # ------------------------------------------------------------------ #
 
     @override
     def limiters_for_sharding(self) -> list[Any]:

@@ -16,18 +16,8 @@ from ipclick.trace import TraceRecord
 from ipclick.web.assets import SCRIPT_BOOT, SCRIPT_MAIN, STYLE
 
 
-#: 「重试次数」输入框的提示上界。真正的上界在 :data:`ipclick.web.pages.TEST_RETRIES_MAX`，
-#: 这里只是提示文案——模板层不该 import pages（那会造成 pages ↔ templates 的环）。
 TEST_RETRIES_MAX_HINT = 5
 
-#: 节点地址输入框 placeholder 里那个示例端口。
-#:
-#: **不是**新节点的预填值——那个由 :func:`ipclick.web.pages.next_node_port` 从
-#: 19001 起算。这里只是"地址长什么样"的示范，所以用产品默认的 gRPC 端口。
-#:
-#: 0.5.0 之前这个常量定义了却零引用，placeholder 里写的是字面量 ``9528``：
-#: 同一件事三个来源（常量、字面量、19001 预填），改常量不会跟着变。这正是
-#: :mod:`ipclick.ports` 的模块文档开头警告过的那种失配。
 DEFAULT_GRPC_PORT_HINT = DEFAULT_GRPC_PORT
 
 
@@ -67,11 +57,6 @@ def attr(text: Any) -> str:
     return esc(text)
 
 
-# --------------------------------------------------------------------------- #
-# 导航
-# --------------------------------------------------------------------------- #
-
-#: 简笔图标。内联 SVG——页面不允许任何外部资源，图标字体和图片都不行。
 _ICONS: dict[str, str] = {
     "gauge": '<path d="M2 12a10 10 0 0 1 20 0"/><path d="m12 12 4-4"/><circle cx="12" cy="12" r="1"/>',
     "activity": '<path d="M3 12h4l3 8 4-16 3 8h4"/>',
@@ -88,7 +73,6 @@ _ICONS: dict[str, str] = {
     '<path d="m8.6 10.6 6.8-3.2"/><path d="m8.6 13.4 6.8 3.2"/>',
 }
 
-#: 导航项：``(路径, 标题, 图标)``
 NAV: tuple[tuple[str, str, str], ...] = (
     ("/", "总览", "gauge"),
     ("/trace", "请求流", "activity"),
@@ -101,11 +85,6 @@ NAV: tuple[tuple[str, str, str], ...] = (
 
 def _icon(name: str) -> str:
     return f'<svg viewBox="0 0 24 24" aria-hidden="true">{_ICONS.get(name, "")}</svg>'
-
-
-# --------------------------------------------------------------------------- #
-# 小组件
-# --------------------------------------------------------------------------- #
 
 
 def _rows(pairs: list[tuple[str, Any]]) -> str:
@@ -173,16 +152,6 @@ def _card(title: str, body: str, *, hint: str = "", actions: str = "") -> str:
     return f'<section class="card"><div class="card-head">{head}</div>{body}</section>'
 
 
-# --------------------------------------------------------------------------- #
-# 默认主题
-# --------------------------------------------------------------------------- #
-
-#: ``[WEB].theme`` 的进程级默认值（``light`` / ``dark``）。
-#:
-#: 刻意做成模块级状态而不是逐层传参：它一个进程内只在启动时定一次（改配置要重启），
-#: 而"要传到哪"是**八个**页面函数——为一个常量把八条签名各加一个参数，读代码的人
-#: 每次都要顺着这个参数走一遍才能确认它没在中途被改掉。需要在测试里定死时，
-#: 各 render 函数仍然接受显式的 ``theme=``。
 _default_theme = "light"
 
 
@@ -200,11 +169,6 @@ def _theme_attr(theme: str | None) -> str:
     """
     resolved = theme if theme in ("light", "dark") else _default_theme
     return f' data-default-theme="{attr(resolved)}"'
-
-
-# --------------------------------------------------------------------------- #
-# 登录
-# --------------------------------------------------------------------------- #
 
 
 def render_login(error: str | None = None, *, theme: str | None = None) -> str:
@@ -229,11 +193,6 @@ def render_login(error: str | None = None, *, theme: str | None = None) -> str:
 </div></div>
 <script>{SCRIPT_MAIN}</script>
 </body></html>"""
-
-
-# --------------------------------------------------------------------------- #
-# 页面骨架
-# --------------------------------------------------------------------------- #
 
 
 def _page(
@@ -300,11 +259,6 @@ def _page(
 </body></html>"""
 
 
-# --------------------------------------------------------------------------- #
-# 总览
-# --------------------------------------------------------------------------- #
-
-
 def render_dashboard(snapshot: dict[str, Any], username: str, csrf: str, actions_enabled: bool) -> str:
     if "error" in snapshot:
         return _page(
@@ -354,9 +308,6 @@ def render_dashboard(snapshot: dict[str, Any], username: str, csrf: str, actions
     }
 """
 
-    # 两个端口分开列，各自写清楚是谁的。0.5.0 之前这里只有一行没标注的
-    # 「监听地址」（那是 gRPC 的），而 Web 端口在整个界面上一次都没出现过——
-    # 人开着浏览器看这一页，会理所当然地把那个地址读成"这个网页的地址"。
     rail = f"""
   <h2>服务端</h2>
   <table class="kv">{
@@ -491,7 +442,6 @@ def _component_badge(component: dict[str, Any]) -> str:
     if not component.get("package"):
         return _pill("未装", "mute")
     if component.get("browser") is False:
-        # 包装了但本体没下，是最容易被误判成"能用"的状态
         return _pill("缺本体", "bad")
     if component.get("browser") is None and component.get("kind") == "browser":
         return _pill("本体未知", "warn")
@@ -518,7 +468,6 @@ def _dropped(recorder: dict[str, Any]) -> str:
         return "—"
     if dropped == 0:
         return _pill("0", "ok")
-    # 丢弃必须显眼：静默丢链路记录会让"没有记录"和"没发生过"混为一谈
     return _pill(f"{dropped:,}（写盘跟不上）", "bad")
 
 
@@ -633,16 +582,6 @@ def _cluster_table(nodes: list[dict[str, Any]], csrf: str, actions_enabled: bool
     return f'<div class="scroll"><table class="data"><thead>{head}</thead><tbody>{"".join(rows)}</tbody></table></div>'
 
 
-# --------------------------------------------------------------------------- #
-# 请求流
-# --------------------------------------------------------------------------- #
-
-
-#: 请求流的刷新频率档位：(毫秒, 按钮文字, 副标题里的说法)。0 = 关掉。
-#:
-#: 只给这几档而不是一个数字输入框，是因为这里没有"任意值"的用处：1 秒是盯着看，
-#: 5 秒是开着当背景，30 秒是挂一天也不心疼。给输入框只会让人填出 100ms 然后
-#: 把服务端的 worker 线程全占在渲染上。
 LIVE_INTERVALS: tuple[tuple[int, str, str], ...] = (
     (0, "关闭", "实时刷新已关闭"),
     (1000, "1 秒", "每秒更新"),
@@ -650,7 +589,6 @@ LIVE_INTERVALS: tuple[tuple[int, str, str], ...] = (
     (30000, "30 秒", "每 30 秒更新"),
 )
 
-#: 没选过时用哪一档。5 秒：1 秒会让每次滚动都被重排打断，30 秒又不像"实时"。
 DEFAULT_LIVE_MS = 5000
 
 
@@ -825,9 +763,6 @@ def render_trace(
         )
     )
 
-    # ``data-live-src`` 永远在，用 ``data-live-interval="0"`` 表示关掉。
-    # 0.4 是关掉时把属性整个去掉，于是"关闭"这一档一按就没法在前端再打开了——
-    # 必须重新提交表单、整页重载，而重载正好丢掉这一页最在意的滚动位置。
     live_attrs = f' data-live-src="{attr(fragment_url)}" data-live-interval="{live_ms}"'
     body = f"""
   <section class="card">
@@ -893,15 +828,7 @@ def _daily(daily: list[dict[str, Any]]) -> str:
         '<th class="right">失败</th><th class="right">平均耗时</th></tr>'
     )
     table = f'<div class="scroll"><table class="data"><thead>{head}</thead><tbody>{rows}</tbody></table></div>'
-    # 这里的"天"是 SQLite 按**服务端**本地时区分好的桶（date(ts,'unixepoch','localtime')），
-    # 不能像上面那些时刻一样交给浏览器换算——换算只能挪显示，挪不动已经分好的桶。
-    # 所以如实标注它是服务端时区，别让人以为是自己那边的"今天"。
     return _card("按天趋势", table, hint="按服务端本地时区分天")
-
-
-# --------------------------------------------------------------------------- #
-# 试一试
-# --------------------------------------------------------------------------- #
 
 
 def render_test(
@@ -1034,11 +961,6 @@ def _adapter_select(choices: list[dict[str, Any]], selected: str) -> str:
     return f'<select id="t-adapter" name="adapter">{"".join(groups)}</select>'
 
 
-#: curl_cffi 能伪装的指纹里挑出来的常用几个。
-#:
-#: 不列全部（当前版本有 53 个）：下拉框里塞 53 项没人找得到自己要的那个，而这几个
-#: 覆盖了绝大多数场景。要用别的就直接在输入框里敲——这是个 ``<input list=…>``，
-#: 下拉只是建议，不是白名单。
 IMPERSONATE_SUGGESTIONS: tuple[str, ...] = (
     "chrome",
     "chrome124",
@@ -1099,7 +1021,6 @@ def _test_advanced(form: dict[str, str], *, allow_scripts: bool) -> str:
         "automation_script",
     )
     touched = any((form.get(k) or "").strip() and form.get(k) != "none" for k in advanced_keys)
-    # verify / allow_redirects 默认都是"开"，所以只有被关掉才算动过
     touched = touched or (form and (form.get("verify") != "on" or form.get("allow_redirects") != "on"))
 
     proxy_mode = form.get("proxy_mode") or "none"
@@ -1202,8 +1123,6 @@ def _target_node_row(nodes: list[dict[str, Any]], selected: str) -> str:
         f"{esc(n.get('id'))} — {esc(n.get('address'))}{'（本机）' if n.get('is_self') else ''}</option>"
         for n in nodes
     )
-    # 没开转发时也能点名：这一页会绕过本进程的路由，直连那台机器发一次 gRPC。
-    # 不说清楚的话，"本机不转发"和"点名生效了"看起来是矛盾的。
     hint = (
         "强制打到这一台，跳过负载均衡。验证新加的节点用"
         if forwarding
@@ -1267,11 +1186,6 @@ def _test_result(result: dict[str, Any] | None) -> str:
 """
 
 
-# --------------------------------------------------------------------------- #
-# 组件
-# --------------------------------------------------------------------------- #
-
-
 def render_components(
     components: list[dict[str, Any]],
     username: str,
@@ -1297,8 +1211,6 @@ def render_components(
     browser = [c for c in components if c.get("kind") == "browser"]
     running = bool(job and job.get("status") == "running")
 
-    # playwright / patchright 那张对照表。目录、revision 与体积由 pages 层量好
-    # 传进来——这个模块只管渲染，不碰文件系统。
     shared = [c for c in browser if c.get("extra") in ("playwright", "patchright")]
     revisions = (
         "".join(
@@ -1434,7 +1346,7 @@ def _component_cards(
 ) -> str:
     if not components:
         return '<p class="note">—</p>'
-    _ = csrf  # 按钮走 fetch，CSRF 从 body 的 data-csrf 上取
+    _ = csrf
     return f'<div class="components">{"".join(_component_card(c, bodies, busy) for c in components)}</div>'
 
 
@@ -1464,8 +1376,6 @@ def _component_card(component: dict[str, Any], bodies: dict[str, tuple[str, int]
 
     actions: list[str] = []
     if installed:
-        # 卸载要说清楚"卸的是什么"：pip uninstall 不会删掉那 1 GB 浏览器本体，
-        # 不说的话用户会以为空间释放了。
         location, size = bodies.get(extra, ("", 0))
         leftover = (
             f"\\n\\n注意：只卸 Python 包。浏览器本体（{_bytes(size)}，位于 {location}）不会被删除，需要时请自行删除该目录。"
@@ -1502,12 +1412,6 @@ def _component_card(component: dict[str, Any], bodies: dict[str, tuple[str, int]
     </div>"""
 
 
-# --------------------------------------------------------------------------- #
-# 配置
-# --------------------------------------------------------------------------- #
-
-
-#: 配置页的分页：``(键, 标题, 副标题)``
 CONFIG_TABS: tuple[tuple[str, str, str], ...] = (
     ("basic", "基础设置", "这一台自己的端口、线程、超时、日志、浏览器与链路记录"),
     ("cluster", "集群设置", "转发开关、节点增删、以及每台子节点的部署材料"),
@@ -1553,7 +1457,6 @@ def render_config(
         f"<fieldset><legend>{esc(title)}</legend>{''.join(_config_row(field) for field in fields)}</fieldset>"
         for title, fields in groups
     )
-    # 表单里带上当前分页：保存完要回到人刚才看的那一页，而不是弹回第一页。
     tab_field = f'<input type="hidden" name="tab" value="{attr(active)}">'
 
     if active == "cluster":
@@ -1590,8 +1493,6 @@ def render_config(
   {main}
   {extra}
 """
-    # 保存按钮放右上角：两个分页的表单都很长，按钮跟在最下面的话，改完上面一项
-    # 还要滚到底去点。form 属性让它能提交页面里那个 id="config-form" 的表单。
     actions = (
         '<span class="note">带 <span class="pill bad restart">需重启</span> 的项改完要重启 ipclick</span>'
         '<button class="primary" type="submit" form="config-form">保存到 toml</button>'
@@ -1623,9 +1524,6 @@ def _cluster_tab(cluster: dict[str, Any], sections: str, csrf: str, tab_field: s
         '<p class="note">还没有节点。点右上角「添加节点」，填个 IP 和端口就行——其余用预置默认值。</p>'
     )
 
-    # 转发开关单独拎到最上面：它决定了下面那些节点到底参不参与路由。
-    # 混在 fieldset 里的话，人会以为"加了节点就是集群了"，而实际没开转发时
-    # 本进程根本不分发。
     switch = f"""
   <section class="card">
     <div class="card-head"><h2>服务端转发</h2>
@@ -1844,17 +1742,9 @@ def _config_row(field: dict[str, Any]) -> str:
     name = str(field["name"])
     kind = str(field["kind"])
     value = field.get("value")
-    # 「需重启」用警示色的徽标，不是灰色提示文字里的一个 <b>。
-    #
-    # 它和旁边那句"这个选项是干什么的"完全不是一类信息：后者读一次就够，前者是
-    # 改完之后必须记得做的动作。混在同一行灰字里，人扫过去只会看见解释、漏掉动作，
-    # 然后对着一个"改了没生效"的界面排查。
     restart = '<span class="pill bad restart">需重启</span>' if field.get("restart") else ""
     hint = f'<span class="hint">{esc(field["hint"])}</span>' if field.get("hint") else ""
 
-    # 文件里写的和进程实际在听的不是一个数（`ipclick run --port X` 不改文件）。
-    # 不说出来的话，这一格就是在撒谎——而且是最难查的那种：改它、保存、重启，
-    # 一切"正常"，只是端口根本不是页面上显示的那个。
     running = int(field.get("running") or 0)
     if running:
         hint += (
@@ -1882,11 +1772,6 @@ def _config_row(field: dict[str, Any]) -> str:
         f'<div class="field-row"><label for="{attr(name)}">{esc(field["label"])}{restart}{hint}</label>'
         f"<div>{control}</div></div>"
     )
-
-
-# --------------------------------------------------------------------------- #
-# AI 接入
-# --------------------------------------------------------------------------- #
 
 
 def render_deploy(

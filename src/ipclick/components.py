@@ -35,25 +35,16 @@ ComponentKind = Literal["http", "browser"]
 class Component:
     """一个可选组件（= ``pyproject.toml`` 里的一个 extra）。"""
 
-    #: 适配器名 / 引擎名。这也是「试一试」下拉框里的取值。
     name: str
-    #: ``pip install "ipclick[<extra>]"`` 里的那个 extra
     extra: str
-    #: 探测用的**顶层**模块名。可能有多个（camoufox 还要 playwright 才算装上）。
     modules: tuple[str, ...]
-    #: PyPI 发行版名，用于查版本号。注意它和模块名经常对不上
-    #: （发行版 ``drissionpage`` vs 模块 ``DrissionPage``）。
     distribution: str
     kind: ComponentKind
-    #: 浏览器引擎名。HTTP 适配器为空串。
     engine: str = ""
-    #: 一句话说明它的价值——用户要在五个里选，得知道差别在哪。
     summary: str = ""
-    #: 浏览器本体的准备命令。用系统浏览器的引擎（drissionpage）为空串。
     browser_command: str = ""
 
 
-#: 全部可选组件。顺序即展示顺序。
 COMPONENTS: tuple[Component, ...] = (
     Component(
         name="niquests",
@@ -104,17 +95,12 @@ COMPONENTS: tuple[Component, ...] = (
     ),
 )
 
-#: 按 extra 索引。安装/卸载的白名单就是它的键集合——**绝不**拼接用户输入。
 BY_EXTRA: dict[str, Component] = {c.extra: c for c in COMPONENTS}
 
-#: 按组件名索引
 BY_NAME: dict[str, Component] = {c.name: c for c in COMPONENTS}
 
-#: 核心适配器：随 ``pip install ipclick`` 一起装，卸不掉也不用装。
 CORE_ADAPTER = "curl_cffi"
 
-#: 通用占位值："用浏览器渲染就行，具体引擎由服务端按 [BROWSER].engine 决定"。
-#: **不是** extra —— 它在下拉框里必须和真实组件名区分开，否则会被当成第六个组件。
 GENERIC_BROWSER = "browser"
 
 
@@ -140,12 +126,10 @@ def status(component: Component, browser: BrowserSettings | None = None) -> dict
         "summary": component.summary,
         "package": installed,
         "version": version,
-        # None = 查不出来。宁可显示"未知"，也不要把一台装好的机器误报成没装。
         "browser": body,
         "detail": detail,
         "browser_command": component.browser_command,
         "install": f'pip install "ipclick[{component.extra}]"',
-        # 能不能直接拿来用：包在、且本体不是明确的"没有"
         "ready": installed and body is not False,
     }
 
@@ -183,7 +167,6 @@ def adapter_choices(browser: BrowserSettings | None = None) -> list[dict[str, An
         {
             "value": GENERIC_BROWSER,
             "label": f"{GENERIC_BROWSER}（自动选择引擎）",
-            # 总开关关掉时它一定失败，置灰比让人试一次再看报错强
             "available": enabled,
             "hint": (
                 f"由服务端按 [BROWSER].engine 决定，当前解析为 {active or '—'}"
@@ -203,7 +186,6 @@ def adapter_choices(browser: BrowserSettings | None = None) -> list[dict[str, An
             hint = state["install"]
             available = False
         elif state["browser"] is False:
-            # 包装了但本体没下：这是最容易被误判成"能用"的状态，必须单独说
             hint = f"浏览器本体未就绪：{component.browser_command}"
             available = False
         else:

@@ -46,13 +46,10 @@ class _AsyncSlot:
     """一个 host 的额度。"""
 
     semaphore: asyncio.Semaphore | None
-    #: 下一个请求最早能在什么时刻发出（``time.monotonic()`` 时间轴）
     next_available: float = 0.0
     active: int = 0
     waiting: int = 0
     last_used: float = field(default_factory=time.monotonic)
-    #: 保护 next_available 的原子预约。用 asyncio.Lock 而不是 threading.Lock：
-    #: 后者在协程里持有期间无法让出，等于把并发退化成串行。
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -61,9 +58,6 @@ class AsyncHostLimiter:
 
     def __init__(self, settings: LimiterSettings | None = None) -> None:
         self.settings: LimiterSettings = settings or LimiterSettings()
-        #: 客户端分发（forward="off"）下本节点分到的 QPS 份额。
-        #: None = 不分片（单机，或服务端转发——那时入口节点算的就是全局的）。
-        #: 由 set_cluster_size() 动态更新：节点上下线时份额跟着变。
         self._share_qps: float | None = None
         self._slots: dict[str, _AsyncSlot] = {}
         self._slots_lock: asyncio.Lock = asyncio.Lock()
@@ -180,8 +174,6 @@ class AsyncHostLimiter:
             return
 
         interval = 1.0 / qps
-        # 突发额度：允许 next_available 落后于当前时刻最多 burst 个间隔，
-        # 也就是攒下 burst 个令牌。
         max_lag = max(0.0, self.effective_burst) * interval
 
         async with slot.lock:

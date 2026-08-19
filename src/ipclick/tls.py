@@ -54,21 +54,13 @@ class TLSSettings:
 
     enabled: bool = False
 
-    #: 本端的证书与私钥。服务端必填；客户端只有在服务端要求 mTLS 时才需要。
     cert_file: str | None = None
     key_file: str | None = None
 
-    #: 验证**对端**用的 CA。
-    #: 客户端不填则用系统信任库（对接公网 CA 签发的证书时就该不填）；
-    #: 服务端不填即不验证客户端证书。
     ca_file: str | None = None
 
-    #: 仅服务端：是否强制客户端出示证书（即 mTLS）。
     require_client_cert: bool = False
 
-    #: 仅客户端：证书里的名字与实际连接地址不一致时用它覆盖。
-    #: 典型场景是证书签给 "ipclick.internal" 而你连的是 "10.0.0.5"。
-    #: ⚠️ 这会跳过主机名匹配这一道校验，只应在自签名证书的内网环境里用。
     server_name_override: str | None = None
 
     @classmethod
@@ -106,8 +98,6 @@ def server_credentials(settings: TLSSettings) -> grpc.ServerCredentials:
     if settings.ca_file:
         root_certificates = _read_pem(settings.ca_file, "客户端 CA 证书")
     elif settings.require_client_cert:
-        # 要求客户端出示证书、却不给验证它的 CA，等于"有证书就行"——
-        # 任何自签名证书都能通过，mTLS 形同虚设。这必须是硬错误。
         raise ConfigError(
             "[SECURITY.tls].require_client_cert = true 时必须同时配置 ca_file，"
             "否则任何自签名客户端证书都会被接受，等于没有验证"

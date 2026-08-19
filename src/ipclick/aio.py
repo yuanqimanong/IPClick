@@ -34,8 +34,6 @@ from ipclick.tls import TLSSettings
 from ipclick.utils.log_util import log
 
 
-# grpc.aio 没有随包发 .pyi，EOF 这个哨兵在类型检查器眼里不存在，运行时是有的。
-# 抽成模块级常量，忽略只写一处而不是每个使用点都写。
 _EOF: Any = aio.EOF  # pyright: ignore[reportAttributeAccessIssue]
 
 
@@ -52,7 +50,6 @@ class AsyncStreamedResponse:
         self._closed: bool = False
         self._exhausted: bool = False
 
-        #: 以下三项要等 trailer 到达（即 body 读完）之后才有值
         self.elapsed_ms: int = 0
         self.total_bytes: int = 0
         self.trailer_error: str | None = None
@@ -144,10 +141,6 @@ class AsyncDownloader(ClientBase):
         self._channel: aio.Channel | None = None
         self._stub: task_pb2_grpc.TaskServiceStub | None = None
 
-    # ------------------------------------------------------------------ #
-    # 连接管理
-    # ------------------------------------------------------------------ #
-
     def _get_stub(self) -> task_pb2_grpc.TaskServiceStub:
         """惰性创建并复用 channel。
 
@@ -188,10 +181,6 @@ class AsyncDownloader(ClientBase):
 
     async def __aexit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         await self.close()
-
-    # ------------------------------------------------------------------ #
-    # 请求
-    # ------------------------------------------------------------------ #
 
     async def request(
         self,
@@ -242,10 +231,6 @@ class AsyncDownloader(ClientBase):
         except grpc.RpcError as e:
             raise self._rpc_error(e) from e
 
-    # ------------------------------------------------------------------ #
-    # 流式下载
-    # ------------------------------------------------------------------ #
-
     async def stream(self, url: str, **kwargs: Any) -> AsyncStreamedResponse:
         """流式下载，返回可异步迭代的响应句柄。"""
         task = self._build_task(url=url, **kwargs)
@@ -261,10 +246,6 @@ class AsyncDownloader(ClientBase):
             return await AsyncStreamedResponse.create(call)
         except grpc.RpcError as e:
             raise self._rpc_error(e) from e
-
-    # ------------------------------------------------------------------ #
-    # 批量
-    # ------------------------------------------------------------------ #
 
     async def batch(
         self,
@@ -289,10 +270,6 @@ class AsyncDownloader(ClientBase):
                 yield DownloadResponse.from_protobuf(pb_response)
         except grpc.RpcError as e:
             raise self._rpc_error(e) from e
-
-    # ------------------------------------------------------------------ #
-    # 便捷方法
-    # ------------------------------------------------------------------ #
 
     async def get(self, url: str, params: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
         return await self.request(method=HttpMethod.GET, url=url, params=params, **kwargs)

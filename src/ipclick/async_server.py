@@ -69,7 +69,6 @@ class _AsyncAuthInterceptor(aio.ServerInterceptor):
         if token_matches(token, self._delegate.tokens):
             return await continuation(handler_call_details)
 
-        # 只记方法名，绝不记令牌本身（哪怕是错误的那个）
         log.warning(f"拒绝未通过鉴权的调用: {method}")
         get_recorder().record_rejected("unauthenticated")
         return grpc.unary_unary_rpc_method_handler(_deny)
@@ -100,7 +99,6 @@ def build_async_server(
         interceptors.append(_AsyncAuthInterceptor(auth))
 
     return aio.server(
-        # 只服务于"同步适配器的回退执行"，不再是并发上限。
         migration_thread_pool=futures.ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="ipclick-fallback"
         ),
@@ -132,21 +130,13 @@ async def serve_async(
     **server_kwargs: Any,
 ) -> None:
     """起一个 aio 服务端并等它终止。"""
-    # 把循环记到 service 上：Web 管理端跑在自己的线程里，「试一试」要把协程
-    # 投递回这个循环才能执行（见 AsyncTaskService.send_from_thread）。
     service.bind_loop(asyncio.get_running_loop())
 
     server = build_async_server(**server_kwargs)
     task_pb2_grpc.add_TaskServiceServicer_to_server(service, server)
 
     if health_enabled:
-        # 必须用 aio 版：同步 HealthServicer 的 set() 不是协程，await 它会抛
-        # TypeError 把整个服务端带崩，而症状是"客户端连不上"——很容易被误读
-        # 成端口或防火墙问题。
         from grpc_health.v1 import health_pb2, health_pb2_grpc
-
-        # grpc_health 没为 .health.aio 发类型信息，但运行时确实存在（已实测）。
-        # 这里只忽略"找不到符号"，不忽略其它问题。
         from grpc_health.v1.health import aio as health_aio  # pyright: ignore[reportAttributeAccessIssue]
 
         servicer = health_aio.HealthServicer()

@@ -53,22 +53,15 @@ from ipclick.utils.config_util import Settings
 from ipclick.utils.log_util import log
 
 
-#: 转发超时相对任务自身超时的余量（秒）。子节点自己也要跑完整个请求＋重试，
-#: 入口的截止时间必须比它宽一点，否则入口先超时、子节点还在白跑。
 FORWARD_TIMEOUT_MARGIN = 15.0
 
-#: 自动推算不出任务超时时的兜底转发超时（秒）。
 DEFAULT_FORWARD_TIMEOUT = 120.0
 
-#: 浏览器渲染的冷启动与零碎开销余量（秒）。与 browser_adapter 里的两个常量对齐——
-#: 转发的截止时间要覆盖子节点真实的预算，否则入口会先放弃、子节点却继续干。
 _BROWSER_COLD_START = 60.0
 _BROWSER_OVERHEAD = 15.0
 
-#: 走浏览器渲染的适配器名。它们的耗时量级和 HTTP 适配器完全不同。
 _BROWSER_ADAPTER_NAMES = frozenset({"browser", "playwright", "patchright", "camoufox", "DrissionPage"})
 
-#: 值得换个节点再试的 gRPC 状态码。
 _NODE_FAULT_CODES = frozenset(
     {
         grpc.StatusCode.UNAVAILABLE,
@@ -99,14 +92,6 @@ class _DirectContext:
         return ()
 
 
-# 0.7.0 起去掉了 @final。原本标 final 是合理的——那时只有一个转发实现，
-# 而它继承 TaskService 已经够绕了。现在多了一个 AsyncForwardingTaskService：
-# 它要复用这里全部的路由决策（挑节点、故障转移、防环路、健康计数），只把
-# "本地执行那一跳"换成协程。把这些逻辑再抄一份才是更糟的选择——两份路由代码
-# 失步的表现是"同步和异步模式挑到了不同的节点"，几乎不可能从现象查回来。
-#
-# 子类只允许覆写 RPC 入口。碰 _pool / _forward / self_id 这些内部状态之前，
-# 先想清楚同步那条路会不会跟着变。
 class ForwardingTaskService(TaskService):
     """带服务端转发的 TaskService。
 
@@ -130,8 +115,6 @@ class ForwardingTaskService(TaskService):
         self._secret: str = cluster_secret(dict(config.get("CLUSTER", {})))
 
         self.self_id: str = resolve_self_id(self.cluster, server_host, server_port)
-        # 链路记录里的"谁执行的"必须和节点列表里的 id 是同一套标识，
-        # 否则两边对不上就查不下去。
         if self.self_id:
             self.node_id: str = self.self_id
 
@@ -141,7 +124,6 @@ class ForwardingTaskService(TaskService):
         self._compression: CompressionPolicy = CompressionPolicy(dict(config.get("CLIENT", {})))
         self._forwarded_count: int = 0
         self._local_count: int = 0
-        # 监听地址要留着：热更新节点列表之后要拿它重新识别"我是哪个节点"
         self._server_host: str = server_host
         self._server_port: int = server_port
         self._reload_lock: threading.Lock = threading.Lock()
@@ -155,15 +137,10 @@ class ForwardingTaskService(TaskService):
         self_node = self.cluster.node_by_id(self.self_id)
         log.info(f"集群内部鉴权：{describe_tokens(self.self_id, self_node.token if self_node else '', self._secret)}")
 
-    # ------------------------------------------------------------------ #
-    # 路由
-    # ------------------------------------------------------------------ #
-
     @override
     def Send(self, request: task_pb2.ReqTask, context: ServicerContext) -> task_pb2.TaskResp:
         """按策略决定本地执行还是转发。"""
         if is_forwarded(context):
-            # 已经是转发来的：绝不再转。这是防环路的唯一依据，别加任何例外。
             self._local_count += 1
             return super().Send(request, context)
 
@@ -175,7 +152,6 @@ class ForwardingTaskService(TaskService):
             try:
                 state = self._pool.acquire(exclude=tried)
             except TransportError as e:
-                # 没有别的节点可试了——入口自己兜底，别让请求凭空失败。
                 last_error = str(e)
                 break
 
@@ -191,13 +167,10 @@ class ForwardingTaskService(TaskService):
                 last_error = _rpc_detail(e)
                 state.record_request(success=False)
                 if _is_node_fault(e):
-                    # 节点级故障（连不上、超时、过载）才换人。
-                    # 但"换这一次的人"和"把节点摘掉"是两件事——见 _should_mark_unhealthy。
                     if _should_mark_unhealthy(e):
                         state.mark_unhealthy(last_error)
                     log.warning(f"转发到 {state.node.id} 失败（第 {attempt + 1}/{attempts} 次）：{last_error}")
                     continue
-                # 参数非法、鉴权失败这类换个节点也是同样结果，直接把错误还给调用方
                 log.warning(f"节点 {state.node.id} 拒绝了请求 {request.uuid}：{last_error}")
                 _propagate(context, e)
                 return self._build_error_response(request, last_error)
@@ -206,8 +179,6 @@ class ForwardingTaskService(TaskService):
             self._forwarded_count += 1
             return response
 
-        # 所有子节点都失败：本地执行。入口自己能干活时，"整个集群挂了"不该
-        # 变成"请求失败"——这也是入口默认参与轮询的另一半价值。
         log.warning(f"请求 {request.uuid} 在 {len(tried)} 个节点上转发均失败，改由本节点执行：{last_error}")
         self._local_count += 1
         return super().Send(request, context)
@@ -237,13 +208,9 @@ class ForwardingTaskService(TaskService):
             raise TransportError(f"节点 {node_id!r} 不在集群节点列表里，已有：{[n.id for n in self.cluster.nodes]}")
 
         if node_id == self.self_id:
-            # 点到自己：本地执行。仍然走完整的 Send，这样"点名本机"和"点名别人"
-            # 看到的是同一条处理路径。
             self._local_count += 1
             return super().Send(request, cast(ServicerContext, cast(object, _DirectContext())))
 
-        # 用 state_for 而不是在 available() 里找：一个被标成 unhealthy 的节点
-        # 恰恰是最需要点名试一次的那个。取不到就现造一个（池子刚换过、还没同步）。
         state = self._pool.state_for(node_id) or NodeState(node)
         try:
             response = self._forward(state, request)
@@ -253,10 +220,6 @@ class ForwardingTaskService(TaskService):
         state.record_request(success=True)
         self._forwarded_count += 1
         return response
-
-    # ------------------------------------------------------------------ #
-    # 热更新
-    # ------------------------------------------------------------------ #
 
     def reload_cluster(self, config: Settings) -> tuple[bool, str]:
         """按新配置原地替换节点列表与路由状态，**不重启进程**。
@@ -286,8 +249,6 @@ class ForwardingTaskService(TaskService):
 
             added, removed = self._pool.replace(updated)
 
-            # 到被移除节点的连接要关掉，否则它们会一直挂在那儿占着 fd。
-            # 地址变了但 id 没变的也要关——继续用旧 channel 就是往老地址发。
             stale = set(removed) | {
                 node_id
                 for node_id, old in previous.items()
@@ -295,8 +256,6 @@ class ForwardingTaskService(TaskService):
             }
             self._close_channels(stale)
 
-            # 身份要重新识别：本机可能刚被加进列表（从"只转发"变成"也干活"），
-            # 也可能刚被移出去。
             self.self_id = resolve_self_id(updated, self._server_host, self._server_port)
             if self.self_id:
                 self.node_id = self.self_id
@@ -323,10 +282,6 @@ class ForwardingTaskService(TaskService):
                     channel.close()
                     log.debug(f"已关闭到节点 {node_id} 的转发连接")
 
-    # ------------------------------------------------------------------ #
-    # 转发
-    # ------------------------------------------------------------------ #
-
     def _forward(self, state: NodeState, request: task_pb2.ReqTask) -> task_pb2.TaskResp:
         """把请求原样转给某个节点，并把它的链路信息接回来。
 
@@ -341,9 +296,6 @@ class ForwardingTaskService(TaskService):
         method = METHOD_MAP.get(request.method, "GET")
 
         with self._recorder.track_request(adapter_name, method, uuid=request.uuid, url=request.url) as tr:
-            # 入口这边也留一条记录：Web 端要能看到"经过我的全部流量"。
-            # forwarded=True 且 node_id 指向真正的执行者，两条记录（入口的和
-            # 子节点的）合起来就是完整链路。
             tr.forwarded = True
             tr.node_id = node.id
 
@@ -353,7 +305,6 @@ class ForwardingTaskService(TaskService):
                 request,
                 timeout=self._timeout_for(request),
                 metadata=metadata,
-                # 转发这一跳同样可能带着几十 KB 的自动化脚本
                 compression=self._compression.for_request(request),
             )
 
@@ -361,8 +312,6 @@ class ForwardingTaskService(TaskService):
             tr.size = len(response.content)
             tr.error = response.error_message
             if response.HasField("trace"):
-                # 子节点报的才是真相：适配器可能被解析成具体引擎，重试次数与
-                # 排队时间也只有它知道。
                 tr.node_id = response.trace.node_id or node.id
                 tr.adapter = response.trace.adapter or adapter_name
                 tr.attempts = response.trace.attempts or 1
@@ -393,7 +342,6 @@ class ForwardingTaskService(TaskService):
 
         if self._is_browser_request(request):
             base = max(base, self._browser_budget())
-        # 子节点还要重试：把重试次数也算进去，否则一超时就白跑
         retries = request.max_retries if request.HasField("max_retries") else self.adapter_settings.max_attempts
         return base * max(1, retries + 1) + FORWARD_TIMEOUT_MARGIN
 
@@ -422,9 +370,6 @@ class ForwardingTaskService(TaskService):
         with self._channels_lock:
             if node_id not in self._channels:
                 target = f"{host}:{port}"
-                # 复用客户端那份选项：里面有 enable_http_proxy=0。不关掉的话，
-                # gRPC 会读环境里的 http_proxy，把节点间的内网转发劫到代理上去
-                # （开发机上普遍设了 http_proxy，症状是转发全部 UNAVAILABLE）。
                 options = [*CHANNEL_OPTIONS, *channel_options(self._tls)]
                 if self._tls.enabled:
                     self._channels[node_id] = grpc.secure_channel(
@@ -434,10 +379,6 @@ class ForwardingTaskService(TaskService):
                     self._channels[node_id] = grpc.insecure_channel(target, options=options)
                 log.debug(f"已建立到节点 {node_id} ({target}) 的转发连接")
             return self._channels[node_id]
-
-    # ------------------------------------------------------------------ #
-    # 观测与生命周期
-    # ------------------------------------------------------------------ #
 
     @property
     @override
@@ -470,11 +411,6 @@ class ForwardingTaskService(TaskService):
         super().cleanup()
 
 
-# --------------------------------------------------------------------------- #
-# 身份识别
-# --------------------------------------------------------------------------- #
-
-
 def resolve_self_id(cluster: ClusterConfig, server_host: str = "", server_port: int = 0) -> str:
     """判断本进程对应 ``nodes`` 里的哪一项。
 
@@ -493,7 +429,6 @@ def resolve_self_id(cluster: ClusterConfig, server_host: str = "", server_port: 
             )
         return cluster.self_id
 
-    # 没有节点列表就没有"身份"这回事——单机部署不该看到任何集群相关的告警。
     if not cluster.nodes or not server_port:
         return ""
 
@@ -505,8 +440,6 @@ def resolve_self_id(cluster: ClusterConfig, server_host: str = "", server_port: 
     if len(matches) > 1:
         log.warning(f"有多个节点匹配本机监听地址（{matches}），请显式设置 [CLUSTER].self_id")
         return ""
-    # 只在真的会转发时才提"只转发不执行"——转发关着的话这句话是错的，
-    # 本节点会照常自己执行所有任务。
     if cluster.forwarding_enabled:
         log.warning(
             f"未能在 nodes 里识别出本节点（监听 {server_host}:{server_port}）。"
@@ -525,7 +458,6 @@ def _local_addresses() -> set[str]:
     try:
         hostname = socket.gethostname()
         addresses.add(hostname.lower())
-        # gethostbyname_ex 拿到的是主机名解析出的全部 IPv4，容器与多网卡都能覆盖
         _, _, ips = socket.gethostbyname_ex(hostname)
         addresses.update(ip.lower() for ip in ips)
     except OSError as e:  # pragma: no cover - 取决于本机 DNS 配置

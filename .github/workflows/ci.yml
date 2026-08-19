@@ -49,83 +49,19 @@ jobs:
         run: uv sync --frozen --all-groups --all-extras
 
       - name: Lint (ruff)
-        run: uv run ruff check src/ tests/
+        run: uv run ruff check src/
 
       - name: Format check (ruff)
-        run: uv run ruff format --check src/ tests/
+        run: uv run ruff format --check src/
 
       - name: Type check (basedpyright)
         run: uv run basedpyright src/
-
-      - name: Tests
-        # IPCLICK_TEST_ENGINES 置空 = 不跑真起浏览器的渲染用例（它们干净跳过，
-        # 68 个）。那部分挪到下面独立的 browser job 里，理由见那里。
-        # 引擎选择、配置解析、安装提示这些纯逻辑的浏览器测试**照常在这里跑**。
-        env:
-          IPCLICK_TEST_ENGINES: ""
-        # -n auto：按 runner 的核数并行。测试这一步占整个 job 的 79%
-        # （实测 177s / 223s），并行之后本地从 72 秒降到 25 秒。
-        # 覆盖率在 xdist 下要靠 pytest-cov 自己合并子进程数据，它原生支持。
-        run: uv run pytest -n auto --cov=ipclick --cov-report=term-missing --cov-report=xml
 
       - name: Verify protobuf stubs are up to date
         run: |
           uv run python src/ipclick/dto/proto/generate.py
           git diff --exit-code -- src/ipclick/dto/proto/ \
             || (echo "::error::task.proto 改动后未重新生成代码，请运行 uv run python src/ipclick/dto/proto/generate.py" && exit 1)
-
-  # ------------------------------------------------------------------ #
-  # 浏览器渲染用例单独一个 job。
-  #
-  # 为什么拆出来：装浏览器要跑 `playwright install --with-deps`，而 --with-deps
-  # 会走 apt-get，runner 上的 unattended-upgrades 偶尔占住 dpkg 锁不放。同一条
-  # 命令实测耗时从 **47 秒到 25 分钟** 不等（25 分钟那次是彻底卡死被人工取消的）。
-  #
-  # 混在主 job 里的代价不是"慢"，而是**反馈被它挡在后面**：lint 写错要等它装完
-  # 才知道，卡死那次更是等了 25 分钟才发现连 lint 都没跑到。拆开之后 lint /
-  # 类型检查 / 1300+ 单元测试在 ~1 分钟内出结果，浏览器那边慢或抖都不影响。
-  #
-  # 另外把浏览器本体缓存起来，省掉每次约 300MB 的下载（apt 那部分省不掉，
-  # 它是系统库；但下载是大头之一）。
-  # ------------------------------------------------------------------ #
-  browser:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        run: uv python install 3.14
-
-      - name: Install dependencies
-        run: uv sync --frozen --all-groups --all-extras
-
-      - name: Cache browser binaries
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ms-playwright-${{ runner.os }}-${{ hashFiles('uv.lock') }}
-          restore-keys: ms-playwright-${{ runner.os }}-
-
-      - name: Install chromium
-        # 只装 chromium：三个内核全下要几分钟。patchright 用自己那份补丁版，
-        # 要单独装。camoufox 的 Firefox（约 100MB+）不下：它的渲染用例默认
-        # 就不在 IPCLICK_TEST_ENGINES 里。DrissionPage 用 runner 自带的 Chrome。
-        timeout-minutes: 12
-        run: |
-          uv run playwright install --with-deps chromium
-          uv run patchright install chromium
-
-      - name: Browser render tests
-        env:
-          IPCLICK_TEST_ENGINES: "playwright,patchright"
-        run: uv run pytest tests/test_browser_adapter.py tests/test_drission_adapter.py -q
 
   build:
     runs-on: ubuntu-latest

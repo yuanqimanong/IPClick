@@ -29,25 +29,15 @@ from ipclick.utils.log_util import log
 class SecretSpec:
     """一项机密的登记信息。"""
 
-    #: 环境变量名（正规位置）
     env: str
-    #: 配置文件里的旧位置，``(节, 键)``；节可以用 "." 表示子表，如 "DOWNLOADER.rate_limit"
     section: str
     key: str
-    #: 给人看的名字
     label: str
-    #: 能不能"随便生成一个"。账号名之类不行——它得和对端约定好。
     generatable: bool = False
-    #: **全集群必须一致**。这一位决定了生成之后该说什么话：
-    #: 本机独有的令牌生成即用；共享密钥每台各自生成一个就全对不上了，
-    #: 必须提示"复制到所有其他节点的 .env"。
     shared: bool = False
-    #: 生成时的补充说明
     note: str = ""
 
 
-#: 全部机密。``.env`` 模板、启动警告、config-info、Web 端的"生成"按钮
-#: 四处都从这里生成，不会出现"文档里有但代码里没有"。
 SECRETS: tuple[SecretSpec, ...] = (
     SecretSpec(
         "IPCLICK_AUTH_TOKEN",
@@ -82,7 +72,6 @@ SECRETS: tuple[SecretSpec, ...] = (
     ),
 )
 
-#: 关掉"机密写在配置文件里"这条警告的开关
 SUPPRESS_KEY = "allow_secrets_in_config"
 
 
@@ -113,7 +102,6 @@ def resolve(config: Any, spec: SecretSpec) -> tuple[str | None, str]:
     if isinstance(raw, str) and raw.strip():
         return raw.strip(), "config"
     if isinstance(raw, (list, tuple)) and raw:
-        # 多令牌：这里只回一个用于展示来源，真正的多值解析在 auth.load_tokens
         return str(raw[0]), "config"
     return None, "unset"
 

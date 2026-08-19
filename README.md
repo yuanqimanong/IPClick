@@ -1,6 +1,6 @@
 # IPClick
 
-![IPClick Logo](https://raw.githubusercontent.com/yuanqimanong/IPClick/master/docs/logo.png)
+![IPClick Logo](https://raw.githubusercontent.com/yuanqimanong/IPClick/master/.github/logo.png)
 
 > IPClick 名字灵感来源于动画《Link Click》（时光代理人）。正如时光代理人穿梭于不同的时空执行任务，IPClick 帮助您将 HTTP 请求分发到不同的节点高效执行。
 

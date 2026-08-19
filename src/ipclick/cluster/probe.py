@@ -35,8 +35,6 @@ from ipclick.tls import TLSSettings, channel_credentials, channel_options
 from ipclick.utils.log_util import log
 
 
-#: 单次探测的超时（秒）。探测是人点了按钮在等的动作，宁可早点报"连不上"
-#: 也不要让页面转十几秒——真连得上的节点从来不需要这么久。
 DEFAULT_PROBE_TIMEOUT = 5.0
 
 
@@ -50,20 +48,14 @@ class ProbeResult:
 
     node_id: str
     address: str
-    #: 端口连得上、且对端在跑 IPClick
     reachable: bool
-    #: 集群内部鉴权是否配对。None = 没验（连都没连上，或本地压根没配密钥）
     authenticated: bool | None
     elapsed_ms: int
-    #: 对端**自报**的 id。和节点列表里写的对不上是个真问题——转发的路由、
-    #: 链路记录里的"谁执行的"都以列表里那个为准，对不上就查不下去了。
     remote_id: str = ""
     remote_version: str = ""
-    #: 对端有没有启用鉴权。False = 任何能连到它端口的人都能借它发请求。
     remote_auth_required: bool | None = None
     remote_forward: bool | None = None
     remote_in_flight: int = 0
-    #: 给人看的一句话结论
     detail: str = ""
 
     @property
@@ -115,8 +107,6 @@ def probe_node(
 
     token = token_for(node.id, node.token, secret)
     if token is None:
-        # 本地没配共享密钥、节点也没写 token —— 没有令牌可验，只能报到这一步。
-        # 这不是失败：不开集群内部鉴权是合法选择（但值得说一句）。
         return ProbeResult(
             node_id=node.id,
             address=node.address,
@@ -138,9 +128,6 @@ def _ping(
     from_node: str,
 ) -> ProbeResult:
     target = node.address
-    # 复用客户端那份 channel 选项：里面有 enable_http_proxy=0。不关掉的话
-    # gRPC 会读环境里的 http_proxy，把内网探测劫到代理上去——开发机上普遍设了
-    # http_proxy，症状是探测全部 UNAVAILABLE 而节点其实好好的。
     options = [*CHANNEL_OPTIONS, *channel_options(tls)]
     channel = (
         grpc.secure_channel(target, channel_credentials(tls), options=options)
@@ -171,11 +158,8 @@ def _ping(
 
     detail = "连得上，集群内部鉴权通过"
     if not response.auth_required:
-        # 探测成功本身分不清"我的令牌对"和"它根本不验"，所以对端要自报这一位
         detail = "连得上，但对方未启用鉴权：任何能连到该端口的人都可以借它发请求"
     if response.node_id and response.node_id != node.id:
-        # 转发的路由与链路记录里的"谁执行的"都以节点列表里的 id 为准，
-        # 对不上会让两边的记录拼不到一起
         detail += f"。注意对方自报 id 是 {response.node_id!r}，与列表里的 {node.id!r} 不一致"
 
     return ProbeResult(
@@ -212,8 +196,6 @@ def _from_rpc_error(node: Node, error: grpc.RpcError, started: float) -> ProbeRe
         )
 
     if code is grpc.StatusCode.UNIMPLEMENTED:
-        # 能走到方法查找这一步，说明鉴权拦截器已经放行了——这条恰恰证明令牌是对的。
-        # 滚动升级期间必须单独说，否则会被误报成鉴权失败。
         return ProbeResult(
             node_id=node.id,
             address=node.address,
@@ -227,7 +209,6 @@ def _from_rpc_error(node: Node, error: grpc.RpcError, started: float) -> ProbeRe
     return ProbeResult(
         node_id=node.id,
         address=node.address,
-        # 健康检查刚过就 UNAVAILABLE，多半是探测这一跳撞上了别的问题（TLS、代理）
         reachable=code is not grpc.StatusCode.UNAVAILABLE,
         authenticated=None,
         elapsed_ms=_ms(started),

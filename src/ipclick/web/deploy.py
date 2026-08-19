@@ -31,7 +31,6 @@ import zipfile
 from ipclick.ports import DEFAULT_GRPC_PORT, DEFAULT_WEB_PORT
 
 
-#: 生成的文件里，注释统一带上这一行，说明它是从哪来的。
 _BANNER = "# 由 IPClick 主控的「配置 → 集群设置」生成。改完记得两边保持一致。"
 
 
@@ -44,12 +43,9 @@ class NodePlan:
     address: str
     host: str
     port: int
-    #: 这台机器的 Web 管理端端口。每台都给一个是有意的——出问题时要能单独打开
-    #: 那一台看它自己的请求流，而不是只能去主控上看一个汇总。
     web_port: int
     toml: str
     env: str
-    #: ``(标题, 命令)``。pip / uv / 本地 wheel 三条。
     commands: tuple[tuple[str, str], ...]
 
     @property
@@ -205,13 +201,6 @@ def node_commands(*, port: int, version: str, extras: str = "") -> tuple[tuple[s
     )
 
 
-#: 非默认端口的节点，Web 端口 = gRPC 端口 + 这个偏移。
-#:
-#: 取一万而不是继续用 -1，是因为「添加节点」是**连续**分配端口的
-#: （:data:`ipclick.web.pages.NODE_PORT_BASE` 起 19001、19002、19003…），
-#: 而任何"相差 k"的推导在连续分配下必然自撞：k=1 时 node-2 的 Web 端口
-#: 19001 正好是 node-1 的 gRPC 端口。差一万则要 10000 台节点才谈得上相交，
-#: 而下面还会再核对一遍。
 WEB_PORT_OFFSET = 10000
 
 

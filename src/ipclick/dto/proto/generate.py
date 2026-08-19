@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """重新生成 task.proto 的 Python / gRPC 代码。
 
 用法：
@@ -17,7 +16,6 @@ import sys
 PROTO_DIR = Path(__file__).parent
 PROTO_FILE = "task.proto"
 
-# grpc_tools 生成的顶层导入 -> 包内相对导入
 _ABSOLUTE_IMPORT = "import task_pb2 as task__pb2"
 _RELATIVE_IMPORT = "from . import task_pb2 as task__pb2"
 

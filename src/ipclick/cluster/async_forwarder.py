@@ -58,7 +58,6 @@ class AsyncForwardingTaskService(  # pyright: ignore[reportUnsafeMultipleInherit
     @override
     async def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":  # pyright: ignore[reportIncompatibleMethodOverride]
         if is_forwarded(context):
-            # 已经是转发来的：绝不再转。这是防环路的唯一依据，别加任何例外。
             self._local_count += 1
             return await AsyncTaskService.Send(self, request, context)
 
@@ -71,7 +70,6 @@ class AsyncForwardingTaskService(  # pyright: ignore[reportUnsafeMultipleInherit
             try:
                 state = self._pool.acquire(exclude=tried)
             except TransportError as e:
-                # 没有别的节点可试了——入口自己兜底，别让请求凭空失败。
                 last_error = str(e)
                 break
 
@@ -82,8 +80,6 @@ class AsyncForwardingTaskService(  # pyright: ignore[reportUnsafeMultipleInherit
                 return await AsyncTaskService.Send(self, request, context)
 
             try:
-                # 出站这一跳仍是同步 stub，丢进线程池：不阻塞事件循环，
-                # 但确实占一个线程直到对端回话（见模块注释里的取舍说明）。
                 response = await loop.run_in_executor(None, self._forward, state, request)
             except Exception as e:
                 last_error = str(e)

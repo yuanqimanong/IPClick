@@ -39,11 +39,8 @@ class NodePool:
         self.balancer: LoadBalancer = create_balancer(config.strategy)
         self._lock: threading.Lock = threading.Lock()
 
-        # 节点来源：静态配置或 DNS 发现
         self._discovery: Discovery = discovery or StaticDiscovery(config.nodes)
         self._discovery_config: DiscoveryConfig = discovery_config or DiscoveryConfig()
-        # 构造时已经解析过一轮了，从现在开始计间隔。
-        # 初值给 0 的话 now - 0 必然大于任何间隔，第一次调用就会白白重解析一次。
         self._last_refresh: float = time.monotonic()
 
         initial = self._discovery.resolve()
@@ -51,19 +48,13 @@ class NodePool:
             raise ConfigError("集群模式需要至少一个节点（[CLUSTER].nodes 或 [CLUSTER.discovery]）")
         self._states: list[NodeState] = [NodeState(node) for node in initial]
 
-        # 探活也要走 TLS：服务端开了 TLS 而探活还用明文，会把健康节点全判成挂了
         self._tls: TLSSettings = tls or TLSSettings()
 
         self._stop: threading.Event = threading.Event()
         self._thread: threading.Thread | None = None
-        #: 每轮探测后的回调，参数是健康节点数。见 on_health_change。
         self._health_callbacks: list[Callable[[int], None]] = []
         if start_probing:
             self.start()
-
-    # ---------------------------------------------------------------- #
-    # 探活线程
-    # ---------------------------------------------------------------- #
 
     def start(self) -> None:
         """启动后台探活线程。可重复调用。"""
@@ -83,7 +74,6 @@ class NodePool:
         self._thread = None
 
     def _probe_loop(self) -> None:
-        # 先立刻探一轮，别让首批请求撞在"全 UNKNOWN"的状态上
         self.probe_once()
         self._notify_health()
         while not self._stop.wait(self.config.probe_interval):
@@ -106,10 +96,6 @@ class NodePool:
                 callback(healthy)
             except Exception as e:
                 log.warning(f"健康状态回调失败：{e}")
-
-    # ---------------------------------------------------------------- #
-    # 节点发现
-    # ---------------------------------------------------------------- #
 
     def refresh_nodes(self, *, force: bool = False) -> bool:
         """重新解析节点列表。返回节点集合是否有变化。
@@ -175,7 +161,6 @@ class NodePool:
             existing = {state.node.id: state for state in self._states}
             added = [n.id for n in config.nodes if n.id not in existing]
             removed = [i for i in existing if i not in {n.id for n in config.nodes}]
-            # 地址/权重改了但 id 没变的，要换掉 Node（配置）而保留运行时状态
             refreshed: list[NodeState] = []
             for node in config.nodes:
                 state = existing.get(node.id)
@@ -212,10 +197,6 @@ class NodePool:
                 level = log.info if healthy else log.warning
                 level(f"节点 {state.node.id} ({state.node.address}) -> {state.status.value}: {detail}")
 
-    # ---------------------------------------------------------------- #
-    # 选节点
-    # ---------------------------------------------------------------- #
-
     def available(self) -> list[NodeState]:
         with self._lock:
             return [s for s in self._states if s.is_available]
@@ -242,8 +223,6 @@ class NodePool:
         candidates = [s for s in self.available() if s.node.id not in exclude]
 
         if not candidates:
-            # 全都不可用时，退而求其次：在未被排除的节点里随便挑一个试试。
-            # 完全拒绝服务不如赌一把——探活结果可能已经过时了。
             fallback = [s for s in self._states if s.node.id not in exclude]
             if not fallback:
                 raise TransportError(
@@ -254,10 +233,6 @@ class NodePool:
             candidates = fallback
 
         return self.balancer.pick(candidates)
-
-    # ---------------------------------------------------------------- #
-    # 观测
-    # ---------------------------------------------------------------- #
 
     def snapshot(self) -> dict[str, Any]:
         """给状态页用的整体快照。"""

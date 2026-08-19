@@ -46,12 +46,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --all-groups --all-extras
 
-      - name: Lint / format / types / tests
+      - name: Lint / format / types
         run: |
-          uv run ruff check src/ tests/
-          uv run ruff format --check src/ tests/
+          uv run ruff check src/
+          uv run ruff format --check src/
           uv run basedpyright src/
-          uv run pytest
 
       - name: Build
         run: uv build

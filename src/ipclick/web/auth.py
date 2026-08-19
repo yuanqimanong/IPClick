@@ -27,15 +27,11 @@ from typing import Any
 from ipclick.utils.log_util import log
 
 
-#: 会话有效期（秒）。默认 12 小时——够用一个工作日，又不会长到一张被偷的
-#: cookie 能用一整周。
 DEFAULT_SESSION_TTL = 12 * 3600
 
-#: 同一来源 IP 在 LOCKOUT_WINDOW 秒内失败这么多次后被锁定
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_WINDOW = 300.0
 
-#: 自动生成的密码长度。20 个字符的字母数字约 119 bit 熵，在线撞库无从下手。
 GENERATED_PASSWORD_LENGTH = 20
 
 ENV_USER = "IPCLICK_WEB_USER"
@@ -59,7 +55,6 @@ class WebCredentials:
 
     username: str
     password: str
-    #: 密码是不是本次启动现生成的（决定要不要打印到控制台）
     generated: bool = False
 
     @classmethod
@@ -70,7 +65,6 @@ class WebCredentials:
         ``.env`` 已经在 load_config 阶段注入过环境变量了。
         """
         config = dict(web_config or {})
-        # 环境变量优先：部署环境注入的必须能压过仓库里那份配置文件
         username = (os.getenv(ENV_USER) or str(config.get("username") or "")).strip() or "admin"
         password = (os.getenv(ENV_PASSWORD) or str(config.get("password") or "")).strip()
         if password:
@@ -114,10 +108,6 @@ class SessionStore:
         self._failures: dict[str, _Attempts] = {}
         self._lock: threading.Lock = threading.Lock()
 
-    # ---------------------------------------------------------------- #
-    # 会话
-    # ---------------------------------------------------------------- #
-
     def create(self, username: str) -> tuple[str, str]:
         """新建会话，返回 ``(session_id, csrf_token)``。"""
         session_id = secrets.token_urlsafe(32)
@@ -157,10 +147,6 @@ class SessionStore:
         now = time.monotonic()
         for key in [k for k, v in self._sessions.items() if v.expires_at <= now]:
             del self._sessions[key]
-
-    # ---------------------------------------------------------------- #
-    # 登录限速
-    # ---------------------------------------------------------------- #
 
     def is_locked(self, source: str) -> float:
         """返回该来源还需锁定多少秒；0 表示未锁定。"""

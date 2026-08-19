@@ -23,12 +23,11 @@ from ipclick.exceptions import URLNotAllowedError
 
 DEFAULT_ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
-# 云厂商实例元数据服务。无论是否开启内网拦截都会被拒绝。
 _METADATA_ADDRESSES: frozenset[str] = frozenset(
     {
-        "169.254.169.254",  # AWS / GCP / Azure / 阿里云 / 腾讯云
-        "100.100.100.200",  # 阿里云
-        "fd00:ec2::254",  # AWS IPv6
+        "169.254.169.254",
+        "100.100.100.200",
+        "fd00:ec2::254",
     }
 )
 
@@ -51,7 +50,6 @@ class URLPolicy:
     allowed_schemes: frozenset[str] = DEFAULT_ALLOWED_SCHEMES
     block_metadata_endpoints: bool = True
     block_private_networks: bool = False
-    # 即便开启了内网拦截也放行的主机名/IP（例如内网里确实要抓的服务）
     allowlist: frozenset[str] = field(default_factory=frozenset)
 
     @classmethod

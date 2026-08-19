@@ -38,13 +38,10 @@ class SecureUtil:
         data_list: list[Any] = data if isinstance(data, list) else [data]
 
         for _d in data_list:
-            # 这里判断的是当前元素 _d，不是整个 data。原先写成 isinstance(data, dict)，
-            # 列表里的 dict 元素会走 str() 分支，取决于插入顺序而给出不同哈希。
             result = json.dumps(_d, sort_keys=True, separators=(",", ":")) if isinstance(_d, dict) else str(_d)
             result_cache.append(result)
 
         serialized = "".join(result_cache)
-        # 仅用于生成缓存键，不做任何安全用途
         md5_hash = hashlib.md5(serialized.encode(encoding), usedforsecurity=False)
 
         return md5_hash.hexdigest()[8:24] if short else md5_hash.hexdigest()

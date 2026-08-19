@@ -38,25 +38,13 @@ class Exit(IntEnum):
     """
 
     OK = 0
-    #: 请求发出去了但结果不理想：HTTP >= 400、探测不通、装包退出码非 0。
-    #: 该查的是目标本身。
     FAILED = 1
-    #: 命令行参数写错了（由 click 抛出，这里只是登记下来）。
     USAGE = 2
-    #: 连不上 IPClick 服务端。该查的是进程起没起、地址端口对不对、防火墙。
     UNREACHABLE = 3
-    #: 鉴权失败。该查的是令牌。
     UNAUTHENTICATED = 4
-    #: 参数被服务端拒绝，或本地配置不合法。改调用参数或配置文件。
     REJECTED = 5
 
 
-#: ``--json`` 输出里响应体的默认上限（字符）。
-#:
-#: 64 KiB 是给**上下文窗口**留的余量，不是给磁盘的。一个 AI 调用方拿到 5 MB 的
-#: HTML 之后，那 5 MB 会原样进它的上下文——一次调用就能把整个会话挤爆，而它想要
-#: 的通常只是页面开头那点东西。要完整内容请用 ``-o 文件``（不截断），或者干脆不
-#: 加 ``--json``：那时响应体直接进 stdout，也不截断。
 DEFAULT_BODY_LIMIT = 64 * 1024
 
 
@@ -130,7 +118,6 @@ def classify(error: BaseException) -> Exit:
         return Exit.UNREACHABLE
     if isinstance(error, (ValidationError, ConfigError)):
         return Exit.REJECTED
-    # 服务端限流：请求本身没问题，是发太快了。归到 FAILED，调用方该做的是退避重试。
     if isinstance(error, HostLimitTimeout):
         return Exit.FAILED
     return Exit.FAILED
