@@ -94,3 +94,45 @@ class TestActualRateAfterSharding:
             f"10 个请求用了 {elapsed:.2f}s，按份额 25 QPS 应当约 {expected:.2f}s——"
             "若接近 0.09s 说明分片没生效，仍在按 100 QPS 跑"
         )
+
+
+class TestShardingIsWiredToTheRightLimiter:
+    """份额必须设到**真正参与限流的那个**对象上。
+
+    异步服务继承了同步的 ``host_limiter``，但实际用的是自己那个 asyncio 版。
+    接错的话份额会被设到一个根本不参与限流的对象上——**功能静默失效**，
+    而日志还会照常打出"分片已启用"，是最难发现的一类 bug。
+    """
+
+    def test_sync_service_targets_the_sync_limiter(self) -> None:
+        from ipclick.limiter import HostLimiter
+        from ipclick.services.task_service import TaskService
+        from ipclick.utils.config_util import Settings
+
+        limiters = TaskService(Settings({})).limiters_for_sharding()
+        assert limiters and isinstance(limiters[0], HostLimiter)
+
+    def test_async_service_targets_the_async_limiter(self) -> None:
+        from ipclick.async_limiter import AsyncHostLimiter
+        from ipclick.services.async_task_service import AsyncTaskService
+        from ipclick.utils.config_util import Settings
+
+        limiters = AsyncTaskService(Settings({})).limiters_for_sharding()
+        assert limiters and isinstance(limiters[0], AsyncHostLimiter), (
+            "异步服务把份额接到了同步限流器上——那个对象在异步模式下根本不参与限流"
+        )
+
+    def test_pool_callback_reaches_the_limiter(self) -> None:
+        """端到端：节点池报告健康数 → 限流器份额跟着变。"""
+        from ipclick.limiter import HostLimiter, LimiterSettings
+
+        limiter = HostLimiter(LimiterSettings(per_host_qps=100.0))
+        callbacks: list = []
+        callbacks.append(limiter.set_cluster_size)  # 模拟 pool.on_health_change
+
+        for callback in callbacks:
+            callback(4)
+        assert limiter.effective_qps == 25.0
+        for callback in callbacks:
+            callback(2)
+        assert limiter.effective_qps == 50.0

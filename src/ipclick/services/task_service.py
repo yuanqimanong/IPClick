@@ -186,6 +186,15 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 "内网地址拦截未启用；若服务端对不受信任的调用方开放，请设置 [SECURITY].block_private_networks = true"
             )
 
+    def limiters_for_sharding(self) -> list[Any]:
+        """需要按集群规模分片的限流器。
+
+        异步子类会覆写：它实际用的是自己那个 asyncio 版限流器，而不是继承来的
+        同步 host_limiter。不留这个钩子的话，份额会被设到一个根本不参与限流的
+        对象上——**功能静默失效**，日志还会照常打出"分片已启用"。
+        """
+        return [self.host_limiter]
+
     # ------------------------------------------------------------------ #
     # 适配器
     # ------------------------------------------------------------------ #

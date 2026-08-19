@@ -68,6 +68,11 @@ class AsyncTaskService(TaskService):
         return future.result(timeout=timeout)
 
     @override
+    def limiters_for_sharding(self) -> list[Any]:
+        """异步模式下真正生效的是 _async_limiter，不是继承来的 host_limiter。"""
+        return [self._async_limiter]
+
+    @override
     async def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
         log.debug("Received request: {} for URL: {}", request.uuid, request.url)
         start_time = time.monotonic()

@@ -515,6 +515,8 @@ class IPClickServer:
             else:
                 self.task_service = TaskService(self.config)
 
+            self._wire_rate_sharding()
+
             # 注册服务
             task_pb2_grpc.add_TaskServiceServicer_to_server(self.task_service, self.server)
             self.health.register(self.server)
@@ -606,6 +608,8 @@ class IPClickServer:
         else:
             self.task_service = AsyncTaskService(self.config)
 
+        self._wire_rate_sharding()
+
         listen_addr = f"{server_host}:{server_port}"
         self._listen_addr = listen_addr
 
@@ -634,6 +638,38 @@ class IPClickServer:
             )
         except KeyboardInterrupt:
             log.info("Received KeyboardInterrupt, shutting down...")
+
+    def _wire_rate_sharding(self) -> None:
+        """客户端分发形态下，把 QPS 按存活节点数分片。
+
+        只在**同时满足**这三条时才做，任何一条不满足都是零开销：
+
+        * ``forward = "off"`` —— 服务端转发时所有任务过入口节点，本来就是全局的
+        * 配了 ``[CLUSTER].nodes`` —— 没有集群就没有分片一说
+        * 配了 ``per_host_qps`` —— 没限速就不该凭空造出一个限速
+
+        为此会起一个只探活、不参与任何路由的节点池。这是必要成本：份额要跟着
+        节点上下线变，就得知道现在活着几台。份额更新挂在探测回调上而不是另起
+        定时器——两个独立周期看到的节点状态会错开，而"限流份额"和"路由决策"
+        依据的存活数不一致是很难查的一类问题。
+        """
+        service = self.task_service
+        if service is None or self.cluster_config.forwarding_enabled:
+            return
+        limiters = service.limiters_for_sharding()
+        if not limiters or limiters[0].settings.per_host_qps <= 0 or not self.cluster_config.nodes:
+            return
+
+        if self._node_pool is None:
+            self._start_node_pool()
+        pool = self._node_pool
+        if pool is None:
+            log.warning("集群限流分片未启用：节点池起不来，本节点将按完整 per_host_qps 限速")
+            return
+
+        for limiter in limiters:
+            pool.on_health_change(limiter.set_cluster_size)
+        log.info(f"集群限流分片已启用：{len(self.cluster_config.nodes)} 个节点，份额随健康探测变化")
 
     def _setup_signal_handlers(self):
         """设置信号处理器"""
