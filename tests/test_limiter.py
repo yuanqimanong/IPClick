@@ -9,6 +9,7 @@ import time
 
 import pytest
 
+from ipclick.exceptions import ConfigError
 from ipclick.limiter import HostLimiter, HostLimitTimeout, LimiterSettings, host_of
 
 
@@ -64,16 +65,33 @@ class TestSettings:
     def test_burst_is_zero_when_rate_limiting_off(self):
         assert LimiterSettings().burst == 0
 
-    def test_bad_values_fall_back(self):
-        s = LimiterSettings.from_config(
-            {
-                "concurrency": {"per_host_max_concurrent": "abc", "max_tracked_hosts": 2},
-                "rate_limit": {"per_host_qps": -1},
-            }
-        )
+    def test_bad_values_raise_instead_of_falling_back(self):
+        """写错的限流值必须报错，不能静默回落。
+
+        这条用例原先断言的是回落：`per_host_qps = -1` → 0.0，`"abc"` → 0.0。
+        问题在于 **0.0 的语义恰好是"不限速"**——于是"配置写错"的后果是限流被
+        彻底关掉，日志里一个字都没有。你以为配了 100 QPS，实际在满速锤目标站点，
+        直到对面返 429 或封 IP 才发现，而配置文件看上去完全正常。
+
+        限流是保护性开关，它只能 fail-closed 或吵闹地失败，不能安静地开闸。
+        项目里 `max_workers < 1`、`max_concurrent_rpcs < max_workers` 早就是
+        直接 ConfigError 拒绝启动，这里对齐。
+        """
+        with pytest.raises(ConfigError, match="per_host_max_concurrent"):
+            LimiterSettings.from_config({"concurrency": {"per_host_max_concurrent": "abc"}})
+        with pytest.raises(ConfigError, match="per_host_qps"):
+            LimiterSettings.from_config({"rate_limit": {"per_host_qps": -1}})
+        with pytest.raises(ConfigError, match="max_tracked_hosts"):
+            # 低于下限仍然要拦——原注释说的"否则会疯狂淘汰"依然成立，
+            # 只是从"悄悄换成 10000"改成"当场说清楚"。
+            LimiterSettings.from_config({"concurrency": {"max_tracked_hosts": 2}})
+
+    def test_absent_values_still_use_defaults(self):
+        """没配是"没配"，不是"配错了"——默认值照常。"""
+        s = LimiterSettings.from_config({})
         assert s.per_host_max_concurrent == 0
         assert s.per_host_qps == 0.0
-        assert s.max_tracked_hosts == 10_000, "低于下限的值应回落，否则会疯狂淘汰"
+        assert s.max_tracked_hosts == 10_000
 
 
 class TestDisabled:

@@ -7,7 +7,7 @@ import click
 
 from ipclick import __version__
 from ipclick.adapters.browser_engines import engine_status, resolve_engine
-from ipclick.adapters.browser_settings import BrowserSettings
+from ipclick.adapters.browser_settings import BrowserSettings, describe_max_pages
 from ipclick.auth import load_tokens
 
 # 从子模块直接导入，不走 `from ipclick.cli import agent`：``cli/__init__.py`` 里的
@@ -332,6 +332,9 @@ def config_info(config: Path | None):
         click.echo("")
         click.echo("Browser rendering:")
         if browser.enabled:
+            # 先给个空值：下面的 try 失败时 engine 会未绑定，而"页面上限"那一行
+            # 在 try 之外照样要打。空引擎名走默认单页预算，够用。
+            engine = ""
             try:
                 engine = resolve_engine(browser.engine)
                 status = engine_status(engine, browser)
@@ -341,7 +344,7 @@ def config_info(config: Path | None):
                 click.echo(f"  浏览器本体:   {status.detail or '—'}")
             except Exception as e:  # 引擎名配错
                 click.echo(f"  引擎:         {browser.engine} — 配置错误: {e}")
-            click.echo(f"  页面上限:     {browser.max_pages}")
+            click.echo(f"  页面上限:     {describe_max_pages(browser.max_pages, engine)}")
             click.echo(f"  允许页内 JS:  {browser.allow_scripts}")
         else:
             click.echo("  已关闭")

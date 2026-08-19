@@ -12,7 +12,11 @@ dependencies = [
     "curl-cffi>=0.16.0,<0.17.0",
     "grpcio>=1.83.0,<2.0.0",
     "grpcio-health-checking>=1.83.0,<2.0.0",
-    "protobuf>=6.33.2,<8.0.0",
+    # 下限必须 >= 生成代码的 gencode 版本：src/ipclick/dto/proto/task_pb2.py 里
+    # 有 ValidateProtobufRuntimeVersion(..., 7, 35, 1) 的硬校验，运行时低于它
+    # 就直接 import 失败。实际上 grpcio-health-checking 也顶着同一个下限，
+    # 所以写 6.33.2 装不出问题——但那是靠别人兜着，不是这里声明对了。
+    "protobuf>=7.35.1,<8.0.0",
     "click>=8.4.2,<9.0.0",
     "fake-useragent>=2.2.0,<3.0.0",
     "loguru>=0.7.3,<0.8.0",

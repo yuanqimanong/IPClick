@@ -136,3 +136,61 @@ class TestShardingIsWiredToTheRightLimiter:
         for callback in callbacks:
             callback(2)
         assert limiter.effective_qps == 50.0
+
+
+class TestBurstIsShardedToo:
+    """分片必须**同时**切稳态速率和桶容量。
+
+    只切速率不切容量的漏法极难自查：稳态完全正确（压测一分钟取平均看不出任何
+    问题），只在**流量刚起来的那一下**暴露——每个节点都攒着一整份未分片的突发
+    额度，N 台一起放出来就是 N 倍。而那一刻恰恰是目标站点风控最容易触发的时候，
+    于是现象是"平时好好的，一重启 / 一扩容就被封"。
+    """
+
+    @staticmethod
+    def _both(qps: float, nodes: int) -> tuple[float, float]:
+        settings = LimiterSettings.from_config({"rate_limit": {"per_host_qps": qps}})
+        sync_limiter = HostLimiter(settings)
+        sync_limiter.set_cluster_size(nodes)
+        async_limiter = AsyncHostLimiter(settings)
+        async_limiter.set_cluster_size(nodes)
+        assert sync_limiter.effective_burst == async_limiter.effective_burst, "同步与异步的分片结果必须一致"
+        return sync_limiter.effective_qps, sync_limiter.effective_burst
+
+    @pytest.mark.parametrize("nodes", [1, 2, 4, 10])
+    def test_cluster_wide_burst_stays_within_budget(self, nodes: int) -> None:
+        """把每节点的桶容量乘回节点数，不能超过配置的总额度。"""
+        _, burst = self._both(100, nodes)
+        assert burst * nodes <= 100 + 1e-9, f"{nodes} 个节点瞬时能放出 {burst * nodes}，预算只有 100"
+
+    @pytest.mark.parametrize("nodes", [1, 2, 4, 10])
+    def test_steady_rate_still_adds_up(self, nodes: int) -> None:
+        """切容量不能把稳态速率也切坏了。"""
+        qps, _ = self._both(100, nodes)
+        assert qps * nodes == pytest.approx(100)
+
+    def test_burst_and_qps_shrink_by_the_same_ratio(self) -> None:
+        qps, burst = self._both(100, 4)
+        assert qps == pytest.approx(25)
+        assert burst == pytest.approx(25)
+
+    def test_unsharded_keeps_the_configured_burst(self) -> None:
+        """单机（或未调用 set_cluster_size）时不该有任何变化。"""
+        settings = LimiterSettings.from_config({"rate_limit": {"per_host_qps": 100}})
+        assert HostLimiter(settings).effective_burst == float(settings.burst)
+        assert AsyncHostLimiter(settings).effective_burst == float(settings.burst)
+
+    def test_never_shrinks_to_zero(self) -> None:
+        """容量为 0 的令牌桶永远拿不到令牌——那是挂死，不是限流。
+
+        节点数极多时宁可让总突发略微超预算，也不能造出一个不可能通过的闸门。
+        """
+        _, burst = self._both(100, 128)
+        assert burst >= 1.0
+
+    def test_explicit_burst_is_sharded_as_well(self) -> None:
+        """显式配的 per_host_burst 同样是"全集群的额度"，一样要切。"""
+        settings = LimiterSettings.from_config({"rate_limit": {"per_host_qps": 50, "per_host_burst": 200}})
+        limiter = HostLimiter(settings)
+        limiter.set_cluster_size(4)
+        assert limiter.effective_burst == pytest.approx(50)

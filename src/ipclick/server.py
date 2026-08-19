@@ -12,7 +12,7 @@ from grpc import Server
 
 from ipclick import __version__
 from ipclick.adapters.browser_engines import resolve_engine
-from ipclick.adapters.browser_settings import BrowserSettings
+from ipclick.adapters.browser_settings import BrowserSettings, resolve_max_pages
 from ipclick.auth import AUTH_TOKEN_ENV, TokenAuthInterceptor, load_tokens
 from ipclick.cluster.discovery import create_discovery
 from ipclick.cluster.forwarder import ForwardingTaskService, resolve_self_id
@@ -248,7 +248,7 @@ class IPClickServer:
                 # 并发形态：多进程 / 异步这两项会改变本页某些数字的含义，
                 # 页面要能说清楚，否则人看到"链路记录只有四分之一"会以为丢数据。
                 "processes": _resolve_processes(self._config_path, self._cli_port),
-                "async_mode": bool(dict(self.config.get("SERVER", {})).get("async_mode", False)),
+                "async_mode": _as_strict_bool(dict(self.config.get("SERVER", {})).get("async_mode"), "async_mode"),
                 "default_adapter": DEFAULT_ADAPTER_NAME,
                 "adapters": sorted(ADAPTER_CLASSES),
                 "compression": CompressionPolicy(dict(self.config.get("CLIENT", {}))).describe(),
@@ -272,7 +272,10 @@ class IPClickServer:
             },
             "browser": {
                 "engine": engine,
+                # 原始值保留（机器读的字段不该变类型），另给一个实际生效的：
+                # max_pages = 0 是"按内存自动推导"，只报 0 会让人以为并发被关了。
                 "max_pages": browser.max_pages,
+                "max_pages_effective": resolve_max_pages(browser.max_pages, engine),
                 "allow_scripts": browser.allow_scripts,
             },
             "cluster": self._cluster_summary(),
@@ -429,6 +432,11 @@ class IPClickServer:
         max_concurrent_streams: int = int(server_config.get("max_concurrent_streams", 0) or 0) or max(
             100, max_concurrent_rpcs
         )
+        # max_concurrent_rpcs 下面有 `< max_workers` 兜着，负数会当场炸；这一项
+        # 原先什么检查都没有，负数被原样喂给 grpc 选项，行为由 C 层决定（既不报错
+        # 也不生效），表现为"我明明配了并发上限却不起作用"。
+        if max_concurrent_streams < 1:
+            raise ConfigError(f"SERVER.max_concurrent_streams 必须 >= 1，当前为 {max_concurrent_streams}")
 
         # 鉴权：令牌来自环境变量 IPCLICK_AUTH_TOKEN 或 [SECURITY].auth_token
         security_config = dict(self.config.get("SECURITY", {}))
@@ -453,7 +461,7 @@ class IPClickServer:
         warn_secrets_in_config(self.config)
 
         # [SERVER].async_mode：换成 grpc.aio 服务端。默认关，见 async_server 的模块注释。
-        if bool(server_config.get("async_mode", False)):
+        if _as_strict_bool(server_config.get("async_mode"), "async_mode"):
             self._start_async(
                 server_host=server_host,
                 server_port=server_port,
@@ -721,6 +729,33 @@ class IPClickServer:
         self.recorder.close()
 
         log.info("IPClick server stopped")
+
+
+def _as_strict_bool(raw: object, field: str, default: bool = False) -> bool:
+    """按布尔读一个配置项。含糊的值当场报错，不猜。
+
+    不能直接 ``bool()``：TOML 里给布尔值加引号是最常见的笔误之一，而
+    ``bool("false")`` 是 **True**。于是 ``async_mode = "false"`` 会**打开**实验性
+    异步模式——配置文件上白纸黑字写着关，跑起来却是开的，且没有任何提示。
+    人会在一个自以为没开的模式上排查问题，这类事故最费时间。
+
+    能明确判读的字符串照收（从环境变量注入配置时值本来就是字符串），
+    真正含糊的才拒绝。
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in ("true", "yes", "on", "1"):
+            return True
+        if s in ("false", "no", "off", "0", ""):
+            return False
+        raise ConfigError(f"SERVER.{field} 期望布尔值（true/false），得到 {raw!r}")
+    if isinstance(raw, int):
+        return bool(raw)
+    raise ConfigError(f"SERVER.{field} 期望布尔值（true/false），得到 {raw!r}")
 
 
 def _resolve_processes(config_path: str | None, port: int | None) -> int:

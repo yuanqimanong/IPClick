@@ -165,7 +165,11 @@ class BrowserSettings:
             script_timeout=_as_float(timeout.get("script_exec"), defaults.script_timeout),
             wait_until=wait_until,
             block_resources=block_resources,
-            max_pages=_as_int(config.get("max_pages"), defaults.max_pages),
+            # minimum=0 是关键：0 不是"非法的小值"，而是"按可用内存自动推导"这个
+            # 特性的开关（见 resolve_max_pages）。用默认的 minimum=1 会把它判成
+            # 低于下限、静默回落到静态默认值 4 —— 于是 max_pages = 0 和不写这一行
+            # 完全等价，整个自动推导从配置文件根本走不到。
+            max_pages=_as_int(config.get("max_pages"), defaults.max_pages, minimum=0),
             allow_scripts=bool(config.get("allow_scripts", defaults.allow_scripts)),
             proxy_gateway=gateway,
             proxy_bypass=_as_str_tuple(proxy.get("bypass_list")),
@@ -175,7 +179,14 @@ class BrowserSettings:
         )
 
 
-__all__ = ["BLOCKABLE_RESOURCES", "BROWSER_KINDS", "WAIT_UNTIL_CHOICES", "BrowserSettings"]
+__all__ = [
+    "BLOCKABLE_RESOURCES",
+    "BROWSER_KINDS",
+    "WAIT_UNTIL_CHOICES",
+    "BrowserSettings",
+    "describe_max_pages",
+    "resolve_max_pages",
+]
 
 
 #: 每个并发页面的内存预算（MB），按引擎区分。
@@ -277,3 +288,14 @@ def resolve_max_pages(configured: int, engine: str) -> int:
     by_memory = usable // budget
     by_cpu = os.cpu_count() or 1
     return max(1, min(by_memory, by_cpu, MAX_AUTO_PAGES))
+
+
+def describe_max_pages(configured: int, engine: str) -> str:
+    """给人看的页面上限。
+
+    只显示配置的原始值会误导：配了 ``0``（自动推导）的人看到"页面上限 0"，
+    合理的推断是"并发被关掉了"或"这个特性没生效"，而实际生效的是推导出来的
+    那个数。状态页、CLI、启动日志三处都曾这么显示。
+    """
+    resolved = resolve_max_pages(configured, engine)
+    return str(resolved) if configured > 0 else f"{resolved}（auto）"

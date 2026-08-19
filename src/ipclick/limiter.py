@@ -46,20 +46,48 @@ class HostLimitTimeout(IPClickError):
     """
 
 
-def _as_float(value: Any, default: float, *, minimum: float = 0.0) -> float:
+def _as_float(value: Any, field: str, default: float, *, minimum: float = 0.0) -> float:
+    """读一个浮点配置项。**写错就报错，不静默取默认值。**
+
+    这两个解析器管的是限流，而限流是**保护性开关**——它的作用是别把目标站点
+    打到封你。原先的实现是无声回落：``per_host_qps = "abc"`` 和 ``-5`` 都会
+    变成 0.0，而 0.0 在这里的语义恰好是"不限速"。
+
+    也就是说：配置写错的后果是限流被彻底关掉，且日志里一个字都没有。你以为
+    自己配了 100 QPS，实际在满速锤对方，直到对面开始返 429 或直接封 IP 才发现。
+    对一个保护性开关来说，这是最坏的失败方向——**它必须 fail-closed 或者吵闹地
+    失败，不能安静地打开闸门**。
+
+    键不存在（``None``）仍然走默认值：那是"没配置"，不是"配错了"。
+    """
+    if value is None:
+        return default
+    # bool 要在数字之前挡掉：float(True) 是 1.0，于是 per_host_qps = true
+    # 会变成"每秒 1 个请求"——一个没人想要、也没人看得出来的值。
+    if isinstance(value, bool):
+        raise ConfigError(f"[DOWNLOADER] {field} 期望数字，得到布尔值 {value!r}")
     try:
         result = float(value)
     except (TypeError, ValueError):
+        raise ConfigError(f"[DOWNLOADER] {field} 期望数字，得到 {value!r}") from None
+    if result < minimum:
+        raise ConfigError(f"[DOWNLOADER] {field} 不能小于 {minimum:g}，得到 {result:g}")
+    return result
+
+
+def _as_int(value: Any, field: str, default: int, *, minimum: int = 0) -> int:
+    """读一个整数配置项。语义同 :func:`_as_float`——写错就报错。"""
+    if value is None:
         return default
-    return result if result >= minimum else default
-
-
-def _as_int(value: Any, default: int, *, minimum: int = 0) -> int:
+    if isinstance(value, bool):
+        raise ConfigError(f"[DOWNLOADER] {field} 期望整数，得到布尔值 {value!r}")
     try:
         result = int(value)
     except (TypeError, ValueError):
-        return default
-    return result if result >= minimum else default
+        raise ConfigError(f"[DOWNLOADER] {field} 期望整数，得到 {value!r}") from None
+    if result < minimum:
+        raise ConfigError(f"[DOWNLOADER] {field} 不能小于 {minimum}，得到 {result}")
+    return result
 
 
 @dataclass(frozen=True)
@@ -97,13 +125,30 @@ class LimiterSettings:
         defaults = cls()
         return cls(
             per_host_max_concurrent=_as_int(
-                concurrency.get("per_host_max_concurrent"), defaults.per_host_max_concurrent
+                concurrency.get("per_host_max_concurrent"),
+                "concurrency.per_host_max_concurrent",
+                defaults.per_host_max_concurrent,
             ),
-            per_host_qps=_as_float(rate.get("per_host_qps"), defaults.per_host_qps),
-            per_host_burst=_as_int(rate.get("per_host_burst"), defaults.per_host_burst),
-            wait_timeout=_as_float(concurrency.get("per_host_wait_timeout"), defaults.wait_timeout, minimum=0.0),
-            idle_ttl=_as_float(concurrency.get("per_host_idle_ttl"), defaults.idle_ttl, minimum=1.0),
-            max_tracked_hosts=_as_int(concurrency.get("max_tracked_hosts"), defaults.max_tracked_hosts, minimum=16),
+            per_host_qps=_as_float(rate.get("per_host_qps"), "rate_limit.per_host_qps", defaults.per_host_qps),
+            per_host_burst=_as_int(rate.get("per_host_burst"), "rate_limit.per_host_burst", defaults.per_host_burst),
+            wait_timeout=_as_float(
+                concurrency.get("per_host_wait_timeout"),
+                "concurrency.per_host_wait_timeout",
+                defaults.wait_timeout,
+                minimum=0.0,
+            ),
+            idle_ttl=_as_float(
+                concurrency.get("per_host_idle_ttl"),
+                "concurrency.per_host_idle_ttl",
+                defaults.idle_ttl,
+                minimum=1.0,
+            ),
+            max_tracked_hosts=_as_int(
+                concurrency.get("max_tracked_hosts"),
+                "concurrency.max_tracked_hosts",
+                defaults.max_tracked_hosts,
+                minimum=16,
+            ),
         )
 
 
@@ -183,6 +228,28 @@ class HostLimiter:
         """本节点实际生效的 QPS。未分片时就是配置值。"""
         return self._share_qps if self._share_qps is not None else self.settings.per_host_qps
 
+    @property
+    def effective_burst(self) -> float:
+        """本节点实际生效的突发额度（令牌桶容量）。
+
+        **必须和 :attr:`effective_qps` 一起分片。** 只切稳态速率、不切桶容量的话：
+        配 100 QPS 部署 4 台，每台稳态 25 QPS 是对的，但每台仍攒 100 个令牌，
+        集群瞬时能放出 400 个——而 burst 的全部意义就是"允许多大的瞬时尖峰"。
+        10 台就是 1000。
+
+        这种漏法特别难自查：**稳态是对的**，压测跑一分钟取平均完全正常，
+        只在**流量刚起来的那一下**暴露。而那恰恰是目标站点风控最容易触发的时刻，
+        于是现象变成"平时好好的，一重启/一扩容就被封"。
+
+        向下取整会把小集群的 burst 抹成 0（100 QPS / 128 节点），所以兜底到 1：
+        令牌桶容量为 0 意味着永远拿不到令牌，那是挂死不是限流。
+        """
+        configured = float(self.settings.burst)
+        if self._share_qps is None or self.settings.per_host_qps <= 0:
+            return configured
+        ratio = self._share_qps / self.settings.per_host_qps
+        return max(1.0, configured * ratio)
+
     @contextmanager
     def acquire(self, url: str, timeout: float | None = None) -> Generator[None]:
         """取得该 URL 所属 host 的额度，退出上下文时归还。
@@ -250,7 +317,7 @@ class HostLimiter:
         if qps <= 0:
             return
 
-        burst = float(self.settings.burst)
+        burst = self.effective_burst
         while True:
             with slot.lock:
                 now = time.monotonic()
@@ -277,7 +344,9 @@ class HostLimiter:
             slot = self._slots.get(host)
             if slot is None:
                 self._maybe_sweep_locked()
-                slot = _HostSlot(self.settings.per_host_max_concurrent, self.settings.burst)
+                # 初始令牌数也按分片后的容量：拿 settings.burst 的话，每个新出现的
+                # host 一上来就白送一整份未分片的突发额度。
+                slot = _HostSlot(self.settings.per_host_max_concurrent, math.ceil(self.effective_burst))
                 self._slots[host] = slot
             slot.last_used = time.monotonic()
             return slot

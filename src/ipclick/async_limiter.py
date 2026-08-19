@@ -87,6 +87,28 @@ class AsyncHostLimiter:
         """本节点实际生效的 QPS。未分片时就是配置值。"""
         return self._share_qps if self._share_qps is not None else self.settings.per_host_qps
 
+    @property
+    def effective_burst(self) -> float:
+        """本节点实际生效的突发额度（令牌桶容量）。
+
+        **必须和 :attr:`effective_qps` 一起分片。** 只切稳态速率、不切桶容量的话：
+        配 100 QPS 部署 4 台，每台稳态 25 QPS 是对的，但每台仍攒 100 个令牌，
+        集群瞬时能放出 400 个——而 burst 的全部意义就是"允许多大的瞬时尖峰"。
+        10 台就是 1000。
+
+        这种漏法特别难自查：**稳态是对的**，压测跑一分钟取平均完全正常，
+        只在**流量刚起来的那一下**暴露。而那恰恰是目标站点风控最容易触发的时刻，
+        于是现象变成"平时好好的，一重启/一扩容就被封"。
+
+        向下取整会把小集群的 burst 抹成 0（100 QPS / 128 节点），所以兜底到 1：
+        令牌桶容量为 0 意味着永远拿不到令牌，那是挂死不是限流。
+        """
+        configured = float(self.settings.burst)
+        if self._share_qps is None or self.settings.per_host_qps <= 0:
+            return configured
+        ratio = self._share_qps / self.settings.per_host_qps
+        return max(1.0, configured * ratio)
+
     def __len__(self) -> int:
         return len(self._slots)
 
@@ -160,7 +182,7 @@ class AsyncHostLimiter:
         interval = 1.0 / qps
         # 突发额度：允许 next_available 落后于当前时刻最多 burst 个间隔，
         # 也就是攒下 burst 个令牌。
-        max_lag = max(0.0, float(self.settings.burst)) * interval
+        max_lag = max(0.0, self.effective_burst) * interval
 
         async with slot.lock:
             now = time.monotonic()

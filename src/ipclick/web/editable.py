@@ -370,7 +370,16 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
             Field("BROWSER", "enabled", "启用浏览器适配器", "bool"),
             Field("BROWSER", "engine", "渲染引擎", "choice", choices=("auto", *sorted(ENGINE_NAMES))),
             Field("BROWSER", "headless", "无头模式", "bool"),
-            Field("BROWSER", "max_pages", "并发页面上限", "int", minimum=1, maximum=200),
+            # minimum=0 而不是 1：0 是"按可用内存自动推导"的开关，不是非法小值。
+            # 写成 1 的话这个特性从 Web 控制台根本填不进去。
+            Field(
+                "BROWSER",
+                "max_pages",
+                "并发页面上限（0 = 按可用内存自动推导）",
+                "int",
+                minimum=0,
+                maximum=200,
+            ),
             # 这一项在配置里是 [BROWSER.timeout].page_load，不是 [BROWSER].page_timeout
             Field("BROWSER.timeout", "page_load", "页面加载超时（秒）", "float", minimum=1, maximum=600, default=30),
             Field("BROWSER.timeout", "script_exec", "脚本执行超时（秒）", "float", minimum=1, maximum=600, default=60),

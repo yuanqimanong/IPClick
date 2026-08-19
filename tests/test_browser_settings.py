@@ -102,6 +102,26 @@ class TestInvalidValues:
         assert s.viewport["width"] == 1920
         assert s.page_load_timeout == 30.0
 
-    def test_max_pages_floor_is_one(self):
-        """0 会让信号量永远拿不到额度，请求全部卡死。"""
-        assert BrowserSettings.from_config({"max_pages": 0}).max_pages == 4
+    def test_max_pages_zero_is_a_feature_not_a_bad_value(self):
+        """0 在 0.7.0 起是"按可用内存自动推导"的开关，必须原样传下去。
+
+        这条用例此前断言的是 `== 4`，注释写「0 会让信号量永远拿不到额度，请求
+        全部卡死」——那在 0.7.0 之前是对的：那时 max_pages 直接进 asyncio.Semaphore。
+        0.7.0 加了 resolve_max_pages()，它的结尾是 `max(1, ...)`，且**所有**建信号量
+        的路径都经过它（browser_adapter.py:159 是唯一一处），0 再也到不了信号量。
+
+        于是 minimum=1 从"防挂死的护栏"变成了"把新特性堵死的墙"：配 0 和不配
+        完全等价，自动推导从配置文件根本走不到。见 test_semaphore_input_is_never_zero。
+        """
+        assert BrowserSettings.from_config({"max_pages": 0}).max_pages == 0
+
+    def test_semaphore_input_is_never_zero(self):
+        """上一条放行了 0，那就得有人守住"进信号量的值永远 >= 1"这个不变量。
+
+        护栏从解析层挪到了推导层，不是撤掉了。
+        """
+        from ipclick.adapters.browser_settings import resolve_max_pages
+
+        for engine in ("camoufox", "playwright", "patchright", "某个没见过的引擎"):
+            settings = BrowserSettings.from_config({"max_pages": 0})
+            assert resolve_max_pages(settings.max_pages, engine) >= 1

@@ -34,7 +34,7 @@ import sys
 import threading
 from typing import Any, final
 
-from ipclick.adapters.browser_settings import BrowserSettings
+from ipclick.adapters.browser_settings import BrowserSettings, describe_max_pages
 from ipclick.exceptions import AdapterError, ConfigError
 from ipclick.utils import module_probe
 from ipclick.utils.log_util import log
@@ -484,7 +484,10 @@ async def _launch_playwright_like(api: Any, engine: str, settings: BrowserSettin
         await driver.stop()
         raise AdapterError(f"浏览器启动失败（{engine} / {settings.kind}）：{e}。{INSTALL_HINTS[engine]}") from e
 
-    log.info(f"{engine} 浏览器已启动：{settings.kind}, headless={settings.headless}, 页面上限 {settings.max_pages}")
+    log.info(
+        f"{engine} 浏览器已启动：{settings.kind}, headless={settings.headless}, "
+        f"页面上限 {describe_max_pages(settings.max_pages, engine)}"
+    )
     return LaunchedBrowser(driver=driver, browser=browser)
 
 
@@ -551,7 +554,10 @@ async def _launch_camoufox(settings: BrowserSettings) -> LaunchedBrowser:
         await driver.stop()
         raise AdapterError(f"Camoufox 启动失败：{e}。{INSTALL_HINTS['camoufox']}") from e
 
-    log.info(f"camoufox 浏览器已启动：headless={settings.headless}, 页面上限 {settings.max_pages}")
+    log.info(
+        f"camoufox 浏览器已启动：headless={settings.headless}, "
+        f"页面上限 {describe_max_pages(settings.max_pages, 'camoufox')}"
+    )
     return LaunchedBrowser(driver=driver, browser=browser)
 
 
