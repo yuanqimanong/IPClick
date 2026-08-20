@@ -513,7 +513,18 @@ docker run -d -p 9528:9528 --name ipclick ipclick:latest              # gRPC
 docker run -d -p 9528:9528 -p 9527:9527 --name ipclick ipclick:latest  # 再带上 Web 管理端
 ```
 
-镜像多阶段构建、非 root 运行。详细说明见 [`docker/构建.md`](https://github.com/yuanqimanong/IPClick/blob/master/docker/%E6%9E%84%E5%BB%BA.md)。
+镜像基于 **python:3.14-slim**，多阶段构建、非 root 运行，并且**默认自带浏览器渲染
+能力**——patchright 和 chromium 本体都打进去了，拉下来直接 `-a patchright` 就能渲染
+JS 页面，不用在容器里再下一遍。
+
+不需要渲染就构建精简版，省 1.5 GB：
+
+```bash
+docker build -f docker/Dockerfile --build-arg ENGINE=none -t ipclick:slim .
+```
+
+`ENGINE` 可选 `patchright`（默认）/ `camoufox` / `linux`（两个都装）/ `none`。
+详细说明见 [`docker/构建.md`](https://github.com/yuanqimanong/IPClick/blob/master/docker/%E6%9E%84%E5%BB%BA.md)。
 
 ## 🚧 已知限制
 
