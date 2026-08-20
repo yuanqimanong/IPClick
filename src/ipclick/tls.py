@@ -1,3 +1,5 @@
+"""gRPC TLS/mTLS 配置解析、PEM 读取与凭据构造。"""
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,6 +12,7 @@ from ipclick.utils.log_util import log
 
 
 def _read_pem(path: str, what: str) -> bytes:
+    """读取非空 PEM 文件，并将文件错误转换为配置错误。"""
     file = Path(path).expanduser()
     try:
         data = file.read_bytes()
@@ -24,6 +27,8 @@ def _read_pem(path: str, what: str) -> bytes:
 
 @dataclass(frozen=True)
 class TLSSettings:
+    """服务端与客户端共享的 TLS 文件及校验设置。"""
+
     enabled: bool = False
 
     cert_file: str | None = None
@@ -37,6 +42,7 @@ class TLSSettings:
 
     @classmethod
     def from_config(cls, security_config: dict[str, Any] | None) -> "TLSSettings":
+        """从 ``[SECURITY.tls]`` 构造 TLS 设置。"""
         config = dict((security_config or {}).get("tls") or {})
         defaults = cls()
         return cls(
@@ -50,10 +56,12 @@ class TLSSettings:
 
     @property
     def has_client_identity(self) -> bool:
+        """返回客户端证书和私钥是否成对存在。"""
         return bool(self.cert_file and self.key_file)
 
 
 def server_credentials(settings: TLSSettings) -> grpc.ServerCredentials:
+    """构造服务端凭据，并在 mTLS 下强制要求客户端 CA。"""
     if not settings.cert_file or not settings.key_file:
         raise ConfigError("启用 TLS 需要同时配置 [SECURITY.tls].cert_file 与 key_file（服务端证书与私钥）")
 
@@ -77,6 +85,7 @@ def server_credentials(settings: TLSSettings) -> grpc.ServerCredentials:
 
 
 def channel_credentials(settings: TLSSettings) -> grpc.ChannelCredentials:
+    """构造客户端 TLS 凭据，可选携带客户端证书完成 mTLS。"""
     root_certificates = _read_pem(settings.ca_file, "服务端 CA 证书") if settings.ca_file else None
 
     if bool(settings.cert_file) != bool(settings.key_file):
@@ -93,16 +102,18 @@ def channel_credentials(settings: TLSSettings) -> grpc.ChannelCredentials:
 
 
 def channel_options(settings: TLSSettings) -> list[tuple[str, Any]]:
+    """返回仅在 TLS 开启时生效的服务端名称覆盖选项。"""
     if settings.enabled and settings.server_name_override:
         return [("grpc.ssl_target_name_override", settings.server_name_override)]
     return []
 
 
 def warn_if_insecure(settings: TLSSettings, host: str) -> None:
+    """非回环地址明文监听时提示令牌可能被窃听。"""
     if settings.enabled:
         return
     loopback = {"127.0.0.1", "::1", "localhost"}
-    if host in loopback:
+    if host.strip("[]") in loopback:
         return
     log.warning(
         f"服务端监听 {host} 但未启用 TLS，链路为明文——鉴权令牌会被同网段嗅探到。"
@@ -111,6 +122,7 @@ def warn_if_insecure(settings: TLSSettings, host: str) -> None:
 
 
 def describe(settings: TLSSettings) -> str:
+    """生成人类可读的传输安全模式描述。"""
     if not settings.enabled:
         return "未启用（明文）"
     if settings.require_client_cert:

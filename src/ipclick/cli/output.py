@@ -1,3 +1,5 @@
+"""保持人类输出与机器可解析 JSON 输出一致的 CLI 契约。"""
+
 from __future__ import annotations
 
 from enum import IntEnum
@@ -9,6 +11,8 @@ import click
 
 
 class Exit(IntEnum):
+    """稳定的进程退出码分类。"""
+
     OK = 0
     FAILED = 1
     USAGE = 2
@@ -21,6 +25,7 @@ DEFAULT_BODY_LIMIT = 64 * 1024
 
 
 def json_option(func: Any) -> Any:
+    """为 Click 命令添加统一的 ``--json`` 开关。"""
     return click.option(
         "--json",
         "-J",
@@ -32,10 +37,12 @@ def json_option(func: Any) -> Any:
 
 
 def dumps(payload: Any) -> str:
+    """以 UTF-8 友好的格式序列化 CLI JSON 文档。"""
     return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
 
 
 def emit(payload: dict[str, Any], *, as_json: bool, human: str = "") -> None:
+    """按调用模式输出单个 JSON 文档或人类可读文本。"""
     if as_json:
         click.echo(dumps(payload))
     elif human:
@@ -43,6 +50,7 @@ def emit(payload: dict[str, Any], *, as_json: bool, human: str = "") -> None:
 
 
 def note(message: str) -> None:
+    """把进度或元信息写入 stderr，避免污染 stdout 数据流。"""
     click.echo(message, err=True)
 
 
@@ -53,6 +61,7 @@ def fail(
     as_json: bool = False,
     **extra: Any,
 ) -> NoReturn:
+    """输出统一失败结构并以指定分类退出。"""
     if as_json:
         click.echo(dumps({"ok": False, "error": message, "exit_code": int(code), **extra}))
     else:
@@ -61,6 +70,7 @@ def fail(
 
 
 def classify(error: BaseException) -> Exit:
+    """把公共异常映射为稳定退出码。"""
     from ipclick.exceptions import AuthenticationError, ConfigError, TransportError, ValidationError
     from ipclick.limiter import HostLimitTimeout
 

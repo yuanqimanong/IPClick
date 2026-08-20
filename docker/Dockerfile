@@ -1,8 +1,22 @@
 # 构建：docker build -f docker/Dockerfile -t ipclick:latest .
 # 注意上下文是仓库根目录，不是 docker/ 目录。
+#
+# 默认镜像自带浏览器渲染能力（patchright + chromium 本体）。要换引擎或构建不带
+# 浏览器的精简镜像，用 --build-arg ENGINE=...，取值见下面的 ENGINE 说明。
+
+ARG PYTHON_VERSION=3.14
+
+# 渲染引擎，决定装哪个 extra、下哪个浏览器本体：
+#   patchright  Playwright 的反检测分支 + chromium 本体（默认）
+#   camoufox    Firefox 内核，反检测最彻底，本体约 1 GB
+#   linux       上面两个都装（对应 pyproject 的 [linux] extra），镜像最大
+#   none        不装浏览器，只有 curl_cffi，镜像最小
+ARG ENGINE=patchright
 
 # ============================ 构建阶段 ============================
-FROM python:3.13-slim AS builder
+FROM python:${PYTHON_VERSION}-slim AS builder
+
+ARG ENGINE
 
 WORKDIR /app
 
@@ -24,22 +38,40 @@ COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /bin/uv
 # LICENSE 也要进来：pyproject 用 PEP 639 的 license-files 声明了它，
 # 缺文件会让构建后端在生成元数据时直接失败。
 COPY pyproject.toml uv.lock README.md LICENSE ./
+
+# ENGINE=none 时不带任何 extra；否则按名字点亮对应 extra。
+# 刻意不用 --all-extras：[camoufox] 与 [playwright] 在 pyproject 的
+# [tool.uv].conflicts 里声明为互斥，--all-extras 会同时点亮两者而直接失败。
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
+    if [ "$ENGINE" = "none" ]; then \
+        uv sync --frozen --no-install-project --no-dev; \
+    else \
+        uv sync --frozen --no-install-project --no-dev --extra "$ENGINE"; \
+    fi
 
 # 再复制源码并安装项目本身
 COPY src/ ./src/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+    if [ "$ENGINE" = "none" ]; then \
+        uv sync --frozen --no-dev; \
+    else \
+        uv sync --frozen --no-dev --extra "$ENGINE"; \
+    fi
 
 # ============================ 运行阶段 ============================
-FROM python:3.13-slim AS runtime
+FROM python:${PYTHON_VERSION}-slim AS runtime
+
+ARG ENGINE
 
 WORKDIR /app
 
+# 浏览器本体放在共享目录而不是某个用户的家目录：镜像里下一次、所有用户都能读，
+# 也免得换 USER 之后引擎找不到自己刚下的浏览器。
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:$PATH"
+    PATH="/app/.venv/bin:$PATH" \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
+    XDG_CACHE_HOME=/opt/cache
 
 # 以非 root 用户运行
 RUN groupadd --system --gid 1000 ipclick \
@@ -49,7 +81,34 @@ RUN groupadd --system --gid 1000 ipclick \
 COPY --from=builder --chown=ipclick:ipclick /app/.venv /app/.venv
 COPY --from=builder --chown=ipclick:ipclick /app/src /app/src
 
-# 配置目录（可通过 -v 挂载 config.toml 进来）
+# 下浏览器本体。必须在 USER 之前跑：--with-deps 要用 apt 装 chromium 的系统库
+# （libnss3、libatk 那一堆），那是 root 才能做的事。装完把目录放成所有人可读可执行，
+# 否则切到 ipclick 用户后起不来浏览器。
+#
+# 这一层刻意和上面的依赖层分开：浏览器本体是几百 MB 到 1 GB，
+# 改源码时不该让它重新下一遍。
+RUN set -eu; \
+    case "$ENGINE" in \
+      patchright) \
+        patchright install --with-deps chromium ;; \
+      camoufox) \
+        apt-get update && apt-get install -y --no-install-recommends \
+          libgtk-3-0 libx11-xcb1 libasound2 libdbus-glib-1-2 \
+          && rm -rf /var/lib/apt/lists/*; \
+        python -m camoufox fetch ;; \
+      linux) \
+        patchright install --with-deps chromium; \
+        python -m camoufox fetch ;; \
+      none) \
+        echo "ENGINE=none：跳过浏览器本体" ;; \
+      *) \
+        echo "未知 ENGINE=$ENGINE，可选 patchright / camoufox / linux / none" >&2; exit 1 ;; \
+    esac; \
+    for d in /opt/ms-playwright /opt/cache; do \
+      [ -d "$d" ] && chmod -R a+rX "$d" || true; \
+    done
+
+# 配置目录（可通过 -v 挂载 ipclick.toml 进来）
 RUN mkdir -p /home/ipclick/.ipclick /app/data \
     && chown -R ipclick:ipclick /home/ipclick/.ipclick /app/data
 

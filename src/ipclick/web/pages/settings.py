@@ -1,3 +1,5 @@
+"""配置编辑、集群节点管理、凭据生成与部署计划页面。"""
+
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -41,10 +43,15 @@ def _probe_title(result: Any) -> str:
 
 @final
 class SettingsPage:
+    """协调配置文件写回、有限热更新及集群配置操作。"""
+
     def __init__(self, ctx: PageContext) -> None:
         self.ctx: PageContext = ctx
         self._generated: OrderedDict[str, dict[str, Any]] = OrderedDict()
-        self._lock: threading.Lock = threading.Lock()
+        self._secret_lock: threading.Lock = threading.Lock()
+        # ThreadingHTTPServer 会并行处理多个表单。读旧配置、合并并落盘必须
+        # 作为一个事务串行执行，否则两个标签页可能互相覆盖刚保存的字段。
+        self._config_lock: threading.RLock = threading.RLock()
 
     def _groups(self, tab: str = "basic") -> list[tuple[str, list[dict[str, Any]]]]:
         groups: list[tuple[str, list[dict[str, Any]]]] = []
@@ -112,6 +119,7 @@ class SettingsPage:
         ]
 
     def config_page(self, username: str, csrf: str, *, generated_token: str = "", tab: str = "basic") -> str:
+        """渲染基础配置或集群配置页。"""
         messages, errors = self.ctx.take_flash()
         return render_config(
             self._groups(tab),
@@ -163,9 +171,11 @@ class SettingsPage:
         ]
 
     def deploy_plan(self, node_id: str) -> NodePlan | None:
+        """返回指定节点的部署计划。"""
         return next((plan for plan in self._deploy_plans() if plan.node_id == node_id), None)
 
     def deploy_page(self, node_id: str, username: str, csrf: str) -> str | None:
+        """渲染指定节点的部署说明；节点不存在时返回 ``None``。"""
         from ipclick.web.templates import render_deploy
 
         plans = self._deploy_plans()
@@ -175,11 +185,13 @@ class SettingsPage:
         return render_deploy(plan.snapshot(), username, csrf, total_nodes=len(plans))
 
     def deploy_bundle(self) -> bytes:
+        """将当前全部节点的部署计划打包为 ZIP。"""
         from ipclick.web.deploy import bundle
 
         return bundle(self._deploy_plans())
 
     def generate_secret(self, env: str) -> str:
+        """为白名单环境变量生成只可取一次的随机值。"""
         from ipclick.secrets import SECRETS
         from ipclick.web.auth import generate_password
 
@@ -189,7 +201,7 @@ class SettingsPage:
             return ""
 
         token = secrets.token_urlsafe(9)
-        with self._lock:
+        with self._secret_lock:
             self._generated[token] = {
                 "env": spec.env,
                 "label": spec.label,
@@ -203,12 +215,19 @@ class SettingsPage:
         return token
 
     def take_generated(self, token: str) -> dict[str, Any] | None:
+        """按 token 原子取走生成的凭据，防止页面刷新后再次泄露。"""
         if not token:
             return None
-        with self._lock:
+        with self._secret_lock:
             return self._generated.pop(token, None)
 
     def save_config(self, form: dict[str, str], username: str, csrf: str) -> str:
+        """校验表单并以保留未暴露字段的方式更新配置文件。"""
+        with self._config_lock:
+            return self._save_config_locked(form, username, csrf)
+
+    def _save_config_locked(self, form: dict[str, str], username: str, csrf: str) -> str:
+        """在配置事务锁内完成一次读、改、写和运行时刷新。"""
         from ipclick.config_loader.writer import save, set_nodes, set_values
 
         tab = form.get("tab", "basic")
@@ -236,6 +255,7 @@ class SettingsPage:
             new_text, changes = set_values(text, updates) if updates else (text, [])
             if has_node_grid:
                 new_text = set_nodes(new_text, self.ctx.preserve_node_fields(nodes))
+            # writer 负责原子落盘；验证失败前不触碰现有配置。
             _ = save(self.ctx.config_path, new_text)
         except (ConfigError, OSError) as e:
             self.ctx.fail(str(e))
@@ -254,6 +274,12 @@ class SettingsPage:
         return self.config_page(username, csrf, tab=tab)
 
     def add_node(self, form: dict[str, str], username: str, csrf: str) -> str:
+        """校验地址后向本机节点列表追加条目并触发热更新。"""
+        with self._config_lock:
+            return self._add_node_locked(form, username, csrf)
+
+    def _add_node_locked(self, form: dict[str, str], username: str, csrf: str) -> str:
+        """在配置事务锁内追加节点，避免与其他配置写入丢更新。"""
         from ipclick.config_loader.writer import save, set_nodes
 
         host = (form.get("new_node_host") or "").strip().strip("[]")
@@ -318,6 +344,12 @@ class SettingsPage:
         return changed, labels
 
     def remove_node(self, form: dict[str, str], username: str, csrf: str) -> str:
+        """从本机节点列表删除指定节点并触发热更新。"""
+        with self._config_lock:
+            return self._remove_node_locked(form, username, csrf)
+
+    def _remove_node_locked(self, form: dict[str, str], username: str, csrf: str) -> str:
+        """在配置事务锁内删除节点，避免与其他配置写入丢更新。"""
         from ipclick.config_loader.writer import save, set_nodes
 
         node_id = (form.get("remove_node") or "").strip()
@@ -364,6 +396,7 @@ class SettingsPage:
             )
 
     def probe_node(self, node_id: str, address: str = "") -> dict[str, Any]:
+        """探测已配置节点，或探测尚未保存的候选地址。"""
         from ipclick.cluster.node import ClusterConfig, Node
         from ipclick.cluster.probe import probe_node as run_probe
         from ipclick.cluster.tokens import cluster_secret

@@ -140,14 +140,42 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 默认镜像要下 chromium 本体（约 1.5 GB），比纯 Python 构建慢得多。
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build image
+      # 先建不带浏览器的那份：几分钟就能出结果，Dockerfile 本身写错了在这里就红，
+      # 不用等完整镜像下完 chromium 才发现。
+      - name: Build slim image (ENGINE=none)
+        run: docker build -f docker/Dockerfile --build-arg ENGINE=none -t ipclick:slim .
+
+      - name: Smoke test the slim image
+        run: |
+          docker run --rm ipclick:slim ipclick --version
+          docker run --rm ipclick:slim ipclick config-info
+
+      # 再建实际发布的那份（自带 patchright + chromium）。
+      - name: Build default image (bundled render engine)
         run: docker build -f docker/Dockerfile -t ipclick:ci .
 
       - name: Smoke test the image
         run: |
           docker run --rm ipclick:ci ipclick --version
           docker run --rm ipclick:ci ipclick config-info
+          docker run --rm ipclick:ci python -V
+
+      # 验证浏览器本体真的打进去了、而且非 root 用户读得到。
+      # 这一步比"能 import patchright"严格：组件状态是两级的，
+      # 只有包和本体都就位才会报「就绪」。刻意不发真实请求——
+      # CI 里依赖外部站点会引入无关的红。
+      - name: Verify the render engine is usable in the image
+        run: |
+          out=$(docker run --rm ipclick:ci ipclick component list)
+          echo "$out"
+          if ! echo "$out" | grep -qE 'patchright[[:space:]]+就绪'; then
+            echo "::error::镜像里的 patchright 不可用（包或浏览器本体缺失）"
+            exit 1
+          fi
+          echo "渲染引擎可用"
+

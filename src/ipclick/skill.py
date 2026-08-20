@@ -1,3 +1,5 @@
+"""读取并安装随发行包提供的 IPClick AI 技能说明。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -17,12 +19,15 @@ DEFAULT_INSTALL_DIR = Path(".claude") / "skills"
 @final
 @dataclass(frozen=True)
 class InstallResult:
+    """技能文件安装结果及其目标路径。"""
+
     path: Path
     written: bool
     unchanged: bool = False
 
     @property
     def message(self) -> str:
+        """返回面向命令行用户的结果文案。"""
         if self.written:
             return f"已写入 {self.path}"
         if self.unchanged:
@@ -31,6 +36,7 @@ class InstallResult:
 
 
 def markdown(version: str | None = None) -> str:
+    """读取技能 Markdown，并替换当前发行版本占位符。"""
     if version is None:
         from ipclick import __version__
 
@@ -39,6 +45,7 @@ def markdown(version: str | None = None) -> str:
 
 
 def description() -> str:
+    """从技能文件的 YAML front matter 中提取描述。"""
     text = markdown()
     if not text.startswith("---"):
         return ""
@@ -56,6 +63,7 @@ def install(
     force: bool = False,
     version: str | None = None,
 ) -> InstallResult:
+    """将技能文件安装到目标目录，除非 ``force`` 否则不覆盖用户修改。"""
     root = (target_dir or DEFAULT_INSTALL_DIR) / SKILL_NAME
     path = root / "SKILL.md"
     content = markdown(version)

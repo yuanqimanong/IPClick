@@ -1,3 +1,5 @@
+"""由调用方直接连接各节点的同步集群客户端。"""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
@@ -7,6 +9,7 @@ from typing import Any, TypeVar
 from ipclick.cluster.discovery import create_discovery
 from ipclick.cluster.node import ClusterConfig, NodeState
 from ipclick.cluster.pool import NodePool
+from ipclick.cluster.tokens import cluster_secret, token_for
 from ipclick.dto.models import DownloadResponse, DownloadTask, HttpMethod
 from ipclick.exceptions import ClientClosedError, IPClickError, TransportError
 from ipclick.sdk import ClientBase, Downloader, StreamedResponse
@@ -19,6 +22,8 @@ _T = TypeVar("_T")
 
 
 class ClusterDownloader(ClientBase):
+    """在多个直连节点间负载均衡并执行有限故障转移。"""
+
     def __init__(
         self,
         config_path: str | None = None,
@@ -43,6 +48,8 @@ class ClusterDownloader(ClientBase):
 
         self._config_path: str | None = config_path
         self._token: str | None = token
+        # cluster_config 可能由调用方直接注入，不能再次只从文件读取 secret。
+        self._cluster_secret: str = cluster_secret({"secret": self.cluster_config.secret})
         self._clients: dict[str, Downloader] = {}
         self._clients_lock: threading.Lock = threading.Lock()
 
@@ -52,26 +59,43 @@ class ClusterDownloader(ClientBase):
         )
 
     def _client_for(self, state: NodeState) -> Downloader:
+        """获取节点专属客户端；节点地址变化时关闭并重建旧连接。"""
         if self._closed:
             raise ClientClosedError("ClusterDownloader 已关闭，无法继续发送请求")
 
         node_id = state.node.id
+        raw_host = state.node.host.strip("[]")
+        client_host = f"[{raw_host}]" if ":" in raw_host else raw_host
         client = self._clients.get(node_id)
-        if client is not None:
+        if client is not None and (client.host, client.port) == (client_host, state.node.port):
             return client
 
         with self._clients_lock:
-            if node_id not in self._clients:
+            if self._closed:
+                raise ClientClosedError("ClusterDownloader 已关闭，无法继续发送请求")
+            client = self._clients.get(node_id)
+            if client is not None and (client.host, client.port) != (client_host, state.node.port):
+                # 服务发现允许稳定 ID 的节点迁移地址，旧 channel 不能继续复用。
+                client.close()
+                client = None
+                self._clients.pop(node_id, None)
+            if client is None:
+                # 显式 token= 的优先级最高；否则按节点显式令牌/共享密钥派生，
+                # 两者都没有时让 Downloader 回退到 [SECURITY].auth_token。
+                auth_token = self._token
+                if auth_token is None:
+                    auth_token = token_for(state.node.id, state.node.token, self._cluster_secret)
                 self._clients[node_id] = Downloader(
                     config_path=self._config_path,
-                    host=state.node.host,
+                    host=client_host,
                     port=state.node.port,
-                    token=self._token,
+                    token=auth_token,
                     tls=self.tls,
                 )
             return self._clients[node_id]
 
     def close(self) -> None:
+        """停止探活并关闭所有已创建的节点连接。"""
         self._closed: bool = True
         self.pool.stop()
         with self._clients_lock:
@@ -86,12 +110,18 @@ class ClusterDownloader(ClientBase):
         self.close()
 
     def _with_failover(self, operation: Callable[[Downloader], _T], description: str) -> _T:
+        """仅对传输层错误换节点，业务错误直接返回给调用方。"""
         tried: set[str] = set()
         attempts = self.cluster_config.max_failover + 1
         last_error: Exception | None = None
 
         for attempt in range(attempts):
-            state = self.pool.acquire(exclude=tried)
+            try:
+                state = self.pool.acquire(exclude=tried)
+            except TransportError as e:
+                if last_error is None:
+                    last_error = e
+                break
             tried.add(state.node.id)
             client = self._client_for(state)
 
@@ -117,6 +147,7 @@ class ClusterDownloader(ClientBase):
         ) from last_error
 
     def request(self, **kwargs: Any) -> DownloadResponse:
+        """构造任务并请求集群；传输失败转换为错误响应以兼容 Downloader。"""
         url = str(kwargs.get("url", ""))
         task = self._build_task(**kwargs)
         try:
@@ -126,12 +157,15 @@ class ClusterDownloader(ClientBase):
             return DownloadResponse.from_error(str(e), url=url)
 
     def download(self, task: DownloadTask) -> DownloadResponse:
+        """下载单个已构造任务。"""
         return self._with_failover(lambda c: c.download(task), f"下载 {task.url}")
 
     def stream(self, url: str, **kwargs: Any) -> StreamedResponse:
+        """建立流式响应；流开始后的中断不会跨节点续传。"""
         return self._with_failover(lambda c: c.stream(url, **kwargs), f"流式下载 {url}")
 
     def batch(self, tasks: Iterable[DownloadTask], timeout: float | None = None) -> Iterator[DownloadResponse]:
+        """将一批任务固定派发到同一健康节点。"""
         materialized = list(tasks)
         call = self._with_failover(
             lambda c: list(c.batch(materialized, timeout=timeout)), f"批量 {len(materialized)} 个任务"
@@ -139,27 +173,35 @@ class ClusterDownloader(ClientBase):
         yield from call
 
     def get(self, url: str, params: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
+        """向集群发送 GET 请求。"""
         return self.request(method=HttpMethod.GET, url=url, params=params, **kwargs)
 
     def post(self, url: str, data: Any = None, json: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
+        """向集群发送 POST 请求。"""
         return self.request(method=HttpMethod.POST, url=url, data=data, json=json, **kwargs)
 
     def put(self, url: str, data: Any = None, **kwargs: Any) -> DownloadResponse:
+        """向集群发送 PUT 请求。"""
         return self.request(method=HttpMethod.PUT, url=url, data=data, **kwargs)
 
     def patch(self, url: str, data: Any = None, **kwargs: Any) -> DownloadResponse:
+        """向集群发送 PATCH 请求。"""
         return self.request(method=HttpMethod.PATCH, url=url, data=data, **kwargs)
 
     def delete(self, url: str, **kwargs: Any) -> DownloadResponse:
+        """向集群发送 DELETE 请求。"""
         return self.request(method=HttpMethod.DELETE, url=url, **kwargs)
 
     def head(self, url: str, **kwargs: Any) -> DownloadResponse:
+        """向集群发送 HEAD 请求。"""
         return self.request(method=HttpMethod.HEAD, url=url, **kwargs)
 
     def options(self, url: str, **kwargs: Any) -> DownloadResponse:
+        """向集群发送 OPTIONS 请求。"""
         return self.request(method=HttpMethod.OPTIONS, url=url, **kwargs)
 
     def snapshot(self) -> dict[str, Any]:
+        """返回节点池健康与请求计数快照。"""
         return self.pool.snapshot()
 
 

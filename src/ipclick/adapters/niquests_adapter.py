@@ -1,3 +1,5 @@
+"""基于 niquests 的 HTTP/2、HTTP/3 同步和异步适配器。"""
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -53,10 +55,13 @@ SessionKey = tuple[str | None, bool]
 
 
 class NiquestsAdapter(DownloaderAdapter):
+    """按代理和 TLS 校验设置复用 niquests 连接池。"""
+
     adapter_name: str = "niquests"
     supports_async: bool = True
 
     def __init__(self, settings: AdapterSettings | None = None):
+        """按需加载依赖并初始化同步、异步 session 缓存。"""
         if _load_niquests() is None:
             raise AdapterError('niquests is not installed. Install it with: pip install "ipclick[niquests]"')
 
@@ -145,6 +150,7 @@ class NiquestsAdapter(DownloaderAdapter):
         allowed_status_codes: list[int] | None = None,
         kwargs: str | None = None,
     ) -> Response:
+        """同步发送 HTTP 请求并转换为统一响应。"""
         self.reject_impersonate(impersonate)
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
@@ -183,6 +189,7 @@ class NiquestsAdapter(DownloaderAdapter):
     @override
     @aretry()
     async def adownload(self, url: str, **kwargs: Any) -> Response:
+        """使用 niquests AsyncSession 异步发送请求。"""
         self.reject_impersonate(kwargs.get("impersonate"))
         method = str(kwargs.get("method", "GET")).upper()
         if method not in _SUPPORTED_METHODS:
@@ -212,6 +219,8 @@ class NiquestsAdapter(DownloaderAdapter):
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         **kwargs: Any,
     ) -> Iterator[StreamEvent]:
+        """产出响应首部和正文分片，并确保响应最终关闭。"""
+        self.reject_impersonate(kwargs.get("impersonate"))
         method = str(kwargs.get("method", "GET")).upper()
         if method not in _SUPPORTED_METHODS:
             yield StreamHeader(url=url, status_code=-1, error=f"Unsupported HTTP method: {method}")
@@ -236,20 +245,24 @@ class NiquestsAdapter(DownloaderAdapter):
             )
             yield from resp.iter_content(chunk_size=chunk_size)
         finally:
+            # 即使调用方提前停止迭代，也要归还连接池资源。
             resp.close()
 
     @override
     def close(self) -> None:
+        """关闭同步缓存，并调度关闭异步 session。"""
         self._sessions.close()
         self._async_sessions.close()
 
     @override
     async def aclose(self) -> None:
+        """在正确事件循环中关闭全部 session。"""
         self._sessions.close()
         await self._async_sessions.aclose()
 
 
 def is_available() -> bool:
+    """返回 niquests 模块当前是否可导入。"""
     from ipclick.utils import module_probe
 
     return module_probe.installed(NIQUESTS_MODULE)

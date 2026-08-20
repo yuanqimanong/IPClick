@@ -1,3 +1,5 @@
+"""内置与可选下载适配器的注册、探测和实例化入口。"""
+
 from typing import cast
 
 from ipclick.adapters import browser_engines
@@ -30,6 +32,7 @@ _OPTIONAL_ADAPTERS: dict[str, tuple[type[DownloaderAdapter], tuple[str, ...]]] =
 
 
 def sync_optional_adapters() -> None:
+    """根据当前可导入依赖同步可选适配器注册表。"""
     for name, (cls, modules) in _OPTIONAL_ADAPTERS.items():
         if all(module_probe.installed(m) for m in modules):
             ADAPTER_CLASSES[name] = cls
@@ -39,6 +42,7 @@ def sync_optional_adapters() -> None:
 
 
 def refresh() -> None:
+    """清除依赖和浏览器就绪缓存后重新探测适配器。"""
     browser_engines.refresh()
     sync_optional_adapters()
 
@@ -71,11 +75,13 @@ _REMOVED_ADAPTERS: dict[str, str] = {
 
 
 def resolve_browser_adapter_name(browser_settings: BrowserSettings | None) -> str:
+    """把通用 browser 名称解析为具体引擎适配器名。"""
     engine = browser_engines.resolve_engine((browser_settings or BrowserSettings()).engine)
     return _ENGINE_TO_ADAPTER[engine]
 
 
 def get_default_adapter(settings: AdapterSettings | None = None) -> DownloaderAdapter:
+    """创建默认的 curl_cffi 适配器。"""
     return get_adapter(DEFAULT_ADAPTER_NAME, settings)
 
 
@@ -84,6 +90,7 @@ def get_adapter(
     settings: AdapterSettings | None = None,
     browser_settings: BrowserSettings | None = None,
 ) -> DownloaderAdapter:
+    """按名称创建适配器，并对缺失依赖给出安装提示。"""
     if adapter_name == GENERIC_BROWSER_NAME:
         adapter_name = resolve_browser_adapter_name(browser_settings)
 
@@ -104,6 +111,7 @@ def get_adapter(
 
 
 def register_adapter(adapter_class: type[DownloaderAdapter]) -> None:
+    """注册或替换一个自定义适配器类。"""
     ADAPTER_CLASSES[adapter_class.adapter_name] = adapter_class
     ADAPTER_LIST[:] = list(ADAPTER_CLASSES.values())
 

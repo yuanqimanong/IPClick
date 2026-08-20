@@ -1,3 +1,5 @@
+"""请求测试沙箱：表单解析、受限执行与短期结果缓存。"""
+
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -75,6 +77,8 @@ def _readable_error(error: Exception, target_node: str = "") -> str:
 
 @final
 class SandboxPage:
+    """在服务端既有安全策略内构造并执行单次测试请求。"""
+
     def __init__(self, ctx: PageContext) -> None:
         self.ctx: PageContext = ctx
         self._results: OrderedDict[str, tuple[dict[str, str], dict[str, Any]]] = OrderedDict()
@@ -96,6 +100,7 @@ class SandboxPage:
         curl_notes: list[str] | None = None,
         curl_error: str = "",
     ) -> str:
+        """渲染测试表单和可选的上一次执行结果。"""
         from ipclick.adapters.browser_settings import BrowserSettings
 
         return render_test(
@@ -111,6 +116,7 @@ class SandboxPage:
         )
 
     def import_curl(self, form: dict[str, str]) -> tuple[dict[str, str], list[str], str]:
+        """解析长度受限的 curl 文本并返回表单字段。"""
         from ipclick.web.curl_parser import parse_curl
 
         raw = (form.get("curl") or "")[:CURL_MAX_LEN]
@@ -120,6 +126,7 @@ class SandboxPage:
         return parsed.as_form(), parsed.notes, ""
 
     def stash_test_result(self, form: dict[str, str], result: dict[str, Any]) -> str:
+        """把结果放入有界内存缓存并返回不可预测的查询 token。"""
         token = secrets.token_urlsafe(9)
         with self._lock:
             self._results[token] = (dict(form), result)
@@ -128,6 +135,7 @@ class SandboxPage:
         return token
 
     def take_test_result(self, token: str) -> tuple[dict[str, str], dict[str, Any] | None]:
+        """读取 token 对应的测试结果；未知 token 返回空结果。"""
         if not token:
             return {}, None
         with self._lock:
@@ -135,6 +143,7 @@ class SandboxPage:
         return entry if entry is not None else ({}, None)
 
     def run_test(self, form: dict[str, str]) -> dict[str, Any]:
+        """校验表单后经本机任务服务或指定集群节点执行请求。"""
         if self.ctx.task_service is None:
             return {"error_only": True, "error": "本实例没有可用的任务服务（Web 端以只读方式启动）"}
 
@@ -167,6 +176,7 @@ class SandboxPage:
             return {"error_only": True, "error": _readable_error(e, target)}
 
         body = response.content
+        # 页面只展示有限前缀，避免超大响应在内存中复制并注入 HTML。
         shown = body[:TEST_BODY_LIMIT]
         return {
             "status_code": response.status_code,

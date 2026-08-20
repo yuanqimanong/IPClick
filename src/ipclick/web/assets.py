@@ -1,3 +1,5 @@
+"""内嵌 Web 样式与脚本，以及与其内容绑定的 CSP hash。"""
+
 from __future__ import annotations
 
 import base64
@@ -852,11 +854,13 @@ SCRIPT_MAIN = """
 
 
 def sha256_source(script: str) -> str:
+    """生成 CSP ``script-src`` 接受的 SHA-256 source expression。"""
     digest = hashlib.sha256(script.encode("utf-8")).digest()
     return f"'sha256-{base64.b64encode(digest).decode('ascii')}'"
 
 
 def csp() -> str:
+    """构建仅允许内嵌固定脚本 hash 和同源请求的 CSP。"""
     return (
         "default-src 'none'; "
         f"script-src {sha256_source(SCRIPT_BOOT)} {sha256_source(SCRIPT_MAIN)}; "

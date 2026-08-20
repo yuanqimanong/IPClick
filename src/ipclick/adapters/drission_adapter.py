@@ -1,14 +1,17 @@
+"""基于 DrissionPage 的串行浏览器渲染适配器。"""
+
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 import json as jsonlib
+import math
 import threading
 from typing import Any
 
 from typing_extensions import override
 
 from ipclick.adapters.base import DownloaderAdapter, raise_if_script_error
-from ipclick.adapters.browser_settings import BrowserSettings
+from ipclick.adapters.browser_settings import BLOCKABLE_RESOURCES, BrowserSettings
 from ipclick.adapters.retry import retry
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
@@ -40,8 +43,12 @@ _SUPPORTED_METHODS = frozenset({"GET"})
 
 _SHUTDOWN_TIMEOUT = 30.0
 
+_MAX_WAIT_FOR_TIMEOUT_MS = 60_000
+
 
 class DrissionPageAdapter(DownloaderAdapter):
+    """在单工作线程中复用一个 DrissionPage 浏览器进程。"""
+
     adapter_name: str = "DrissionPage"
 
     def __init__(
@@ -49,6 +56,7 @@ class DrissionPageAdapter(DownloaderAdapter):
         settings: AdapterSettings | None = None,
         browser_settings: BrowserSettings | None = None,
     ):
+        """校验依赖与配置并创建专用串行线程池。"""
         if _load_drission()[0] is None:
             raise AdapterError('DrissionPage is not installed. Install it with: pip install "ipclick[drissionpage]"')
 
@@ -110,6 +118,19 @@ class DrissionPageAdapter(DownloaderAdapter):
             raise ValidationError(f"automation_config 必须是 JSON 对象，收到 {type(parsed).__name__}")
         return parsed
 
+    @staticmethod
+    def _wait_timeout_ms(config: dict[str, Any]) -> int:
+        raw = config.get("wait_for_timeout")
+        if raw is None or raw == "":
+            return 0
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as e:
+            raise ValidationError(f"automation_config.wait_for_timeout 必须是数字，收到 {raw!r}") from e
+        if not math.isfinite(value):
+            raise ValidationError(f"automation_config.wait_for_timeout 必须是有限数字，收到 {raw!r}")
+        return min(_MAX_WAIT_FOR_TIMEOUT_MS, max(0, int(value)))
+
     @override
     @retry()
     def download(
@@ -136,6 +157,7 @@ class DrissionPageAdapter(DownloaderAdapter):
         allowed_status_codes: list[int] | None = None,
         kwargs: str | None = None,
     ) -> Response:
+        """校验浏览器约束，并在线程池中执行一次 GET 渲染。"""
         self.reject_impersonate(impersonate)
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
@@ -163,6 +185,7 @@ class DrissionPageAdapter(DownloaderAdapter):
         target = merge_query_params(url, params)
         page_timeout = timeout if timeout and timeout > 0 else self.browser_settings.page_load_timeout
 
+        # DrissionPage 对象不是线程安全的，所有浏览器操作固定在同一工作线程。
         future: Future[Response] = self._pool.submit(
             self._render, target, headers, cookies, config, automation_script, page_timeout
         )
@@ -190,6 +213,11 @@ class DrissionPageAdapter(DownloaderAdapter):
             if cookies:
                 tab.set.cookies(cookies)
             blocked = config.get("block_resources", self.browser_settings.block_resources)
+            if not isinstance(blocked, (list, tuple)):
+                raise ValidationError("block_resources 必须是数组")
+            unknown = {str(name).strip().lower() for name in blocked} - BLOCKABLE_RESOURCES
+            if unknown:
+                raise ValidationError(f"block_resources 含未知资源类型: {sorted(unknown)}")
             if blocked:
                 tab.set.blocked_urls(_blocked_patterns(blocked))
 
@@ -209,7 +237,7 @@ class DrissionPageAdapter(DownloaderAdapter):
                 tab.wait.ele_displayed(str(selector), timeout=page_timeout)
             if config.get("scroll_to_bottom"):
                 _scroll_to_bottom(tab)
-            wait_ms = int(float(config.get("wait_for_timeout") or 0))
+            wait_ms = self._wait_timeout_ms(config)
             if wait_ms > 0:
                 tab.wait(wait_ms / 1000)
 
@@ -250,6 +278,7 @@ class DrissionPageAdapter(DownloaderAdapter):
 
     @override
     def close(self) -> None:
+        """停止浏览器并关闭专用线程池；可重复调用。"""
         self._closed = True
         browser = self._browser
         self._browser = None
@@ -289,6 +318,7 @@ def _scroll_to_bottom(tab: Any) -> None:
 
 
 def is_available() -> bool:
+    """返回 DrissionPage 模块当前是否可导入。"""
     from ipclick.utils import module_probe
 
     return module_probe.installed(DRISSIONPAGE_MODULE)

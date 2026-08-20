@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 
 import pytest
 
@@ -30,10 +31,22 @@ def test_negative_retries_are_rejected() -> None:
         DownloadTask(url="http://example.com", max_retries=-1)
 
 
-@pytest.mark.parametrize("timeout", [0, -3.5])
+@pytest.mark.parametrize("timeout", [0, -3.5, float("nan"), float("inf"), True, "30"])
 def test_non_positive_timeout_is_rejected(timeout: float) -> None:
     with pytest.raises(ValidationError):
         DownloadTask(url="http://example.com", timeout=timeout)
+
+
+@pytest.mark.parametrize("max_retries", [-1, 21, True, 1.5, "3"])
+def test_invalid_retry_count_is_rejected(max_retries: object) -> None:
+    with pytest.raises(ValidationError):
+        DownloadTask(url="http://example.com", max_retries=cast(Any, max_retries))
+
+
+@pytest.mark.parametrize("retry_backoff", [-1, float("nan"), float("inf"), True, "2"])
+def test_invalid_retry_backoff_is_rejected(retry_backoff: object) -> None:
+    with pytest.raises(ValidationError):
+        DownloadTask(url="http://example.com", retry_backoff=cast(Any, retry_backoff))
 
 
 def test_curl_cffi_gets_a_default_impersonate() -> None:
@@ -129,11 +142,22 @@ def test_adapter_lookup_by_name_and_enum_value() -> None:
         (ProxyConfig(host="h", port=1), "http://h:1"),
         (ProxyConfig(scheme="socks5", tunnel_server="gw:9000"), "socks5://gw:9000"),
         (ProxyConfig(host="h", port=1, auth_key="u", auth_password="p"), "http://u:p@h:1"),
+        (ProxyConfig(host="::1", port=8080), "http://[::1]:8080"),
+        (
+            ProxyConfig(host="h", port=1, auth_key="u@example", auth_password="p/a:ss#%"),
+            "http://u%40example:p%2Fa%3Ass%23%25@h:1",
+        ),
+        (ProxyConfig(host="h", port=1, auth_key="u"), "http://u:@h:1"),
         (ProxyConfig(host="h", port=1, channel_name="c", session_ttl=5, country_code="US"), "http://:Cc:T5:AUS@h:1"),
     ],
 )
 def test_proxy_config_to_url(config: ProxyConfig, expected: str | None) -> None:
     assert config.to_url() == expected
+
+
+def test_proxy_host_requires_a_valid_port() -> None:
+    with pytest.raises(ValidationError, match="proxy port"):
+        ProxyConfig(host="proxy.example").to_url()
 
 
 def test_response_from_protobuf_without_trace() -> None:
@@ -155,6 +179,16 @@ def test_response_from_protobuf_without_trace() -> None:
     assert response.error is None
     assert response.ok
     assert response.trace == ResponseTrace()
+
+
+def test_response_from_protobuf_uses_declared_charset() -> None:
+    pb = task_pb2.TaskResp(
+        status_code=200,
+        response_headers={"content-type": "text/plain; charset=gb18030"},
+        content="中文".encode("gb18030"),
+    )
+
+    assert DownloadResponse.from_protobuf(pb).text == "中文"
 
 
 def test_response_from_protobuf_keeps_the_trace() -> None:

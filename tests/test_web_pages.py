@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import threading
 from typing import Any
 
 import pytest
@@ -156,6 +158,68 @@ def test_saving_config_writes_the_file(pages: WebPages, config_file: Path) -> No
 
     assert "已写回" in html
     assert "max_workers = 16" in config_file.read_text(encoding="utf-8")
+
+
+def test_concurrent_config_saves_preserve_both_updates(
+    pages: WebPages, config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ipclick.config_loader import writer
+
+    real_save = writer.save
+    first_save_entered = threading.Event()
+    release_first_save = threading.Event()
+    count_lock = threading.Lock()
+    save_count = 0
+
+    def slow_first_save(*args: Any, **kwargs: Any) -> Path | None:
+        nonlocal save_count
+        with count_lock:
+            save_count += 1
+            is_first = save_count == 1
+        if is_first:
+            first_save_entered.set()
+            assert release_first_save.wait(timeout=5)
+        return real_save(*args, **kwargs)
+
+    monkeypatch.setattr(writer, "save", slow_first_save)
+    first_form = {"tab": "basic", "SERVER.host": "0.0.0.0", "__present__SERVER.host": "1"}
+    second_form = {"tab": "basic", "SERVER.max_workers": "16", "__present__SERVER.max_workers": "1"}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(pages.save_config, first_form, USER, CSRF)
+        assert first_save_entered.wait(timeout=5)
+        second = pool.submit(pages.save_config, second_form, USER, CSRF)
+        # 第二个事务必须停在配置锁外，不能读取第一个事务尚未落盘的旧快照。
+        assert not second.done()
+        release_first_save.set()
+        _ = first.result(timeout=5)
+        _ = second.result(timeout=5)
+
+    text = config_file.read_text(encoding="utf-8")
+    assert 'host = "0.0.0.0"' in text
+    assert "max_workers = 16" in text
+
+
+def test_cluster_hot_reload_is_deferred_in_multiprocess_mode(pages: WebPages, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ipclick import server_settings
+
+    called = False
+
+    def reload_cluster() -> tuple[bool, str]:
+        nonlocal called
+        called = True
+        return True, "reloaded"
+
+    pages.ctx.config["SERVER"]["processes"] = 2
+    pages.ctx._on_cluster_changed = reload_cluster
+    monkeypatch.setattr(server_settings, "resolve_processes", lambda _configured: 2)
+
+    pages.ctx.hot_reload_cluster()
+    messages, errors = pages.ctx.take_flash()
+
+    assert called is False
+    assert errors == []
+    assert any("全部 worker" in message and "重启" in message for message in messages)
 
 
 def test_saving_nothing_is_refused(pages: WebPages) -> None:

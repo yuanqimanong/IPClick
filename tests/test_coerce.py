@@ -55,6 +55,8 @@ def test_as_int_bounds_fall_back_instead_of_clamping() -> None:
     assert as_int(-1, 7, minimum=0) == 7
     assert as_int(0, 7, minimum=0) == 0
     assert as_int(70000, 7, maximum=65535) == 7
+    assert as_int(float("inf"), 7) == 7
+    assert as_int(float("nan"), 7) == 7
 
 
 def test_as_float() -> None:
@@ -63,6 +65,8 @@ def test_as_float() -> None:
     assert as_float(True, 1.5) == 1.5
     assert as_float(-1.0, 1.5, minimum=0.0) == 1.5
     assert as_float(0.0, 1.5, minimum=0.0) == 0.0
+    assert as_float(float("nan"), 1.5) == 1.5
+    assert as_float(float("inf"), 1.5) == 1.5
 
 
 def test_as_positive_float_rejects_zero() -> None:
@@ -105,6 +109,8 @@ def test_require_int_is_loud_about_typos() -> None:
         require_int("many", "f", 3)
     with pytest.raises(ConfigError, match="不能小于"):
         require_int(-1, "f", 3)
+    with pytest.raises(ConfigError, match="期望整数"):
+        require_int(1.5, "f", 3)
 
 
 def test_require_float_is_loud_about_typos() -> None:
@@ -116,3 +122,5 @@ def test_require_float_is_loud_about_typos() -> None:
         require_float("fast", "f", 1.0)
     with pytest.raises(ConfigError, match="不能小于"):
         require_float(-0.5, "f", 1.0, minimum=0.0)
+    with pytest.raises(ConfigError, match="有限数字"):
+        require_float(float("nan"), "f", 1.0)

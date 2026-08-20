@@ -1,7 +1,10 @@
+"""各 Web 页面共享的配置、运行时服务与短期消息上下文。"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+import threading
 from typing import Any, final
 
 from ipclick.exceptions import ValidationError
@@ -17,6 +20,8 @@ NODE_PORT_BASE = 19001
 
 @final
 class PageContext:
+    """聚合页面依赖，并协调配置重载、集群热更新和后台安装。"""
+
     def __init__(
         self,
         config: Settings,
@@ -41,27 +46,39 @@ class PageContext:
         self._on_cluster_changed: Callable[[], tuple[bool, str]] | None = on_cluster_changed
         self._messages: list[str] = []
         self._errors: list[str] = []
+        self._flash_lock: threading.Lock = threading.Lock()
 
         self.installer: InstallManager = InstallManager()
         self.installer.on_finished = self.after_install
 
     def fail(self, *errors: str) -> None:
-        self._errors = list(errors)
+        """替换下一次页面渲染展示的错误消息。"""
+        with self._flash_lock:
+            self._errors = list(errors)
 
     def notify(self, *messages: str) -> None:
-        self._messages = list(messages)
+        """替换下一次页面渲染展示的成功消息。"""
+        with self._flash_lock:
+            self._messages = list(messages)
 
     def add_error(self, error: str) -> None:
-        self._errors.append(error)
+        """追加一条待展示错误。"""
+        with self._flash_lock:
+            self._errors.append(error)
 
     def add_message(self, message: str) -> None:
-        self._messages.append(message)
+        """追加一条待展示消息。"""
+        with self._flash_lock:
+            self._messages.append(message)
 
     def extend_first_message(self, suffix: str) -> None:
-        if self._messages:
-            self._messages[0] += suffix
+        """为首条成功消息补充上下文。"""
+        with self._flash_lock:
+            if self._messages:
+                self._messages[0] += suffix
 
     def config_text(self) -> str:
+        """读取目标配置；文件尚不存在时返回内置模板。"""
         if self.config_path.exists():
             return self.config_path.read_text(encoding="utf-8")
         from ipclick.config_loader.loader import example_config
@@ -70,6 +87,7 @@ class PageContext:
         return example_config()
 
     def reload_config(self) -> None:
+        """清除加载缓存并刷新页面持有的配置快照。"""
         from ipclick.config_loader.loader import load_config
 
         try:
@@ -79,10 +97,12 @@ class PageContext:
             log.warning(f"重新加载配置失败：{e}")
 
     def self_id(self) -> str:
+        """返回当前任务服务声明的节点 id。"""
         service = self.task_service
         return str(getattr(service, "self_id", "") or getattr(service, "node_id", "") or "")
 
     def nodes(self) -> list[dict[str, Any]]:
+        """返回附带鉴权来源和本机标记的配置节点列表。"""
         from ipclick.cluster.node import ClusterConfig
         from ipclick.cluster.tokens import cluster_secret
 
@@ -103,11 +123,13 @@ class PageContext:
         ]
 
     def existing_nodes(self) -> tuple[Any, ...]:
+        """返回集群领域模型中的现有节点。"""
         from ipclick.cluster.node import ClusterConfig
 
         return ClusterConfig.from_config(section(self.config, "CLUSTER")).nodes
 
     def target_nodes(self) -> list[dict[str, Any]]:
+        """返回测试页可选择的运行时或配置节点。"""
         service = self.task_service
         cluster = getattr(service, "cluster", None) if service is not None else None
         nodes = list(getattr(cluster, "nodes", ()) or [])
@@ -128,7 +150,7 @@ class PageContext:
         ]
 
     def call_node(self, node_id: str, call: Callable[[Any, Any, float], Any], *, timeout: float) -> Any:
-
+        """仅向配置内节点建立带 TLS 和集群 token 的短生命周期 RPC。"""
         from ipclick.auth import build_client_metadata
         from ipclick.cluster.node import ClusterConfig
         from ipclick.cluster.tokens import cluster_secret, token_for
@@ -151,12 +173,23 @@ class PageContext:
             channel.close()
 
     def take_flash(self) -> tuple[list[str], list[str]]:
-        messages, errors = self._messages, self._errors
-        self._messages, self._errors = [], []
-        return messages, errors
+        """原子语义地取走待展示消息与错误。"""
+        with self._flash_lock:
+            messages, errors = self._messages, self._errors
+            self._messages, self._errors = [], []
+            return messages, errors
 
     def hot_reload_cluster(self) -> None:
+        """请求运行时重载已写盘的集群配置，并保留失败提示。"""
         if self._on_cluster_changed is None:
+            return
+        from ipclick.server_settings import ServerSettings, resolve_processes
+
+        configured_processes = ServerSettings.from_config(section(self.config, "SERVER")).processes
+        if resolve_processes(configured_processes) > 1:
+            # Web 只运行在 worker 0；在没有进程间广播前，只更新它会造成
+            # 路由和鉴权状态分裂。文件已写盘，统一重启后由所有 worker 读取。
+            self.add_message("当前为多进程模式：集群配置已保存，需重启 ipclick 才会在全部 worker 生效")
             return
         try:
             ok, message = self._on_cluster_changed()
@@ -167,6 +200,7 @@ class PageContext:
             (self.add_message if ok else self.add_error)(message)
 
     def preserve_node_fields(self, nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """编辑节点表格时保留页面未暴露的 token、region 与 zone。"""
         preserved = {n.id: n for n in self.existing_nodes()}
         for node in nodes:
             old = preserved.get(str(node["id"]))
@@ -178,6 +212,7 @@ class PageContext:
         return nodes
 
     def next_node_port(self) -> int:
+        """从推荐端口区间选择第一个未被节点配置占用的端口。"""
         used = {int(port) for node in self.nodes() if (port := node["address"].rpartition(":")[2]).isdigit()}
         for candidate in range(NODE_PORT_BASE, NODE_PORT_BASE + 10000):
             if candidate not in used:
@@ -185,6 +220,7 @@ class PageContext:
         return NODE_PORT_BASE
 
     def after_install(self, job: Any) -> None:
+        """后台依赖任务结束后刷新适配器注册表。"""
         from ipclick.adapters import registry
 
         registry.refresh()

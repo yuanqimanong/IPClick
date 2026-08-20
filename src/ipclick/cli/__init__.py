@@ -1,3 +1,5 @@
+"""IPClick 命令行入口。"""
+
 from .main import main
 
 

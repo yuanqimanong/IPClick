@@ -1,3 +1,5 @@
+"""Web 模板共享的 HTML escaping、布局和小型组件渲染器。"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -7,6 +9,7 @@ from ipclick.web.assets import SCRIPT_BOOT, SCRIPT_MAIN, STYLE
 
 
 def esc(text: Any) -> str:
+    """转义 HTML 文本与属性中具有语法意义的五个字符。"""
     return (
         str(text)
         .replace("&", "&amp;")
@@ -18,6 +21,7 @@ def esc(text: Any) -> str:
 
 
 def attr(text: Any) -> str:
+    """转义双引号属性值；独立命名用于标出属性安全边界。"""
     return esc(text)
 
 
@@ -48,24 +52,29 @@ NAV: tuple[tuple[str, str, str], ...] = (
 
 
 def icon(name: str) -> str:
+    """从内置白名单返回 SVG 图标。"""
     return f'<svg viewBox="0 0 24 24" aria-hidden="true">{_ICONS.get(name, "")}</svg>'
 
 
 def rows(pairs: list[tuple[str, Any]]) -> str:
+    """渲染键值表；键会转义，值必须是已转义文本或可信 HTML。"""
     return "".join(f"<tr><th>{esc(k)}</th><td>{v}</td></tr>" for k, v in pairs)
 
 
 def pill(text: str, kind: str) -> str:
+    """渲染状态标签，并转义其可见文本。"""
     return f'<span class="pill {kind}">{esc(text)}</span>'
 
 
 def bool_pill(value: Any, *, good_is_true: bool = True) -> str:
+    """把布尔值渲染为带语义颜色的状态标签。"""
     truthy = bool(value)
     good = truthy if good_is_true else not truthy
     return pill("是" if truthy else "否", "ok" if good else "warn")
 
 
 def status_pill(status_code: int) -> str:
+    """按 HTTP 状态类别渲染状态标签。"""
     if status_code < 0:
         return pill("失败", "bad")
     if status_code < 300:
@@ -78,11 +87,13 @@ def status_pill(status_code: int) -> str:
 
 
 def stat(number: Any, label: str, *, accent: bool = False) -> str:
+    """渲染仪表盘统计卡片。"""
     cls = "stat accent" if accent else "stat"
     return f'<div class="{cls}"><div class="n">{esc(number)}</div><div class="l">{esc(label)}</div></div>'
 
 
 def bytes_label(size: Any) -> str:
+    """把字节数格式化为最多 TB 的易读标签。"""
     try:
         value = float(size)
     except (TypeError, ValueError):
@@ -95,6 +106,7 @@ def bytes_label(size: Any) -> str:
 
 
 def hidden_fields(csrf: str, action: str) -> str:
+    """渲染带属性转义的 CSRF token 与动作隐藏字段。"""
     return (
         f'<input type="hidden" name="csrf_token" value="{attr(csrf)}">'
         f'<input type="hidden" name="action" value="{attr(action)}">'
@@ -102,12 +114,14 @@ def hidden_fields(csrf: str, action: str) -> str:
 
 
 def messages_block(messages: list[str], errors: list[str]) -> str:
+    """渲染已转义的成功与错误消息。"""
     return "".join(f'<div class="msg good">✓ {esc(m)}</div>' for m in messages) + "".join(
         f'<div class="msg err">{esc(e)}</div>' for e in errors
     )
 
 
 def card(title: str, body: str, *, hint: str = "", actions: str = "") -> str:
+    """渲染卡片；标题和提示会转义，body/actions 必须是可信 HTML。"""
     head = f"<h2>{esc(title)}</h2>"
     if hint:
         head += f'<span class="hint">{esc(hint)}</span>'
@@ -120,11 +134,13 @@ _default_theme = "light"
 
 
 def set_default_theme(theme: str) -> None:
+    """设置后续页面渲染使用的进程级默认主题。"""
     global _default_theme
     _default_theme = "dark" if theme == "dark" else "light"
 
 
 def theme_attr(theme: str | None) -> str:
+    """生成只包含白名单主题值的根元素属性。"""
     resolved = theme if theme in ("light", "dark") else _default_theme
     return f' data-default-theme="{attr(resolved)}"'
 
@@ -143,6 +159,7 @@ def page(
     job_running: bool = False,
     theme: str | None = None,
 ) -> str:
+    """把可信页面主体装入统一导航、主题和 CSP 兼容资源中。"""
     nav = "".join(
         f'<a href="{attr(path)}" class="{"on" if path == active else ""}">{icon(name)}<span>{esc(label)}</span></a>'
         for path, label, name in NAV
@@ -202,6 +219,7 @@ _STATUS_COLORS = {
 
 
 def status_bar(process: dict[str, Any]) -> str:
+    """根据请求状态分布渲染比例条和图例。"""
     by_status = dict(process.get("by_status") or {})
     total = sum(int(v) for v in by_status.values())
     if not total:
@@ -219,6 +237,7 @@ def status_bar(process: dict[str, Any]) -> str:
 
 
 def component_badge(component: dict[str, Any]) -> str:
+    """按包与浏览器本体状态渲染组件可用性。"""
     if not component.get("package"):
         return pill("未装", "mute")
     if component.get("browser") is False:
@@ -229,6 +248,7 @@ def component_badge(component: dict[str, Any]) -> str:
 
 
 def trace_table(records: list[TraceRecord], *, show_node: bool = True) -> str:
+    """渲染链路记录表，并转义所有记录来源字段。"""
     if not records:
         return '<p class="note">还没有记录。发一个请求，或用<a href="/test">试一试</a>页面造一个。</p>'
     rows: list[str] = []
@@ -268,7 +288,8 @@ def trace_table(records: list[TraceRecord], *, show_node: bool = True) -> str:
 
 
 def checkbox(name: str, label: str, checked: bool, hint: str = "") -> str:
-    hint_html = f'<span class="hint">{hint}</span>' if hint else ""
+    """渲染带存在标记的复选框，使未勾选状态也能提交。"""
+    hint_html = f'<span class="hint">{esc(hint)}</span>' if hint else ""
     return (
         f'<label class="check-inline"><input type="hidden" name="__present__{attr(name)}" value="1">'
         f'<input type="checkbox" name="{attr(name)}"{" checked" if checked else ""}>'

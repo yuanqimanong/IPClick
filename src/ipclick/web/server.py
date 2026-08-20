@@ -1,3 +1,5 @@
+"""基于标准库 HTTP server 的轻量 Web 管理端与安全路由边界。"""
+
 from collections.abc import Callable
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -32,6 +34,7 @@ _CSP = csp()
 class _QuietThreadingHTTPServer(ThreadingHTTPServer):
     @override
     def handle_error(self, request: Any, client_address: Any) -> None:
+        """忽略正常断连噪音，并记录其余请求处理异常。"""
         error = sys.exc_info()[1]
         if isinstance(error, (BrokenPipeError, ConnectionResetError)):
             log.debug(f"Web 端客户端提前断开：{client_address}")
@@ -47,15 +50,19 @@ WILDCARD_HOSTS: frozenset[str] = frozenset({"0.0.0.0", "::", "[::]", "*"})
 
 
 def normalize_theme(value: Any) -> str:
+    """将任意配置值规范为受支持的主题名。"""
     text = str(value or "").strip().lower()
     return text if text in THEMES else DEFAULT_THEME
 
 
 def is_public_host(host: str) -> bool:
+    """判断监听地址是否可能被本机回环之外访问。"""
     return host.strip().lower() not in ("127.0.0.1", "::1", "[::1]", "localhost", "")
 
 
 class WebConfig:
+    """从宽松配置字典解析出的 Web 管理端设置。"""
+
     def __init__(self, config: dict[str, Any] | None = None):
         data = dict(config or {})
         self.enabled: bool = as_bool(data.get("enabled"))
@@ -66,10 +73,13 @@ class WebConfig:
         self.theme: str = normalize_theme(data.get("theme"))
 
     def as_credentials_config(self) -> dict[str, Any]:
+        """返回凭据解析器所需的最小配置。"""
         return {"username": self.username, "password": self.password}
 
 
 class WebServer:
+    """提供登录、CSRF 防护、管理页面和 JSON/fragment 接口的 HTTP 服务。"""
+
     def __init__(
         self,
         snapshot_provider: Callable[[], dict[str, Any]],
@@ -92,6 +102,7 @@ class WebServer:
         self._thread: threading.Thread | None = None
 
     def start(self, host: str = "127.0.0.1", port: int = DEFAULT_WEB_PORT) -> str | None:
+        """启动后台 HTTP 线程，成功时返回管理地址。"""
         if self._httpd is not None:
             return f"http://{host}:{port}/"
         set_default_theme(self.theme)
@@ -118,6 +129,7 @@ class WebServer:
         return f"http://{host}:{port}/"
 
     def stop(self) -> None:
+        """幂等关闭 HTTP 服务及监听 socket。"""
         if self._httpd is not None:
             self._httpd.shutdown()
             self._httpd.server_close()
@@ -128,14 +140,18 @@ class WebServer:
         server = self
 
         class Handler(BaseHTTPRequestHandler):
+            """绑定外层 ``WebServer`` 状态的单请求处理器。"""
+
             server_version: str = "IPClickWeb/1.0"
 
             @override
             def log_message(self, format: str, *args: Any) -> None:
+                """关闭标准库逐请求 stderr 日志，统一使用项目日志。"""
                 pass
 
             @property
             def source(self) -> str:
+                """返回 TCP 对端地址；不信任可伪造的转发请求头。"""
                 return self.client_address[0] if self.client_address else "unknown"
 
             def _session_id(self) -> str | None:
@@ -157,6 +173,7 @@ class WebServer:
                 content_type: str = "text/html; charset=utf-8",
                 extra_headers: list[tuple[str, str]] | None = None,
             ) -> None:
+                # 所有响应统一施加浏览器安全头；CSP 将脚本限制为内置 hash，并限制同源连接与表单。
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
@@ -193,6 +210,7 @@ class WebServer:
                 return {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True).items()}
 
             def do_GET(self) -> None:
+                """处理只读页面、fragment 与 JSON 查询。"""
                 path = self.path.split("?", 1)[0].rstrip("/") or "/"
                 session = server.sessions.get(self._session_id())
 
@@ -306,6 +324,7 @@ class WebServer:
                 return self._send(status, body, "application/json; charset=utf-8")
 
             def do_POST(self) -> None:
+                """处理登录及经会话和 CSRF 双重校验的状态变更。"""
                 path = self.path.split("?", 1)[0].rstrip("/") or "/"
 
                 if path == "/login":

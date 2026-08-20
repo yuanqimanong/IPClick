@@ -1,3 +1,5 @@
+"""读取项目级 ``.env``，且不覆盖进程中已显式设置的环境变量。"""
+
 import os
 from pathlib import Path
 
@@ -10,6 +12,7 @@ _ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\"}
 
 
 def _unescape(text: str) -> str:
+    """解析双引号值中受支持的反斜杠转义。"""
     out: list[str] = []
     index = 0
     while index < len(text):
@@ -26,13 +29,44 @@ def _unescape(text: str) -> str:
 
 
 def _strip_inline_comment(value: str) -> str:
+    """移除非引号值中由空白分隔的行尾注释。"""
     for index, char in enumerate(value):
         if char == "#" and index > 0 and value[index - 1] in " \t":
             return value[:index]
     return value
 
 
+def _parse_value(value: str) -> str:
+    """解析单/双引号值及其后的可选注释。"""
+    value = value.strip()
+    if not value or value[0] not in ("'", '"'):
+        return _strip_inline_comment(value).strip()
+
+    quote = value[0]
+    escaped = False
+    for index in range(1, len(value)):
+        char = value[index]
+        if quote == '"' and escaped:
+            escaped = False
+            continue
+        if quote == '"' and char == "\\":
+            escaped = True
+            continue
+        if char != quote:
+            continue
+
+        tail = value[index + 1 :].strip()
+        if tail and not tail.startswith("#"):
+            break
+        inner = value[1:index]
+        return _unescape(inner) if quote == '"' else inner
+
+    # 未闭合或引号后仍有正文时保留旧的宽松行为，避免静默吞掉用户内容。
+    return _strip_inline_comment(value).strip()
+
+
 def parse_env(text: str) -> dict[str, str]:
+    """解析常用 dotenv 语法，忽略空行、注释和无效行。"""
     result: dict[str, str] = {}
     for raw in text.splitlines():
         line = raw.strip()
@@ -46,20 +80,12 @@ def parse_env(text: str) -> dict[str, str]:
         if not sep or not key:
             continue
 
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            quote = value[0]
-            value = value[1:-1]
-            if quote == '"':
-                value = _unescape(value)
-        else:
-            value = _strip_inline_comment(value).strip()
-
-        result[key] = value
+        result[key] = _parse_value(value)
     return result
 
 
 def find_env_file(explicit: str | Path | None = None, start: Path | None = None) -> Path | None:
+    """查找显式文件或指定目录下的默认 ``.env``。"""
     if explicit:
         path = Path(explicit).expanduser()
         return path if path.is_file() else None
@@ -69,6 +95,7 @@ def find_env_file(explicit: str | Path | None = None, start: Path | None = None)
 
 
 def _warn_if_world_readable(path: Path) -> None:
+    """在 POSIX 上提示权限过宽、可能泄露机密的环境文件。"""
     if os.name != "posix":
         return
     try:
@@ -80,6 +107,7 @@ def _warn_if_world_readable(path: Path) -> None:
 
 
 def load_dotenv(path: str | Path | None = None, *, override: bool = False) -> dict[str, str]:
+    """把 dotenv 值写入 ``os.environ``，并返回本次实际应用的项目。"""
     env_file = find_env_file(path)
     if env_file is None:
         return {}

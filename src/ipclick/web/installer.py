@@ -1,7 +1,10 @@
+"""Web 端可选组件安装计划、后台作业与浏览器下载进度管理。"""
+
 from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -32,12 +35,15 @@ _SAMPLE_INTERVAL = 1.0
 @final
 @dataclass
 class Progress:
+    """后台安装任务的可展示进度。"""
+
     percent: float | None = None
     done_bytes: int = 0
     speed: float = 0.0
     phase: str = ""
 
     def snapshot(self) -> dict[str, Any]:
+        """返回适合 JSON 序列化的进度快照。"""
         return {
             "percent": round(self.percent, 1) if self.percent is not None else None,
             "done_bytes": self.done_bytes,
@@ -49,6 +55,8 @@ class Progress:
 @final
 @dataclass
 class Job:
+    """一个受锁保护的后台安装作业及其有限长度输出。"""
+
     id: str
     title: str
     command: tuple[str, ...]
@@ -62,6 +70,7 @@ class Job:
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def append(self, line: str) -> None:
+        """追加输出并从工具日志中提取阶段和百分比。"""
         percent = _parse_percent(line)
         phase = _parse_phase(line)
         with self._lock:
@@ -75,10 +84,12 @@ class Job:
             self._output.append(line)
 
     def output(self) -> list[str]:
+        """复制当前输出，避免调用方观察到并发修改。"""
         with self._lock:
             return list(self._output)
 
     def snapshot(self) -> dict[str, Any]:
+        """返回任务当前状态的可序列化快照。"""
         return {
             "id": self.id,
             "title": self.title,
@@ -133,25 +144,31 @@ def _parse_phase(line: str) -> str:
 
 
 def strip_ansi(text: str) -> str:
+    """移除子进程输出中的 ANSI 控制序列。"""
     return _ANSI_RE.sub("", text)
 
 
 @final
 @dataclass(frozen=True)
 class Toolchain:
+    """指向当前 Python 环境的 pip 或 uv 命令封装。"""
+
     kind: Literal["pip", "uv"]
     executable: tuple[str, ...]
 
     def command(self, verb: str, *args: str) -> tuple[str, ...]:
+        """构造安装工具命令，并确保 uv 操作当前解释器。"""
         if self.kind == "uv":
             return (*self.executable, verb, "--python", sys.executable, *args)
         return (*self.executable, verb, *args)
 
     def describe(self) -> str:
+        """返回用于管理页展示的工具链说明。"""
         return f"{self.kind}（{' '.join(self.executable)} → {sys.executable}）"
 
 
 def detect_toolchain() -> Toolchain | None:
+    """优先检测当前解释器的 pip，缺失时回落到 PATH 中的 uv。"""
     if module_probe.installed("pip"):
         return Toolchain(kind="pip", executable=(sys.executable, "-m", "pip"))
 
@@ -162,6 +179,7 @@ def detect_toolchain() -> Toolchain | None:
 
 
 def manual_hint(component: Component) -> str:
+    """生成无法自动安装时可复制执行的命令提示。"""
     return (
         f"本环境既没有 pip 也没有 uv，无法从页面安装。请在装了其中之一的环境里执行："
         f'{sys.executable} -m pip install "ipclick[{component.extra}]"'
@@ -170,6 +188,7 @@ def manual_hint(component: Component) -> str:
 
 
 def extra_requirements(extra: str) -> tuple[str, ...]:
+    """从已安装发行版元数据中提取指定 extra 的直接依赖。"""
     import importlib.metadata
 
     try:
@@ -205,6 +224,8 @@ InstallOp = Literal["install", "uninstall", "browser"]
 @final
 @dataclass(frozen=True)
 class Plan:
+    """经白名单组件和操作校验后的子进程执行计划。"""
+
     op: InstallOp
     component: Component
     title: str
@@ -213,10 +234,12 @@ class Plan:
 
     @property
     def shell_form(self) -> str:
+        """返回仅用于日志展示的命令文本。"""
         return " ".join(self.command)
 
 
 def plan(op: str, extra: str, *, browser_kind: str = "chromium") -> tuple[Plan | None, str]:
+    """为组件安装、卸载或浏览器下载生成受限命令。"""
     component = BY_EXTRA.get((extra or "").strip())
     if component is None:
         known = ", ".join(sorted(BY_EXTRA))
@@ -249,8 +272,15 @@ def plan(op: str, extra: str, *, browser_kind: str = "chromium") -> tuple[Plan |
 
 
 def _child_env() -> dict[str, str]:
+    """构造安装进程环境，并剔除 IPClick 自身的运行时凭据。"""
+    from ipclick.secrets import SECRETS
+
+    secret_names = {spec.env.upper() for spec in SECRETS}
+    # 保留 PATH、代理和私有包仓库凭据，确保 pip/uv 正常工作；只移除安装
+    # 子进程完全不需要的 IPClick 服务令牌、代理密码和 Web 凭据。
+    inherited = {key: value for key, value in os.environ.items() if key.upper() not in secret_names}
     return {
-        **os.environ,
+        **inherited,
         "PIP_PROGRESS_BAR": "off",
         "PYTHONUNBUFFERED": "1",
         "FORCE_COLOR": "1",
@@ -280,7 +310,9 @@ def execute(
     *,
     timeout: int = _TIMEOUT,
 ) -> int:
+    """同步执行计划，流式回传清理后的输出并强制总超时。"""
     on_line(f"$ {' '.join(command)}")
+    timed_out = threading.Event()
     try:
         process = subprocess.Popen(
             command,
@@ -295,21 +327,36 @@ def execute(
         on_line(f"无法执行命令：{e}")
         return -1
 
+    def terminate_on_timeout() -> None:
+        if process.poll() is not None:
+            return
+        timed_out.set()
+        with suppress(OSError):
+            process.kill()
+
+    # ``stdout.read`` 可能永久阻塞；独立 watchdog 才能保证总超时真实生效。
+    watchdog = threading.Timer(timeout, terminate_on_timeout)
+    watchdog.daemon = True
+    watchdog.start()
     try:
         assert process.stdout is not None
         for line in _iter_progress_lines(process.stdout):
             on_line(strip_ansi(line).rstrip())
-        return process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        process.kill()
+        returncode = process.wait()
+        if not timed_out.is_set():
+            return returncode
         on_line(f"超时（{timeout // 60} 分钟）已终止。网络慢的话请在终端里手动执行上面那条命令")
         return -1
     except Exception as e:
         on_line(f"执行出错：{type(e).__name__}: {e}")
         return -1
+    finally:
+        watchdog.cancel()
 
 
 class InstallManager:
+    """串行调度组件安装任务，并为轮询接口保留近期结果。"""
+
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
         self._current: Job | None = None
@@ -318,12 +365,15 @@ class InstallManager:
         self.on_finished: Any = None
 
     def install(self, extra: str) -> tuple[bool, str]:
+        """在后台安装白名单中的 extra。"""
         return self._plan_and_start("install", extra)
 
     def uninstall(self, extra: str) -> tuple[bool, str]:
+        """在后台卸载白名单组件对应的发行包。"""
         return self._plan_and_start("uninstall", extra)
 
     def fetch_browser(self, extra: str, kind: str = "chromium") -> tuple[bool, str]:
+        """在后台下载组件所需的浏览器本体。"""
         return self._plan_and_start("browser", extra, browser_kind=kind)
 
     def _plan_and_start(self, op: InstallOp, extra: str, *, browser_kind: str = "chromium") -> tuple[bool, str]:
@@ -333,6 +383,7 @@ class InstallManager:
         return self._start(prepared)
 
     def current(self) -> dict[str, Any] | None:
+        """返回运行中的任务，或最近完成任务的快照。"""
         with self._lock:
             self._prune_locked()
             if self._current is not None:
@@ -343,12 +394,14 @@ class InstallManager:
             return latest.snapshot()
 
     def get(self, job_id: str) -> dict[str, Any] | None:
+        """按任务 id 返回快照。"""
         with self._lock:
             job = self._jobs.get(job_id)
             return job.snapshot() if job else None
 
     @property
     def busy(self) -> bool:
+        """表示当前是否有安装子进程正在运行。"""
         with self._lock:
             return self._current is not None
 
@@ -452,6 +505,7 @@ def _browser_command(component: Component, kind: str = "chromium") -> tuple[str,
 
 
 def browser_body_location(component: Component) -> tuple[str, int]:
+    """返回组件当前浏览器本体的位置说明和磁盘占用。"""
     if component.extra in ("playwright", "patchright"):
         entries = playwright_revisions(component.extra)
         if not entries:
@@ -465,6 +519,7 @@ def browser_body_location(component: Component) -> tuple[str, int]:
 
 
 def playwright_revisions(engine: str) -> list[tuple[Path, int]]:
+    """列出属于当前 Playwright/Patchright 版本的浏览器 revision。"""
     import json
 
     from ipclick.adapters.browser_engines import playwright_registry_dir

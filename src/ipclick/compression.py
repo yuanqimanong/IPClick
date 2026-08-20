@@ -1,3 +1,5 @@
+"""为 unary gRPC 请求按内容选择压缩；流式 RPC 仅按开关决定是否 gzip。"""
+
 from __future__ import annotations
 
 from typing import Any, Final, final
@@ -33,7 +35,9 @@ _TEXT_CONTROL = frozenset({0x09, 0x0A, 0x0C, 0x0D})
 
 
 def normalize_mode(value: Any, default: str = "auto") -> str:
-    mode = str(value or default).strip().lower()
+    """把兼容的布尔写法归一为 ``auto``、``gzip`` 或 ``none``。"""
+    raw = default if value is None or (isinstance(value, str) and not value.strip()) else value
+    mode = str(raw).strip().lower()
     if mode in ("true", "yes", "1", "on"):
         return "gzip"
     if mode in ("false", "no", "0", "off"):
@@ -45,6 +49,7 @@ def normalize_mode(value: Any, default: str = "auto") -> str:
 
 
 def looks_incompressible(body: bytes) -> bool:
+    """用文件魔数和小样本启发式判断请求体是否不值得 gzip。"""
     if not body:
         return False
     for magic in _MAGIC_PREFIXES:
@@ -60,6 +65,7 @@ def looks_incompressible(body: bytes) -> bool:
 
 
 def _decodes_as_utf8(sample: bytes, *, truncated: bool) -> bool:
+    """判断样本能否作为 UTF-8 解码，并容忍截断的末尾字符。"""
     for cut in range(4 if truncated else 1):
         chunk = sample[: len(sample) - cut] if cut else sample
         try:
@@ -71,6 +77,7 @@ def _decodes_as_utf8(sample: bytes, *, truncated: bool) -> bool:
 
 
 def choose(pb_request: Any, mode: str = "auto", threshold: int = DEFAULT_THRESHOLD) -> grpc.Compression | None:
+    """根据模式、消息大小和请求体内容选择单次调用的 gRPC 压缩。"""
     if mode == "none":
         return None
     if mode == "gzip":
@@ -91,25 +98,31 @@ def choose(pb_request: Any, mode: str = "auto", threshold: int = DEFAULT_THRESHO
 
 @final
 class CompressionPolicy:
+    """从客户端配置构建可复用的请求压缩决策器。"""
+
     __slots__ = ("mode", "threshold")
 
     def __init__(self, client_config: dict[str, Any] | None = None) -> None:
+        """解析压缩模式和启用压缩的字节阈值。"""
         config = dict(client_config or {})
         self.mode: str = normalize_mode(config.get("compression", "auto"))
         raw = config.get("compression_threshold", DEFAULT_THRESHOLD)
         try:
             self.threshold: int = max(0, int(raw))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             log.warning(f"[CLIENT].compression_threshold 不是整数（{raw!r}），改用 {DEFAULT_THRESHOLD}")
             self.threshold = DEFAULT_THRESHOLD
 
     def for_request(self, pb_request: Any) -> grpc.Compression | None:
+        """返回普通请求应使用的压缩算法。"""
         return choose(pb_request, self.mode, self.threshold)
 
     def for_stream(self) -> grpc.Compression | None:
+        """返回流式 RPC 的压缩算法；流无法在建流前估算整体大小。"""
         return None if self.mode == "none" else grpc.Compression.Gzip
 
     def describe(self) -> str:
+        """返回适合展示在状态页上的策略说明。"""
         if self.mode == "auto":
             return f"auto（超过 {self.threshold} 字节且可压缩时用 gzip）"
         return self.mode

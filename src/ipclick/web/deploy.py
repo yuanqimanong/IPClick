@@ -1,7 +1,11 @@
+"""生成集群子节点配置、启动命令和可下载部署包。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 import io
+import json
+import re
 from typing import Any, final
 import zipfile
 
@@ -10,10 +14,27 @@ from ipclick.ports import DEFAULT_GRPC_PORT, DEFAULT_WEB_PORT
 
 _BANNER = "# 由 IPClick 主控的「配置 → 集群设置」生成。改完记得两边保持一致。"
 
+_DOTENV_PLAIN = re.compile(r"[A-Za-z0-9._~+/=:-]*\Z")
+
+
+def _toml_string(value: Any) -> str:
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _dotenv_value(value: str) -> str:
+    # dotenv 的未加引号值会把 ``#``、空白和换行解释成语法；必要时改用兼容的双引号形式。
+    return value if _DOTENV_PLAIN.fullmatch(value) else json.dumps(value, ensure_ascii=False)
+
+
+def _comment_text(value: Any) -> str:
+    return " ".join(str(value).splitlines())
+
 
 @final
 @dataclass(frozen=True)
 class NodePlan:
+    """单个集群节点的部署产物集合。"""
+
     node_id: str
     address: str
     host: str
@@ -25,14 +46,18 @@ class NodePlan:
 
     @property
     def filename_prefix(self) -> str:
-        safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in self.node_id)
+        """返回可安全用作 ZIP 目录名的节点标识。"""
+        safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in self.node_id).strip(".")
+        # ``.``/``..`` 作为 ZIP 路径段会在解压时指向当前目录或父目录。
         return safe or f"node-{self.port}"
 
     @property
     def toml_name(self) -> str:
+        """返回包含监听端口的配置文件名。"""
         return f"ipclick-{self.port}.toml"
 
     def snapshot(self) -> dict[str, Any]:
+        """返回供模板与 JSON 接口消费的可序列化视图。"""
         return {
             "node_id": self.node_id,
             "address": self.address,
@@ -63,9 +88,15 @@ def node_toml(
     forward: bool,
     max_workers: int = 100,
 ) -> str:
-    entries = "".join(f'    {{ id = "{n["id"]}", address = "{n["address"]}" }},\n' for n in nodes if n.get("address"))
+    """生成一台子节点的 TOML 配置文本。"""
+    # 节点字段来自可编辑配置，必须按 TOML 字符串转义，不能直接拼进生成文件。
+    entries = "".join(
+        f"    {{ id = {_toml_string(n['id'])}, address = {_toml_string(n['address'])} }},\n"
+        for n in nodes
+        if n.get("address")
+    )
     return f"""{_BANNER}
-# 这一台是 {node_id}。
+# 这一台是 {_comment_text(node_id)}。
 
 [SERVER]
 # 监听所有网卡：主控要从别的机器连过来。
@@ -83,7 +114,7 @@ host = "127.0.0.1"
 # 和主控保持一致：谁被访问谁就是入口，所以每台都要有完整的节点列表。
 forward = "{"on" if forward else "off"}"
 # 这一行是这台机器**唯一**和别人不同的地方。
-self_id = "{node_id}"
+self_id = {_toml_string(node_id)}
 # 允许主控远程装 / 卸可选组件，省掉逐台 SSH 上去敲命令。
 # 生成的部署包里默认打开——你既然是从主控生成的这份配置，就已经信任它了。
 # 不想要的话把它改成 false：那之后主控的组件页对这台会返回"未开启"。
@@ -98,22 +129,24 @@ block_private_networks = false
 
 
 def node_env(*, auth_token: str, cluster_secret: str) -> str:
+    """生成子节点的鉴权环境变量文件内容。"""
     lines = [
         _BANNER,
         "# 权限应为 600：chmod 600 .env",
         "",
         "# 调用方 -> 服务端的鉴权。整个集群用同一个，听主控的。",
-        f"IPCLICK_AUTH_TOKEN={auth_token}",
+        f"IPCLICK_AUTH_TOKEN={_dotenv_value(auth_token)}",
         "",
         "# 节点 -> 节点的内部鉴权。由它派生出每台各不相同的令牌，",
         "# 所以所有机器必须是**同一个值**（各自生成一个就全对不上了）。",
-        f"IPCLICK_CLUSTER_SECRET={cluster_secret}",
+        f"IPCLICK_CLUSTER_SECRET={_dotenv_value(cluster_secret)}",
         "",
     ]
     return "\n".join(lines)
 
 
 def node_commands(*, port: int, version: str, extras: str = "") -> tuple[tuple[str, str], ...]:
+    """生成 pip、uv 与本地 wheel 三组启动命令。"""
     suffix = f"[{extras}]" if extras else ""
     pinned = f'"ipclick{suffix}=={version}"'
     wheel = f"ipclick-{version}-py3-none-any.whl{suffix}"
@@ -162,6 +195,7 @@ def build_plan(
     extras: str = "",
     max_workers: int = 100,
 ) -> NodePlan:
+    """根据节点条目与集群公共配置构建完整部署计划。"""
     if not version:
         from ipclick import __version__
 
@@ -190,6 +224,7 @@ def build_plan(
 
 
 def bundle(plans: list[NodePlan]) -> bytes:
+    """将多个节点部署计划打包为内存中的 ZIP 字节串。"""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         readme = [
@@ -210,9 +245,15 @@ def bundle(plans: list[NodePlan]) -> bytes:
             "",
             "包含的节点：",
         ]
-        for plan in plans:
-            readme.append(f"  {plan.filename_prefix:<24} {plan.address}")
+        used_roots: set[str] = set()
+        for index, plan in enumerate(plans, start=1):
             root = plan.filename_prefix
+            if root in used_roots:
+                root = f"{root}-{plan.port}"
+            if root in used_roots:
+                root = f"{root}-{index}"
+            used_roots.add(root)
+            readme.append(f"  {root:<24} {plan.address}")
             archive.writestr(f"{root}/{plan.toml_name}", plan.toml)
             archive.writestr(f"{root}/.env", plan.env)
             archive.writestr(

@@ -142,3 +142,54 @@ def test_curl_cffi_closes_both_session_kinds(monkeypatch: pytest.MonkeyPatch) ->
     adapter.close()
 
     assert sync_session.closed is True
+
+
+def test_curl_cffi_stream_preserves_whitelisted_request_kwargs() -> None:
+    class StreamResponse:
+        def __init__(self) -> None:
+            self.url: str = "https://example.com/file"
+            self.status_code: int = 200
+            self.headers: dict[str, str] = {"content-length": "3"}
+
+        def iter_content(self, *, chunk_size: int) -> list[bytes]:
+            assert chunk_size == 1024
+            return [b"abc"]
+
+        def close(self) -> None:
+            return None
+
+    class StreamSession:
+        def __init__(self) -> None:
+            self.request_kwargs: dict[str, Any] = {}
+
+        def request(self, _method: str, _url: str, **kwargs: Any) -> StreamResponse:
+            self.request_kwargs = kwargs
+            return StreamResponse()
+
+    class StreamCache:
+        def __init__(self, session: StreamSession) -> None:
+            self.session: StreamSession = session
+
+        def get(self, _key: object) -> StreamSession:
+            return self.session
+
+    session = StreamSession()
+    adapter: Any = object.__new__(CurlCffiAdapter)
+    adapter.timeout = 60
+    adapter._sessions = StreamCache(session)
+
+    events = list(
+        adapter.download_stream(
+            "https://example.com/file",
+            chunk_size=1024,
+            allow_redirects=False,
+            kwargs='{"ja3":"fingerprint","cert":"client.pem","unknown":"drop"}',
+        )
+    )
+
+    assert events[1] == b"abc"
+    assert session.request_kwargs["stream"] is True
+    assert session.request_kwargs["allow_redirects"] is False
+    assert session.request_kwargs["ja3"] == "fingerprint"
+    assert session.request_kwargs["cert"] == "client.pem"
+    assert "unknown" not in session.request_kwargs

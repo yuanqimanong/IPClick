@@ -1,3 +1,5 @@
+"""记录请求链路、进程计数器以及可选的异步 SQLite 历史。"""
+
 from __future__ import annotations
 
 from collections.abc import Generator, Sequence
@@ -13,6 +15,7 @@ import sys
 import threading
 import time
 from typing import Any, final
+from urllib.parse import quote
 
 from ipclick.utils.coerce import as_bool, as_int, as_text
 from ipclick.utils.log_util import log
@@ -34,7 +37,8 @@ _URL_MAX_LEN = 512
 
 
 def classify_status(status_code: int) -> str:
-    if status_code < 0:
+    """把最终状态码归入界面和查询共用的状态分类。"""
+    if status_code < 200:
         return "failure"
     if status_code < 300:
         return "2xx"
@@ -48,6 +52,8 @@ def classify_status(status_code: int) -> str:
 @final
 @dataclass(frozen=True, slots=True)
 class TraceRecord:
+    """一条不可变的已完成请求链路记录。"""
+
     ts: float
     uuid: str
     node_id: str
@@ -65,27 +71,33 @@ class TraceRecord:
 
     @property
     def host(self) -> str:
+        """返回用于限流和站点排行的目标主机。"""
         from ipclick.limiter import host_of
 
         return host_of(self.url) or self.url or "-"
 
     @property
     def ok(self) -> bool:
+        """将 2xx 与 3xx 视为执行成功。"""
         return 200 <= self.status_code < 400
 
     @property
     def status_class(self) -> str:
+        """返回可筛选的状态类别。"""
         return classify_status(self.status_code)
 
     @property
     def when(self) -> str:
+        """按服务端本地时区格式化展示时间。"""
         return datetime.fromtimestamp(self.ts).strftime("%Y-%m-%d %H:%M:%S")
 
     @property
     def iso(self) -> str:
+        """返回带本地时区偏移的 ISO 时间。"""
         return datetime.fromtimestamp(self.ts).astimezone().isoformat(timespec="seconds")
 
     def as_row(self) -> tuple[Any, ...]:
+        """转换为与 SQLite 插入列顺序一致的元组，并限制敏感长文本。"""
         return (
             self.ts,
             self.uuid,
@@ -106,6 +118,7 @@ class TraceRecord:
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> TraceRecord:
+        """从 SQLite 行恢复链路记录。"""
         return cls(
             ts=float(row["ts"]),
             uuid=str(row["uuid"] or ""),
@@ -127,6 +140,8 @@ class TraceRecord:
 @final
 @dataclass(frozen=True, slots=True)
 class TraceSettings:
+    """链路内存缓冲、落盘队列和保留策略。"""
+
     memory_size: int = DEFAULT_MEMORY_SIZE
     sqlite_enabled: bool = False
     sqlite_path: str = "ipclick-trace.db"
@@ -138,9 +153,11 @@ class TraceSettings:
 
     @classmethod
     def from_config(cls, section: dict[str, Any], node_id: str = "") -> TraceSettings:
+        """容错解析 ``[TRACE]`` 配置，并对非法整数给出警告。"""
         defaults = cls()
 
         def _int(key: str, default: int, minimum: int) -> int:
+            """读取单个非负整数并在回退默认值时解释原因。"""
             if key not in section:
                 return default
             raw = section[key]
@@ -164,12 +181,15 @@ class TraceSettings:
 @final
 @dataclass
 class _AdapterStat:
+    """进程内单个适配器的累积计数。"""
+
     total: int = 0
     ok: int = 0
     duration_ms: int = 0
     bytes: int = 0
 
     def snapshot(self) -> dict[str, Any]:
+        """生成不暴露可变内部状态的统计快照。"""
         return {
             "total": self.total,
             "ok": self.ok,
@@ -181,7 +201,10 @@ class _AdapterStat:
 
 @final
 class Counters:
+    """线程安全地累计当前进程的请求、重试与拒绝指标。"""
+
     def __init__(self) -> None:
+        """初始化空计数器并记录进程统计起点。"""
         self._lock: threading.Lock = threading.Lock()
         self.started_at: float = time.time()
         self.total: int = 0
@@ -196,11 +219,13 @@ class Counters:
         self.rejected: dict[str, int] = {}
 
     def enter(self) -> None:
+        """标记一个请求进入执行阶段。"""
         with self._lock:
             self.in_flight += 1
             self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
 
     def leave(self, record: TraceRecord) -> None:
+        """标记请求完成并归入状态及适配器统计。"""
         with self._lock:
             self.in_flight = max(0, self.in_flight - 1)
             self.total += 1
@@ -220,14 +245,17 @@ class Counters:
                 stat.ok += 1
 
     def record_retry(self, reason: str) -> None:
+        """按规范化原因累计一次重试。"""
         with self._lock:
             self.retries[reason] = self.retries.get(reason, 0) + 1
 
     def record_rejected(self, reason: str) -> None:
+        """按原因累计一次准入拒绝。"""
         with self._lock:
             self.rejected[reason] = self.rejected.get(reason, 0) + 1
 
     def snapshot(self) -> dict[str, Any]:
+        """在同一把锁内生成一致的进程指标快照。"""
         with self._lock:
             total = self.total
             return {
@@ -293,7 +321,7 @@ _SCHEMA_INDEXES = """
 -- ts 上的索引同时服务三件事：按时间倒序列表、时间范围统计、按天清理。
 CREATE INDEX IF NOT EXISTS idx_traces_ts ON traces(ts DESC);
 -- 只查失败记录是最常见的排查动作，单独给它一个偏索引。
-CREATE INDEX IF NOT EXISTS idx_traces_failed ON traces(ts DESC) WHERE status_code < 0 OR status_code >= 400;
+CREATE INDEX IF NOT EXISTS idx_traces_failed ON traces(ts DESC) WHERE status_code < 200 OR status_code >= 400;
 -- 目标站点排行按 host 分组，且总是带时间范围
 CREATE INDEX IF NOT EXISTS idx_traces_host ON traces(host, ts DESC);
 """
@@ -303,6 +331,7 @@ _CLAIM_SUFFIX = ".owner"
 
 
 def _claim_database(path: str) -> str:
+    """写入进程占用标记，并提示多个实例误用同一链路库。"""
     marker = path + _CLAIM_SUFFIX
     try:
         previous = int(Path(marker).read_text(encoding="utf-8").strip() or 0)
@@ -326,6 +355,7 @@ def _claim_database(path: str) -> str:
 
 
 def _release_database(marker: str) -> None:
+    """仅由仍持有标记的进程清理占用文件。"""
     if not marker:
         return
     with contextlib.suppress(OSError):
@@ -334,6 +364,7 @@ def _release_database(marker: str) -> None:
 
 
 def _process_alive(pid: int) -> bool:
+    """尽力判断 POSIX 进程是否存活；Windows 采用保守结果。"""
     if pid <= 0:
         return False
     if sys.platform == "win32":
@@ -350,15 +381,23 @@ def _process_alive(pid: int) -> bool:
 
 
 class TraceReader:
+    """以短连接方式只读查询 SQLite 链路库。"""
+
     def __init__(self, path: str) -> None:
+        """保存规范化后的数据库绝对路径。"""
         self.path: str = os.path.abspath(path)
 
     def exists(self) -> bool:
+        """数据库文件是否存在。"""
         return os.path.isfile(self.path)
 
     def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
+        """打开带 ``sqlite3.Row`` 行工厂的短生命周期连接。"""
         if readonly:
-            conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=5.0)
+            # SQLite URI 会把 ? 和 # 当作查询串/片段；路径必须先编码，
+            # 同时保留盘符冒号和目录分隔符。
+            encoded_path = quote(Path(self.path).as_posix(), safe="/:")
+            conn = sqlite3.connect(f"file:{encoded_path}?mode=ro", uri=True, timeout=5.0)
         else:
             conn = sqlite3.connect(self.path, timeout=10.0)
         conn.row_factory = sqlite3.Row
@@ -374,6 +413,7 @@ class TraceReader:
         adapter: str = "",
         keyword: str = "",
     ) -> list[TraceRecord]:
+        """按时间倒序查询链路，并支持状态、适配器和 URL 过滤。"""
         where: list[str] = []
         params: list[Any] = []
         if since is not None:
@@ -404,6 +444,7 @@ class TraceReader:
             return []
 
     def summary(self, since: float | None = None) -> dict[str, Any]:
+        """汇总指定时间窗内的总体和各适配器指标。"""
         where = "WHERE ts >= ?" if since is not None else ""
         params: tuple[Any, ...] = (since,) if since is not None else ()
         try:
@@ -453,6 +494,7 @@ class TraceReader:
             return {"total": 0, "ok": 0, "failed": 0, "success_rate": 0.0, "avg_ms": 0.0, "bytes": 0, "by_adapter": {}}
 
     def daily(self, days: int = 30) -> list[dict[str, Any]]:
+        """按服务端本地日期汇总最近若干天的趋势。"""
         since = time.time() - days * 86400
         try:
             conn = self._connect(readonly=True)
@@ -481,6 +523,7 @@ class TraceReader:
             return []
 
     def top_hosts(self, since: float | None = None, limit: int = 10) -> list[dict[str, Any]]:
+        """返回指定时间窗内请求量最高的目标主机。"""
         where = "WHERE ts >= ?" if since is not None else ""
         params: tuple[Any, ...] = (since,) if since is not None else ()
         sql = f"""SELECT COALESCE(host, '-') AS host, COUNT(*) AS total,
@@ -509,6 +552,7 @@ class TraceReader:
         ]
 
     def db_size(self) -> int:
+        """计算主库、WAL 与共享内存文件的总占用。"""
         total = 0
         for suffix in ("", "-wal", "-shm"):
             with contextlib.suppress(OSError):
@@ -516,6 +560,7 @@ class TraceReader:
         return total
 
     def count(self) -> int:
+        """返回链路总行数，数据库不可读时返回零。"""
         try:
             conn = self._connect(readonly=True)
             try:
@@ -529,7 +574,10 @@ class TraceReader:
 
 @final
 class SQLiteSink(TraceReader):
+    """通过有界队列和单独线程批量写入链路数据库。"""
+
     def __init__(self, path: str, retention_days: int = 30, queue_size: int = DEFAULT_QUEUE_SIZE) -> None:
+        """初始化数据库、占用标记及后台写线程。"""
         super().__init__(path)
         self.retention_days: int = retention_days
         self.dropped: int = 0
@@ -540,6 +588,7 @@ class SQLiteSink(TraceReader):
         self._lock: threading.Lock = threading.Lock()
         self._last_drop_log: float = 0.0
         self._closed: bool = False
+        self._stop: threading.Event = threading.Event()
 
         self._init_db()
         self._claim_marker: str = _claim_database(self.path)
@@ -547,6 +596,7 @@ class SQLiteSink(TraceReader):
         self._thread.start()
 
     def _init_db(self) -> None:
+        """配置 WAL、创建表与索引，并执行兼容迁移。"""
         parent = os.path.dirname(self.path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -564,6 +614,7 @@ class SQLiteSink(TraceReader):
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
+        """为旧版数据库补齐可派生的新列。"""
         existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(traces)")}
         if "host" not in existing:
             _ = conn.execute("ALTER TABLE traces ADD COLUMN host TEXT")
@@ -579,44 +630,53 @@ class SQLiteSink(TraceReader):
             log.info("链路记录库已补上 host 列（用于目标站点排行）")
 
     def submit(self, record: TraceRecord) -> None:
-        if self._closed or self.failed:
-            return
-        try:
-            self._queue.put_nowait(record)
-        except queue.Full:
-            with self._lock:
+        """无阻塞提交记录；队列过载时丢弃并限频告警。"""
+        should_log = False
+        dropped = 0
+        with self._lock:
+            if self._closed or self.failed:
+                return
+            try:
+                self._queue.put_nowait(record)
+            except queue.Full:
                 self.dropped += 1
                 dropped = self.dropped
                 now = time.monotonic()
                 should_log = now - self._last_drop_log > 60
                 if should_log:
                     self._last_drop_log = now
-            if should_log:
-                log.warning(
-                    f"链路记录队列已满，累计丢弃 {dropped} 条（写盘跟不上请求速率；可关闭 [TRACE].sqlite_enabled）"
-                )
+        if should_log:
+            log.warning(f"链路记录队列已满，累计丢弃 {dropped} 条（写盘跟不上请求速率；可关闭 [TRACE].sqlite_enabled）")
 
     def _run(self) -> None:
+        """持续批量落盘，并按低频周期执行保留期清理。"""
         next_retention = 0.0
-        while True:
-            batch = self._drain()
-            if batch is None:
-                break
-            if batch:
-                self._write(batch)
-            if self.failed:
-                break
-            now = time.monotonic()
-            if now >= next_retention:
-                next_retention = now + _RETENTION_INTERVAL
-                self._purge()
+        try:
+            while True:
+                batch = self._drain()
+                if batch is None:
+                    break
+                if batch:
+                    self._write(batch)
+                if self.failed:
+                    break
+                now = time.monotonic()
+                if now >= next_retention:
+                    next_retention = now + _RETENTION_INTERVAL
+                    self._purge()
+        finally:
+            # 即使写线程异常退出，也不能留下误导其他实例的活跃占用标记。
+            _release_database(self._claim_marker)
 
     def _drain(self) -> list[TraceRecord] | None:
+        """等待首条记录后，在时间和条数上限内拼出一个批次。"""
         batch: list[TraceRecord] = []
+        if self._stop.is_set() and self._queue.empty():
+            return None
         try:
             first = self._queue.get(timeout=_FLUSH_INTERVAL)
         except queue.Empty:
-            return batch
+            return None if self._stop.is_set() else batch
         if first is None:
             return None
         batch.append(first)
@@ -638,6 +698,7 @@ class SQLiteSink(TraceReader):
         return batch
 
     def _write(self, batch: Sequence[TraceRecord]) -> None:
+        """在单个事务中写入一批记录；失败后永久降级为内存模式。"""
         try:
             conn = self._connect()
             try:
@@ -653,6 +714,7 @@ class SQLiteSink(TraceReader):
             self.written += len(batch)
 
     def _purge(self) -> None:
+        """删除超过保留期的记录，并渐进回收空闲页。"""
         if self.retention_days <= 0:
             return
         cutoff = time.time() - self.retention_days * 86400
@@ -672,33 +734,45 @@ class SQLiteSink(TraceReader):
             log.warning(f"链路记录清理失败: {e}")
 
     def close(self, timeout: float = 5.0) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        """停止接收新记录，尽量排空队列并等待后台线程结束。"""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._stop.set()
+        # 哨兵负责快速唤醒空队列；队列满时 stop event 会在排空后让 worker 自行退出。
         with contextlib.suppress(queue.Full):
             self._queue.put_nowait(None)
-        self._thread.join(timeout=timeout)
-        _release_database(self._claim_marker)
+        self._thread.join(timeout=max(0.0, timeout))
+        if not self._thread.is_alive():
+            _release_database(self._claim_marker)
+        else:
+            log.warning("链路记录后台线程未在关闭超时内结束，将在排空当前队列后自行退出")
 
 
 def _escape_like(text: str) -> str:
+    """转义 SQLite LIKE 查询中的通配符。"""
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _status_clause(status_class: str) -> str:
+    """把受控状态筛选值映射为无用户插值的 SQL 条件。"""
     return {
         "2xx": "status_code BETWEEN 200 AND 299",
         "3xx": "status_code BETWEEN 300 AND 399",
         "4xx": "status_code BETWEEN 400 AND 499",
         "5xx": "status_code >= 500",
-        "failure": "status_code < 0",
-        "failed": "status_code < 0 OR status_code >= 400",
+        "failure": "status_code < 200",
+        "failed": "status_code < 200 OR status_code >= 400",
+        "error": "status_code < 200 OR status_code >= 400",
     }.get(status_class, "")
 
 
 @final
 @dataclass
 class RequestTrace:
+    """请求执行期间由服务层逐步填充的可变链路上下文。"""
+
     adapter: str
     method: str
     uuid: str = ""
@@ -715,7 +789,10 @@ class RequestTrace:
 
 @final
 class TraceRecorder:
+    """协调进程计数、内存环形历史和可选 SQLite sink。"""
+
     def __init__(self, settings: TraceSettings | None = None) -> None:
+        """按设置初始化内存与可选持久化记录器。"""
         self.settings: TraceSettings = settings or TraceSettings()
         self.node_id: str = self.settings.node_id or _default_node_id()
         self.counters: Counters = Counters()
@@ -742,6 +819,7 @@ class TraceRecorder:
     def track_request(
         self, adapter: str, method: str, *, uuid: str = "", url: str = "", stream: bool = False
     ) -> Generator[RequestTrace]:
+        """跟踪请求生命周期，并保证异常路径也产生完成记录。"""
         tr = RequestTrace(adapter=adapter, method=method, uuid=uuid, url=url, stream=stream, node_id=self.node_id)
         self.counters.enter()
         start = time.monotonic()
@@ -752,6 +830,7 @@ class TraceRecorder:
             self.emit(tr, duration_ms)
 
     def emit(self, tr: RequestTrace, duration_ms: int) -> None:
+        """冻结请求上下文，更新计数器并送入记录后端。"""
         url = tr.url if self.settings.record_url else _host_only(tr.url)
         record = TraceRecord(
             ts=time.time(),
@@ -773,6 +852,7 @@ class TraceRecorder:
         self._push(record)
 
     def _push(self, record: TraceRecord) -> None:
+        """按 only-errors 策略写入有界内存历史和异步 sink。"""
         if self.settings.only_errors and record.ok:
             return
         if self.settings.memory_size > 0:
@@ -785,9 +865,11 @@ class TraceRecorder:
             self.sink.submit(record)
 
     def record_retry(self, adapter: str, reason: str) -> None:
+        """累计指定适配器的一次重试。"""
         self.counters.record_retry(f"{adapter}:{reason}" if adapter else reason)
 
     def record_rejected(self, reason: str) -> None:
+        """累计一次服务端准入拒绝。"""
         self.counters.record_rejected(reason)
 
     def recent(
@@ -798,6 +880,7 @@ class TraceRecorder:
         adapter: str = "",
         keyword: str = "",
     ) -> list[TraceRecord]:
+        """筛选并返回最新的内存记录副本。"""
         with self._recent_lock:
             records = list(reversed(self._recent))
         return [r for r in records if _matches(r, status_class, adapter, keyword)][: max(1, limit)]
@@ -812,6 +895,7 @@ class TraceRecorder:
         adapter: str = "",
         keyword: str = "",
     ) -> tuple[list[TraceRecord], str]:
+        """优先查询健康的 SQLite sink，否则退回内存记录。"""
         if self.sink is not None and not self.sink.failed:
             return (
                 self.sink.query(
@@ -830,6 +914,7 @@ class TraceRecorder:
         return self.recent(limit, status_class=status_class, adapter=adapter, keyword=keyword), "memory"
 
     def status(self) -> dict[str, Any]:
+        """返回记录后端、容量、丢弃量和数据库大小。"""
         with self._recent_lock:
             in_memory = len(self._recent)
         info: dict[str, Any] = {
@@ -857,12 +942,14 @@ class TraceRecorder:
         return info
 
     def stats(self, days: int = 30) -> dict[str, Any]:
+        """组合实时进程计数与指定时间窗的持久化统计。"""
         out: dict[str, Any] = {"process": self.counters.snapshot(), "recorder": self.status()}
         if self.sink is not None and not self.sink.failed:
             out.update(self._window_stats(days))
         return out
 
     def _window_stats(self, days: int) -> dict[str, Any]:
+        """短时缓存开销较高的 SQLite 窗口统计。"""
         now = time.monotonic()
         with self._window_lock:
             cached = self._window_cache.get(days)
@@ -884,29 +971,33 @@ class TraceRecorder:
         return data
 
     def close(self) -> None:
+        """关闭持久化 sink；内存快照仍可读取。"""
         if self.sink is not None:
             self.sink.close()
 
 
 def _matches(record: TraceRecord, status_class: str, adapter: str, keyword: str) -> bool:
+    """判断内存记录是否满足与 SQLite 查询一致的过滤条件。"""
     if adapter and record.adapter != adapter:
         return False
     if keyword and keyword.lower() not in record.url.lower():
         return False
     if not status_class:
         return True
-    if status_class == "failed":
+    if status_class in ("failed", "error"):
         return not record.ok
     return record.status_class == status_class
 
 
 def _host_only(url: str) -> str:
+    """在关闭完整 URL 记录时仅保留 hostname。"""
     from ipclick.limiter import host_of
 
     return host_of(url) or ""
 
 
 def _default_node_id() -> str:
+    """以主机名和 PID 生成单进程可区分的默认节点标识。"""
     import socket
 
     try:
@@ -921,6 +1012,7 @@ _recorder_lock = threading.Lock()
 
 
 def get_recorder() -> TraceRecorder:
+    """线程安全地惰性创建全局记录器。"""
     global _recorder
     if _recorder is not None:
         return _recorder
@@ -931,6 +1023,7 @@ def get_recorder() -> TraceRecorder:
 
 
 def init_recorder(settings: TraceSettings) -> TraceRecorder:
+    """用新设置替换全局记录器并关闭旧 sink。"""
     global _recorder
     with _recorder_lock:
         old = _recorder
@@ -941,6 +1034,7 @@ def init_recorder(settings: TraceSettings) -> TraceRecorder:
 
 
 def reset_recorder() -> None:
+    """关闭并清空全局记录器，主要供进程退出和测试隔离使用。"""
     global _recorder
     with _recorder_lock:
         old = _recorder

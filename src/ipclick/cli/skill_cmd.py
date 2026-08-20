@@ -1,3 +1,5 @@
+"""展示、定位和安装随包提供的 AI 技能文件。"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,12 +13,13 @@ from ipclick.cli.output import Exit, emit, fail, json_option
 
 @click.group()
 def skill() -> None:
-    pass
+    """管理 IPClick AI 技能包。"""
 
 
 @skill.command("show")
 @json_option
 def skill_show(as_json: bool) -> None:
+    """输出当前版本的技能 Markdown。"""
     text = skill_pkg.markdown()
     if as_json:
         emit(
@@ -45,6 +48,7 @@ def skill_show(as_json: bool) -> None:
 @click.option("--force", "-f", is_flag=True, default=False, help="已存在且内容不同时覆盖")
 @json_option
 def skill_install(target_dir: Path | None, force: bool, as_json: bool) -> None:
+    """将技能文件安装到项目级技能目录。"""
     result = skill_pkg.install(target_dir, force=force)
     if not result.written and not result.unchanged:
         fail(result.message, Exit.FAILED, as_json=as_json, path=str(result.path))
@@ -65,6 +69,7 @@ def skill_install(target_dir: Path | None, force: bool, as_json: bool) -> None:
 @skill.command("path")
 @json_option
 def skill_path(as_json: bool) -> None:
+    """输出发行包内技能源文件的绝对或相对路径。"""
     emit(
         {"ok": True, "path": str(skill_pkg.SKILL_FILE), "exists": skill_pkg.SKILL_FILE.exists()},
         as_json=as_json,

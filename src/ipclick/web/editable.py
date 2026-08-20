@@ -1,3 +1,5 @@
+"""声明 Web 可编辑配置字段，并把表单输入转换为受校验的配置更新。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,6 +17,8 @@ FieldKind = Literal["int", "float", "bool", "str", "choice"]
 @final
 @dataclass(frozen=True)
 class Field:
+    """一个可编辑配置项的类型、约束和展示元数据。"""
+
     section: str
     key: str
     label: str
@@ -28,9 +32,11 @@ class Field:
 
     @property
     def name(self) -> str:
+        """返回表单使用的稳定全限定字段名。"""
         return f"{self.section}.{self.key}"
 
     def parse(self, raw: str) -> str | int | float | bool:
+        """按字段类型和边界解析原始表单文本。"""
         text = (raw or "").strip()
         if self.kind == "bool":
             return text.lower() in ("1", "true", "on", "yes")
@@ -524,11 +530,13 @@ CLUSTER_GROUPS: frozenset[str] = frozenset({"集群"})
 
 
 def groups_for(tab: str) -> tuple[tuple[str, tuple[Field, ...]], ...]:
+    """返回基础配置或集群配置标签页对应的字段组。"""
     cluster = tab == "cluster"
     return tuple((name, fields) for name, fields in GROUPS if (name in CLUSTER_GROUPS) is cluster)
 
 
 def current_value(config: Any, field: Field) -> Any:
+    """沿嵌套 section 读取字段值，缺失或结构异常时使用默认值。"""
     node: Any = config
     for part in field.section.split("."):
         if not isinstance(node, dict):
@@ -540,6 +548,7 @@ def current_value(config: Any, field: Field) -> Any:
 
 
 def parse_form(form: dict[str, str]) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
+    """解析配置表单，分别返回更新、需重启字段和校验错误。"""
     updates: dict[str, dict[str, Any]] = {}
     restart_needed: list[str] = []
     errors: list[str] = []
@@ -565,6 +574,7 @@ def parse_form(form: dict[str, str]) -> tuple[dict[str, dict[str, Any]], list[st
 
 
 def parse_nodes(form: dict[str, str]) -> list[dict[str, Any]]:
+    """按页面行号顺序解析已有节点和待新增节点。"""
     indexes: set[int] = set()
     for key in form:
         if key.startswith("node_address_"):
@@ -597,6 +607,7 @@ def parse_nodes(form: dict[str, str]) -> list[dict[str, Any]]:
 
 
 def validate_nodes(nodes: list[dict[str, Any]]) -> list[str]:
+    """复用集群领域模型校验节点，并额外拒绝重复 id。"""
     from ipclick.cluster.node import Node
 
     errors: list[str] = []

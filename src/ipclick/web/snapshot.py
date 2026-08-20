@@ -1,3 +1,5 @@
+"""把运行时对象投影为 Web 模板使用的稳定快照结构。"""
+
 from __future__ import annotations
 
 from typing import Any, Protocol
@@ -23,6 +25,8 @@ BROWSER_DISABLED = "已关闭"
 
 
 class RuntimeView(Protocol):
+    """Web 管理端构建快照所需的运行时接口。"""
+
     config: Settings
     settings: ServerSettings
     cluster_config: ClusterConfig
@@ -32,14 +36,22 @@ class RuntimeView(Protocol):
     drained: set[str]
 
     @property
-    def web_address(self) -> str: ...
+    def web_address(self) -> str:
+        """返回 Web 管理端监听地址。"""
+        ...
 
     @property
-    def web_port(self) -> int: ...
+    def web_port(self) -> int:
+        """返回 Web 管理端监听端口。"""
+        ...
 
-    def dashboard_extras(self) -> dict[str, Any]: ...
+    def dashboard_extras(self) -> dict[str, Any]:
+        """返回页面层追加的仪表盘字段。"""
+        ...
 
-    def observed_nodes(self) -> list[dict[str, Any]]: ...
+    def observed_nodes(self) -> list[dict[str, Any]]:
+        """返回非转发模式下观察到的节点状态。"""
+        ...
 
 
 def _describe_engine(browser: BrowserSettings) -> str:
@@ -61,10 +73,12 @@ def _describe_mode(config: Settings) -> str:
 
 
 def build_live(view: RuntimeView) -> dict[str, Any]:
+    """构建高频轮询所需的最小实时数据。"""
     return {"trace": view.recorder.stats()}
 
 
 def build_cluster(view: RuntimeView) -> dict[str, Any]:
+    """构建集群配置、节点健康与流量摘除状态。"""
     from ipclick.cluster.forwarder import ForwardingTaskService
 
     service = view.task_service
@@ -85,6 +99,7 @@ def build_cluster(view: RuntimeView) -> dict[str, Any]:
 
 
 def build_dashboard(view: RuntimeView) -> dict[str, Any]:
+    """构建仪表盘首屏使用的完整运行时快照。"""
     from ipclick.adapters.registry import ADAPTER_CLASSES, DEFAULT_ADAPTER_NAME
 
     security = section(view.config, "SECURITY")

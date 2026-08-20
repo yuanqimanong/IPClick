@@ -1,3 +1,5 @@
+"""独立、只读的集群状态 HTML/JSON 服务。"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -98,6 +100,7 @@ def _format_ago(seconds: float | None) -> str:
 
 
 def render_page(snapshot: dict[str, Any]) -> str:
+    """将节点池快照转义并渲染为自动刷新的状态页。"""
     rows: list[str] = []
     for node in snapshot.get("nodes", []):
         status = str(node.get("status", "unknown"))
@@ -138,6 +141,7 @@ def render_page(snapshot: dict[str, Any]) -> str:
 
 
 def make_handler(snapshot_provider: Callable[[], dict[str, Any]]) -> type[BaseHTTPRequestHandler]:
+    """创建绑定指定快照提供器的只读 HTTP handler。"""
 
     class StatusHandler(BaseHTTPRequestHandler):
         server_version: str = "IPClickStatus/1.0"
@@ -189,12 +193,15 @@ def make_handler(snapshot_provider: Callable[[], dict[str, Any]]) -> type[BaseHT
 
 
 class StatusPageServer:
+    """在后台线程运行轻量级集群状态 HTTP 服务。"""
+
     def __init__(self, snapshot_provider: Callable[[], dict[str, Any]]):
         self._provider: Callable[[], dict[str, Any]] = snapshot_provider
         self._httpd: HTTPServer | None = None
         self._thread: threading.Thread | None = None
 
     def start(self, port: int, host: str = "127.0.0.1") -> bool:
+        """幂等启动状态页；端口绑定失败时返回 ``False``。"""
         if self._httpd is not None:
             return True
         try:
@@ -209,10 +216,14 @@ class StatusPageServer:
         return True
 
     def stop(self) -> None:
+        """停止 HTTP 循环并关闭监听套接字。"""
         if self._httpd is not None:
             self._httpd.shutdown()
             self._httpd.server_close()
             self._httpd = None
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2)
         self._thread = None
 
 

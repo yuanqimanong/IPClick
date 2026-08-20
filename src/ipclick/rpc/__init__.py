@@ -1,3 +1,5 @@
+"""gRPC channel 构造器和公共选项的稳定导出层。"""
+
 from __future__ import annotations
 
 from ipclick.rpc.channel import credentials_for, open_async_channel, open_channel, open_channel_for

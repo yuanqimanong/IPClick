@@ -1,7 +1,10 @@
+"""同步任务 RPC 的请求校验、执行、流式传输、批处理与资源清理。"""
+
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 import json
+import math
 import queue
 import threading
 import time
@@ -18,10 +21,11 @@ from ipclick.adapters.registry import (
     get_default_adapter,
     resolve_browser_adapter_name,
 )
-from ipclick.adapters.settings import AdapterSettings
+from ipclick.adapters.settings import HARD_MAX_RETRIES, AdapterSettings
 from ipclick.dto.models import METHOD_MAP, IPClickAdapter
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
 from ipclick.dto.response import Response
+from ipclick.exceptions import ValidationError
 from ipclick.limiter import HostLimiter, build_limiter
 from ipclick.protocols import ShardableLimiter
 from ipclick.server_settings import ServerSettings
@@ -41,11 +45,14 @@ _DEFAULT_STREAM = False
 
 
 def caller_still_waiting(context: object) -> bool:
+    """兼容真实/内部上下文地判断调用方是否仍在等待。"""
     checker = getattr(context, "is_active", None)
-    if not callable(checker):
-        return True
     try:
-        return bool(checker())
+        if callable(checker):
+            return bool(checker())
+        # grpc.aio.ServicerContext 没有 is_active()，以 cancelled() 表示对端状态。
+        cancelled = getattr(context, "cancelled", None)
+        return not bool(cancelled()) if callable(cancelled) else True
     except Exception:
         return True
 
@@ -54,6 +61,7 @@ FORWARD_HEADER = "ipclick-forwarded"
 
 
 def is_forwarded(context: object) -> bool:
+    """检查内部一跳转发标记，防止服务端之间形成派发环路。"""
     getter = cast(Callable[[], Any] | None, getattr(context, "invocation_metadata", None))
     if not callable(getter):
         return False
@@ -84,6 +92,8 @@ def _build_trace(tr: RequestTrace | None) -> "task_pb2.Trace | None":
 
 
 class TaskService(task_pb2_grpc.TaskServiceServicer):
+    """实现下载、流式下载、批量任务、探测和组件管理 RPC。"""
+
     def __init__(self, config: Settings):
         self.config: Settings = config
 
@@ -123,6 +133,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             )
 
     def limiters_for_sharding(self) -> list[ShardableLimiter]:
+        """返回可按健康节点数分摊配额的限流器。"""
         return [self.host_limiter]
 
     def _cache_key(self, name: str) -> str:
@@ -134,6 +145,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         return name
 
     def _get_cached_adapter(self, name: str) -> DownloaderAdapter:
+        """线程安全地惰性创建并复用下载适配器。"""
         key = self._cache_key(name)
         adapter = self._adapter_cache.get(key)
         if adapter is not None:
@@ -146,6 +158,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @override
     def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
+        """校验并执行单个下载，将可预期异常映射为稳定响应。"""
         started = time.monotonic()
         with self.track(request, context) as tr:
             try:
@@ -159,6 +172,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @contextmanager
     def track(self, request: "task_pb2.ReqTask", context: ServicerContext, *, stream: bool = False):
+        """创建请求追踪并补充节点、方法和转发来源。"""
         log.debug("Received request: {} for URL: {}", request.uuid, request.url)
         with self._recorder.track_request(
             _adapter_display_name(request.adapter),
@@ -172,6 +186,9 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             yield tr
 
     def prepare(self, request: "task_pb2.ReqTask", context: ServicerContext, tr: RequestTrace) -> DownloaderAdapter:
+        """解析适配器、验证 URL 策略，并在执行前检查调用方状态。"""
+        if request.method not in METHOD_MAP:
+            raise ValueError(f"未知的 HTTP 方法枚举值: {request.method}")
         adapter = self._get_cached_adapter(_adapter_display_name(request.adapter))
         tr.adapter = adapter.adapter_name
         validate_url(request.url, self.url_policy)
@@ -180,11 +197,13 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         return adapter
 
     def accept(self, request: "task_pb2.ReqTask", response: Response, tr: RequestTrace) -> "task_pb2.TaskResp":
+        """将适配器响应及尝试次数转换为 RPC 响应。"""
         tr.attempts = response.attempts
         return self._build_grpc_response(request, response, tr)
 
     @staticmethod
     def record_outcome(tr: RequestTrace, grpc_response: "task_pb2.TaskResp") -> None:
+        """把最终状态、大小和错误写入请求追踪。"""
         tr.status_code = grpc_response.status_code
         tr.size = len(grpc_response.content)
         tr.error = grpc_response.error_message
@@ -193,6 +212,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     def stamp_elapsed(
         grpc_response: "task_pb2.TaskResp", started: float, request: "task_pb2.ReqTask"
     ) -> "task_pb2.TaskResp":
+        """写入服务端观测到的总耗时并返回原响应。"""
         grpc_response.response_time_ms = int((time.monotonic() - started) * 1000)
         log.debug(
             "Request {} completed in {}ms, status: {}",
@@ -228,7 +248,17 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             return text
 
     def _build_download_kwargs(self, request: task_pb2.ReqTask) -> dict[str, Any]:
+        """将 protobuf 可选字段转换为适配器调用参数。"""
         method = METHOD_MAP.get(request.method, "GET")
+
+        if request.HasField("max_retries") and not 0 <= request.max_retries <= HARD_MAX_RETRIES:
+            raise ValidationError(f"max_retries 必须在 0 到 {HARD_MAX_RETRIES} 之间")
+        if request.HasField("timeout_seconds") and not math.isfinite(request.timeout_seconds):
+            raise ValidationError("timeout_seconds 必须是有限数字")
+        if request.HasField("retry_backoff_seconds") and (
+            not math.isfinite(request.retry_backoff_seconds) or request.retry_backoff_seconds < 0
+        ):
+            raise ValidationError("retry_backoff_seconds 必须是有限的非负数")
 
         headers = dict(request.headers) if request.headers else None
         cookies = dict(request.cookies) if request.cookies else None
@@ -285,6 +315,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             return adapter.download(request.url, **self._build_download_kwargs(request))
 
     def _limited_stream(self, url: str, stream: Iterator[StreamEvent]) -> Iterator[StreamEvent]:
+        """在整个响应流生命周期内持有 host 限流槽并保证关闭流。"""
         with self.host_limiter.acquire(url):
             try:
                 yield from stream
@@ -324,16 +355,17 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @override
     def SendStream(self, request: "task_pb2.ReqTask", context: ServicerContext) -> Iterator["task_pb2.TaskRespChunk"]:
+        """依次发送 header、内容块和 trailer，异常也保持协议结构完整。"""
         started = time.monotonic()
         total_bytes = 0
         error_message = ""
 
         with self.track(request, context, stream=True) as tr:
+            header_sent = False
             try:
                 adapter = self.prepare(request, context, tr)
-                header_sent = False
                 for event in self._open_stream(adapter, request):
-                    if context.is_active() is False:
+                    if not caller_still_waiting(context):
                         log.info(f"Stream request {request.uuid} cancelled by client")
                         break
                     if isinstance(event, StreamHeader):
@@ -355,7 +387,10 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 failure = classify(e)
                 report(failure, e, request_uuid=request.uuid, recorder=self._recorder, context=context)
                 error_message = failure.message
-                yield self._stream_error_header(request, error_message)
+                # header 已发送后只能通过 trailer 报告正文阶段错误；再次发送 header
+                # 会破坏 header -> chunks -> trailer 的协议结构。
+                if not header_sent:
+                    yield self._stream_error_header(request, error_message)
 
             tr.size = total_bytes
             tr.error = error_message
@@ -373,6 +408,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         log.debug("Stream request {} finished in {}ms, {} bytes", request.uuid, elapsed_ms, total_bytes)
 
     def _open_stream(self, adapter: DownloaderAdapter, request: "task_pb2.ReqTask") -> Iterator[StreamEvent]:
+        """打开不带适配器内部重试的响应流，避免已发送内容被重复。"""
         download_kwargs = self._build_download_kwargs(request)
         for retry_key in ("max_retries", "retry_delay"):
             _ = download_kwargs.pop(retry_key, None)
@@ -411,6 +447,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     def SendBatch(
         self, request_iterator: Iterator["task_pb2.ReqTask"], context: ServicerContext
     ) -> Iterator["task_pb2.TaskResp"]:
+        """在线程池并发执行客户端流，并按完成顺序返回结果。"""
         pool = self._batch_pool()
         finished: queue.Queue[Future[task_pb2.TaskResp]] = queue.Queue()
         in_flight = 0
@@ -420,10 +457,17 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             if not context.is_active():
                 log.info("Batch cancelled by client")
                 break
-            future = pool.submit(self._handle_one, request, _batch_metadata(context))
+            future = pool.submit(self._handle_one, request, batch_metadata(context))
             future.add_done_callback(finished.put)
             in_flight += 1
             submitted += 1
+
+            if in_flight >= self._batch_concurrency:
+                # ThreadPoolExecutor 的内部队列无界；在 worker 数处施加背压，
+                # 防止超长客户端流把全部任务和请求体堆进内存。
+                done = finished.get()
+                in_flight -= 1
+                yield done.result()
 
             while True:
                 try:
@@ -443,6 +487,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         log.info(f"Batch finished, {submitted} tasks")
 
     def _batch_pool(self) -> ThreadPoolExecutor:
+        """惰性创建服务级批处理线程池。"""
         pool = self._batch_executor
         if pool is not None:
             return pool
@@ -460,6 +505,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @override
     def Ping(self, request: "task_pb2.PingReq", context: ServicerContext) -> "task_pb2.PingResp":
+        """返回节点身份、能力和当前在途请求数。"""
         _ = context
         if request.from_node:
             log.debug(f"收到来自节点 {request.from_node} 的探测")
@@ -474,14 +520,17 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @property
     def remote_install_allowed(self) -> bool:
+        """返回当前节点是否允许远程管理可选组件。"""
         return self.components.enabled
 
     @override
     def Component(self, request: "task_pb2.ComponentReq", context: ServicerContext) -> "task_pb2.ComponentResp":
+        """将组件管理请求交给受配置保护的子服务。"""
         return self.components.handle(request, context, node_id=self.node_id)
 
     @property
     def auth_required(self) -> bool:
+        """返回当前配置是否要求公共或集群令牌。"""
         from ipclick.auth import load_tokens
         from ipclick.cluster.tokens import cluster_secret
 
@@ -490,9 +539,11 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
     @property
     def forward_enabled(self) -> bool:
+        """普通任务服务不执行服务端转发。"""
         return False
 
     def cleanup(self) -> None:
+        """停止批处理并同步关闭所有已实例化适配器。"""
         log.info("Cleaning up TaskService resources...")
         self._shutdown_batch_pool()
         for name, adapter in self._drain_adapters():
@@ -504,6 +555,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         log.info("TaskService cleanup completed")
 
     async def acleanup(self) -> None:
+        """停止批处理并异步关闭所有已实例化适配器。"""
         log.info("Cleaning up TaskService resources...")
         self._shutdown_batch_pool()
         for name, adapter in self._drain_adapters():
@@ -517,9 +569,11 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     def _shutdown_batch_pool(self) -> None:
         pool, self._batch_executor = self._batch_executor, None
         if pool is not None:
-            pool.shutdown(wait=False)
+            # 停机后尚未开始的 detached 批任务没有调用方，直接取消可避免进程拖尾。
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def _drain_adapters(self) -> list[tuple[str, DownloaderAdapter]]:
+        """原子清空缓存并返回需要关闭的适配器。"""
         with self._cache_lock:
             adapters = list(self._adapter_cache.items())
             self._adapter_cache.clear()
@@ -542,7 +596,8 @@ def _version() -> str:
         return ""
 
 
-def _batch_metadata(context: object) -> tuple[tuple[str, str], ...]:
+def batch_metadata(context: object) -> tuple[tuple[str, str], ...]:
+    """安全复制批处理上下文的 metadata，供每个 detached 子请求使用。"""
     getter = cast(Callable[[], Any] | None, getattr(context, "invocation_metadata", None))
     if not callable(getter):
         return ()

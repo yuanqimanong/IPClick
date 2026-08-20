@@ -4,8 +4,9 @@
 
 > IPClick 名字灵感来源于动画《Link Click》（时光代理人）。正如时光代理人穿梭于不同的时空执行任务，IPClick 帮助您将 HTTP 请求分发到不同的节点高效执行。
 
-IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基于 gRPC 协议构建。它提供了统一的请求接口，支持多种 HTTP
-客户端适配器，帮助开发者更高效地处理网络请求。
+IPClick 是一个基于 gRPC 的分布式 HTTP 请求代理。你把请求交给它，它带着浏览器 TLS
+指纹、重试策略、限流与准入规则去发，必要时换一台机器的出口 IP 去发，并把每一次
+执行都记成一条可查的链路。
 
 > 📚 **完整文档在 [Wiki](https://github.com/yuanqimanong/IPClick/wiki)**。本页只讲"这是什么、怎么跑起来"，
 > 深入用法都在 Wiki 里。
@@ -22,7 +23,7 @@ IPClick 是一个轻量级、高性能的分布式 HTTP 请求代理工具，基
 | [集群](https://github.com/yuanqimanong/IPClick/wiki/Cluster) | 转发与客户端分发、节点鉴权、部署材料 |
 | [Web 管理端](https://github.com/yuanqimanong/IPClick/wiki/Web-Console) | 每个页面能干什么 |
 | [安全](https://github.com/yuanqimanong/IPClick/wiki/Security) | 令牌、TLS/mTLS、SSRF 准入 |
-| [性能与容量](https://github.com/yuanqimanong/IPClick/wiki/Performance) | 线程、连接池、按 host 限流 |
+| [性能与容量](https://github.com/yuanqimanong/IPClick/wiki/Performance) | 进程、线程、连接池、按 host 限流 |
 | [链路记录](https://github.com/yuanqimanong/IPClick/wiki/Observability) | 记了什么、怎么查 |
 | [故障排查](https://github.com/yuanqimanong/IPClick/wiki/Troubleshooting) | 连不上、被拦、装不上 |
 | [API 参考](https://github.com/yuanqimanong/IPClick/wiki/API-Reference) | 类型与签名 |
@@ -63,11 +64,6 @@ pip install "ipclick[camoufox]"         # 加浏览器渲染（还需下载浏�
 
 ### 启动服务端
 
-> ⚠️ **0.5.0 换了两个默认端口**：Web 管理端 `9530 → 9527`，gRPC 服务端 `9527 → 9528`。
-> 从 0.4 升上来的部署，请在 `ipclick.toml` 的 `[SERVER].port` 里把你原来的端口显式写
-> 出来；否则客户端仍然连 9527 时会连到 Web 端口上（那是个 HTTP 服务，gRPC 握手会失败
-> 并报一个和端口毫无关系的错误——所以连不上时会附一句端口提示）。
-
 ```bash
 # 使用默认配置启动
 ipclick run
@@ -85,13 +81,17 @@ ipclick run --verbose
 ipclick run --port 9528 --web-port 9531 -w
 ```
 
+默认端口是 **gRPC 9528** 与 **Web 9527**。两者都跑在 HTTP/2 之上但协议不同，
+把客户端指到 Web 端口上会在 gRPC 握手阶段失败，报出的错误还和端口毫无关系——
+所以连不上时 IPClick 会额外附一句端口提示。
+
 ### 吞吐上不去？先加进程，不是加线程
 
-服务端是一请求一线程的 CPython 进程，**GIL 才是吞吐天花板**。实测 16 核机器上
+服务端默认是一请求一线程的 CPython 进程，**GIL 才是吞吐天花板**。实测 16 核机器上
 单进程只能用出 1.5 个核，把 `[SERVER].max_workers` 从 32 调到 256 对吞吐
 **没有任何影响**（279.8 / 275.9 / 277.9 QPS）。
 
-0.6.0 起可以起多个工作进程，靠 SO_REUSEPORT 共享同一个端口——分发由内核做，
+要用满多核就起多个工作进程，靠 SO_REUSEPORT 共享同一个端口——分发由内核做，
 不需要中间件，对调用方完全透明（仍然只有一个地址一个端口）：
 
 ```toml
@@ -108,9 +108,9 @@ max_concurrent_rpcs = 0    # 0 = max_workers × 8。这一项决定"排队能排
 ```
 
 实测并发 100 时：单进程 196.6 → 331.1 QPS，四进程 → 544.6 QPS；
-1000 并发的成功率从 25.8%（异步客户端）回到 100%。详见 CHANGELOG 的 0.6.0 一节。
+1000 并发的成功率从 25.8%（异步客户端）回到 100%。
 
-0.7.0 起还可以把服务端换成协程（实验性，默认关）：
+服务端也可以整体换成协程（实验性，默认关）：
 
 ```toml
 [SERVER]
@@ -118,7 +118,7 @@ async_mode = true    # grpc.aio + 协程，不再一请求一线程。实测端�
 ```
 
 **协程和多进程不是二选一**：协程解决并发模型，多进程解决多核，单进程再优化
-也只能用一个核。两者叠加才是终态。默认关的理由见 CHANGELOG 的 0.7.0 一节。
+也只能用一个核。两者叠加才是终态。
 
 初始化配置（推荐）：
 
@@ -244,7 +244,7 @@ IPCLICK_WEB_USER=ops IPCLICK_WEB_PASSWORD=... ipclick run -w
 | **配置** `/config` | 两个分页：**基础设置**（端口、线程、超时、日志…）与**集群设置**（转发开关、节点增删、子节点部署材料）。写回 `ipclick.toml`，可一键**生成凭据** |
 | **AI 接入** `/skill` | 给 AI 代理用的技能包：装它的命令、全文、以及 `SKILL.md` 下载 |
 
-> `/nodes` 已并进 `/config?tab=cluster`——节点管理本来就是集群配置的一部分。老地址会自动跳过去。
+> 节点管理并在 `/config?tab=cluster` 里——它本来就是集群配置的一部分。`/nodes` 会自动跳过去。
 
 页面上的**时间一律按你浏览器所在时区显示**。服务端跑在 UTC 的容器里时，
 东八区的人看到的仍是自己的钟点。
@@ -280,7 +280,7 @@ IPCLICK_WEB_USER=ops IPCLICK_WEB_PASSWORD=... ipclick run -w
 
 ### 能改什么、不能改什么
 
-- **能改**（写回 toml，保留注释与格式，改动前留 `.bak`）：74 项，分 12 组——服务端、
+- **能改**（写回 toml，保留注释与格式，改动前留 `.bak`）：75 项，分 12 组——服务端、
   日志、下载行为、重试、连接池、按 host 限流、浏览器渲染、代理、集群、链路记录、
   Web 管理端、客户端与压缩。
 - **不能改**：`[SECURITY]` 全部（令牌、TLS、SSRF 三个开关）、Web 自己的登录凭据、
@@ -337,10 +337,10 @@ theme = "light"   # light / dark
 优先级是**浏览器里点过的那一下 > `[WEB].theme`**。反过来的话，用户每刷新一次页面，
 自己刚选的主题就会被配置文件推翻一次。
 
-> 0.5.0 去掉了「跟随系统」。那一档靠 CSS 的 `prefers-color-scheme`，取决于浏览器读不
+> 刻意**没有**"跟随系统"这一档。它靠 CSS 的 `prefers-color-scheme`，取决于浏览器读不
 > 读得到桌面偏好——Linux 上 Chrome/Firefox 要 GTK 或 xdg-desktop-portal 配好才认，
 > 读不到就静默按亮色处理。一个在半数机器上不生效、失败时又毫无迹象的选项，比没有这个
-> 选项更糟。配置里留着旧的 `auto` 也能启动，按 `light` 处理。
+> 选项更糟。配置里写 `auto` 也能启动，按 `light` 处理。
 
 ## 🤖 命令行（给人，也给 AI）
 
@@ -408,11 +408,15 @@ Web 端的 `/skill` 页也能看全文、复制命令、下载 `SKILL.md`。
 IPClick/
 ├── src/
 │   └── ipclick/
-│       ├── __init__.py          # 包入口，导出公共 API
+│       ├── __init__.py          # 包入口，导出公共 API（24 个名字）
 │       ├── __main__.py          # 模块入口
 │       ├── sdk.py               # 同步 SDK 客户端
 │       ├── aio.py               # 异步 SDK 客户端（grpc.aio）
-│       ├── server.py            # gRPC 服务端实现
+│       ├── server.py            # gRPC 服务端装配与启动
+│       ├── async_server.py      # 协程服务端（[SERVER].async_mode）
+│       ├── server_settings.py   # [SERVER] 段的解析、校验与派生值
+│       ├── multiprocess.py      # 多进程工作模式（SO_REUSEPORT）
+│       ├── protocols.py         # 跨层协议类型（DownloadClient / StreamedBody / …）
 │       ├── auth.py              # 服务端令牌鉴权拦截器
 │       ├── health.py            # grpc.health.v1 健康检查
 │       ├── trace.py             # 链路记录（内存环形缓冲 + 可选 SQLite）
@@ -425,10 +429,16 @@ IPClick/
 │       ├── resume.py            # 断点续传（Range 请求）
 │       ├── factory.py           # 按 [GENERAL].mode 选单机或集群客户端
 │       ├── limiter.py           # 按 host 的并发与 QPS 闸门
+│       ├── async_limiter.py     # 同上，协程版
 │       ├── exceptions.py        # 异常层次
 │       ├── py.typed             # 类型标注标记
+│       ├── rpc/                 # gRPC 通道与选项的唯一来源
+│       │   ├── options.py       # keepalive 等 channel 选项（客户端与服务端在此对齐）
+│       │   └── channel.py       # secure / insecure 频道构造
 │       ├── adapters/            # 下载器适配器
-│       │   ├── base.py          # 适配器基类、重试装饰器、脚本与导航错误分类
+│       │   ├── base.py          # 适配器基类、脚本与导航错误分类
+│       │   ├── retry.py         # 重试策略与重试循环（同步 / 协程共用）
+│       │   ├── sessions.py      # 会话缓存（同步 / 异步，含关闭）
 │       │   ├── settings.py      # [DOWNLOADER] 配置
 │       │   ├── browser_settings.py  # [BROWSER] 配置
 │       │   ├── browser_engines.py   # 引擎选择、两级安装检测、启动
@@ -437,25 +447,33 @@ IPClick/
 │       │   ├── browser_adapter.py   # playwright / patchright / camoufox
 │       │   ├── drission_adapter.py  # DrissionPage（CDP 直连）
 │       │   └── registry.py      # 适配器注册表（含已移除适配器的指引）
+│       ├── services/            # gRPC 服务实现
+│       │   ├── task_service.py  # 主服务：准入、限流、执行、记链路
+│       │   ├── async_task_service.py  # 协程版
+│       │   ├── errors.py        # 异常 → gRPC status code 的规则表
+│       │   ├── components.py    # 远程组件管理服务
+│       │   └── detached.py      # 脱离真实 RPC 的 ServicerContext（Web / 内部调用共用）
 │       ├── cluster/             # 集群
 │       │   ├── node.py          # 节点模型与 [CLUSTER] 配置
 │       │   ├── balancer.py      # 轮询 / 随机 / 加权
 │       │   ├── pool.py          # 节点池与健康探测
 │       │   ├── client.py        # ClusterDownloader（客户端分发 + 故障转移）
 │       │   ├── forwarder.py     # ForwardingTaskService（服务端转发）
+│       │   ├── async_forwarder.py   # 转发器的协程版
 │       │   ├── tokens.py        # 由共享密钥派生每节点独立令牌
 │       │   ├── discovery.py     # static / dns 节点发现
 │       │   ├── probe.py         # 节点探测：连得上吗、鉴权配对吗
 │       │   └── status_page.py   # 只读状态页
 │       ├── web/                 # Web 管理端（仅标准库，无前端构建链路）
 │       │   ├── server.py        # HTTP 服务、会话、CSRF、路由、CSP
-│       │   ├── pages.py         # 各页面的数据与操作
-│       │   ├── templates.py     # HTML 渲染（每处插值都要过 esc）
+│       │   ├── snapshot.py      # 仪表盘 / 请求流 / 集群的数据快照
+│       │   ├── pages/           # 各页面的数据与操作（WebPages 门面 + 5 个页面对象）
+│       │   ├── templates/       # HTML 渲染，按页面分文件（每处插值都要过 esc）
 │       │   ├── assets.py        # CSS 与 JS（CSP 用脚本哈希放行）
 │       │   ├── installer.py     # 装 / 卸可选组件（白名单 + 后台任务 + 进度解析）
 │       │   ├── deploy.py        # 为子节点生成 toml / .env / 启动命令 / zip
 │       │   ├── curl_parser.py   # 把 curl 命令解析成「试一试」表单
-│       │   ├── editable.py      # 可编辑配置项白名单（按分页归组）
+│       │   ├── editable.py      # 可编辑配置项白名单（75 项，按分页归组）
 │       │   └── auth.py          # 凭据、会话、登录限速
 │       ├── skills/ipclick/      # SKILL.md 本体（随 wheel 分发）
 │       ├── cli/                 # 命令行工具
@@ -473,8 +491,13 @@ IPClick/
 │       │   ├── models.py        # 数据模型定义
 │       │   ├── response.py      # 统一响应对象
 │       │   └── proto/           # Protobuf 定义与生成脚本
-│       ├── services/            # gRPC 服务实现
-│       └── utils/               # 工具模块（日志、配置、URL 安全校验等）
+│       └── utils/               # 工具模块
+│           ├── coerce.py        # 配置值的宽松转换与严格校验
+│           ├── config_util.py   # 配置节读取（section）
+│           ├── log_util.py      # 日志
+│           ├── url_util.py      # URL 与 SSRF 准入校验
+│           ├── secure_util.py   # 脱敏
+│           ├── path_util.py     # 路径
 │           └── module_probe.py  # 不执行模块代码的"装没装"探测（find_spec）
 ├── docker/                      # Docker 相关文件
 ├── tests/                       # 测试代码
@@ -490,7 +513,18 @@ docker run -d -p 9528:9528 --name ipclick ipclick:latest              # gRPC
 docker run -d -p 9528:9528 -p 9527:9527 --name ipclick ipclick:latest  # 再带上 Web 管理端
 ```
 
-镜像多阶段构建、非 root 运行。详细说明见 [`docker/构建.md`](https://github.com/yuanqimanong/IPClick/blob/master/docker/%E6%9E%84%E5%BB%BA.md)。
+镜像基于 **python:3.14-slim**，多阶段构建、非 root 运行，并且**默认自带浏览器渲染
+能力**——patchright 和 chromium 本体都打进去了，拉下来直接 `-a patchright` 就能渲染
+JS 页面，不用在容器里再下一遍。
+
+不需要渲染就构建精简版，省 1.5 GB：
+
+```bash
+docker build -f docker/Dockerfile --build-arg ENGINE=none -t ipclick:slim .
+```
+
+`ENGINE` 可选 `patchright`（默认）/ `camoufox` / `linux`（两个都装）/ `none`。
+详细说明见 [`docker/构建.md`](https://github.com/yuanqimanong/IPClick/blob/master/docker/%E6%9E%84%E5%BB%BA.md)。
 
 ## 🚧 已知限制
 
@@ -507,12 +541,11 @@ docker run -d -p 9528:9528 -p 9527:9527 --name ipclick ipclick:latest  # 再带�
 ## 🛠️ 开发
 
 ```bash
-uv sync --all-groups          # 安装含开发依赖
-uv run pytest                 # 运行测试
-uv run pytest --cov=ipclick   # 带覆盖率
-uv run ruff check src/ tests/ # 代码检查
-uv run ruff format src/ tests/# 代码格式化
-uv run basedpyright src/      # 类型检查
+uv sync --all-groups            # 安装含开发依赖
+uv run pytest                   # 运行测试
+uv run ruff check src/ tests/   # 代码检查
+uv run ruff format src/ tests/  # 代码格式化
+uv run basedpyright src/ tests/ # 类型检查
 ```
 
 修改 `src/ipclick/dto/proto/task.proto` 后需重新生成代码：
@@ -520,6 +553,11 @@ uv run basedpyright src/      # 类型检查
 ```bash
 uv run python src/ipclick/dto/proto/generate.py
 ```
+
+依赖按用途分组（`test` / `lint` / `proto` / `release`，`dev` 是聚合组），
+CI 里每个 job 只装自己那一份。`[camoufox]` 与 `[playwright]` 在
+`[tool.uv].conflicts` 里声明为互斥（camoufox 钉着 `playwright<1.61`），
+所以装可选适配器时要逐个 `--extra` 列出，不能用 `--all-extras`。
 
 ## 🤝 贡献
 

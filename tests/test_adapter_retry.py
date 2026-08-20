@@ -8,7 +8,7 @@ import pytest
 from ipclick.adapters import retry as retry_module
 from ipclick.adapters.base import normalize_js
 from ipclick.adapters.retry import RetryPolicy, aretry, retry
-from ipclick.adapters.settings import AdapterSettings
+from ipclick.adapters.settings import HARD_MAX_RETRIES, AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError
 from ipclick.trace import get_recorder
@@ -217,6 +217,7 @@ def test_policy_reads_the_adapter_then_the_call_kwargs() -> None:
 def test_policy_normalises_hostile_values() -> None:
     adapter = FakeAdapter([])
     assert RetryPolicy.resolve(adapter, {"max_retries": -3}).max_retries == 0
+    assert RetryPolicy.resolve(adapter, {"max_retries": 10**9}).max_retries == HARD_MAX_RETRIES
     assert RetryPolicy.resolve(adapter, {"max_retries": "many"}).max_retries == 3
     assert RetryPolicy.resolve(adapter, {"retry_delay": (1.0, 1.0)}).base_delay == 1.0
     assert RetryPolicy.resolve(adapter, {"retry_delay": (1.0,)}).base_delay == 1.0

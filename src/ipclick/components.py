@@ -1,3 +1,5 @@
+"""声明可选组件，并汇总 Python 包与浏览器本体的就绪状态。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,6 +16,8 @@ ComponentKind = Literal["http", "browser"]
 @final
 @dataclass(frozen=True)
 class Component:
+    """一个允许安装或展示的可选适配器组件。"""
+
     name: str
     extra: str
     modules: tuple[str, ...]
@@ -84,11 +88,13 @@ GENERIC_BROWSER = "browser"
 
 
 def package_status(component: Component) -> tuple[bool, str | None]:
+    """返回组件所需模块是否齐全及其发行包版本。"""
     installed = all(module_probe.installed(m) for m in component.modules)
     return installed, module_probe.version(component.distribution) if installed else None
 
 
 def status(component: Component, browser: BrowserSettings | None = None) -> dict[str, Any]:
+    """生成单个组件供 CLI 和 Web 管理端共用的状态快照。"""
     installed, version = package_status(component)
     body: bool | None = None
     detail = ""
@@ -112,15 +118,18 @@ def status(component: Component, browser: BrowserSettings | None = None) -> dict
 
 
 def snapshot(browser: BrowserSettings | None = None) -> list[dict[str, Any]]:
+    """返回所有可选组件的状态快照。"""
     return [status(c, browser) for c in COMPONENTS]
 
 
 def adapter_choices(browser: BrowserSettings | None = None) -> list[dict[str, Any]]:
+    """按 HTTP 与浏览器两组生成可选适配器及不可用原因。"""
     resolved = browser or BrowserSettings()
     enabled = resolved.enabled
     try:
         active = browser_engines.resolve_engine(resolved.engine) if enabled else ""
     except Exception:
+        # 状态页必须能在错误配置或可选依赖损坏时继续渲染；具体错误由启动校验报告。
         active = ""
 
     http_items: list[dict[str, Any]] = [

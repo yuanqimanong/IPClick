@@ -1,3 +1,5 @@
+"""本机及远程节点的可选组件管理页面。"""
+
 from __future__ import annotations
 
 import json as json_lib
@@ -53,10 +55,13 @@ def _readable_component_error(error: Any, node_id: str) -> str:
 
 @final
 class ComponentsPage:
+    """呈现组件状态，并将受限安装动作路由到本机或集群节点。"""
+
     def __init__(self, ctx: PageContext) -> None:
         self.ctx: PageContext = ctx
 
     def components_page(self, username: str, csrf: str, *, node_id: str = "") -> str:
+        """渲染本机或指定远程节点的组件页面。"""
         from ipclick.adapters.browser_engines import playwright_registry_dir
         from ipclick.adapters.browser_settings import BrowserSettings
         from ipclick.components import COMPONENTS, snapshot
@@ -103,7 +108,7 @@ class ComponentsPage:
         )
 
     def remote_component(self, node_id: str, op: str, extra: str = "", browser_kind: str = "") -> dict[str, Any]:
-
+        """通过带内部鉴权的 RPC 调用远程节点组件接口。"""
         import grpc
 
         try:
@@ -145,6 +150,7 @@ class ComponentsPage:
         }
 
     def component_action(self, op: str, extra: str, node_id: str = "") -> tuple[bool, str]:
+        """执行经过 installer/RPC 白名单校验的组件动作。"""
         from ipclick.adapters.browser_settings import BrowserSettings
 
         kind = BrowserSettings.from_config(section(self.ctx.config, "BROWSER")).kind
@@ -162,11 +168,13 @@ class ComponentsPage:
         return False, f"未知操作 {op!r}"
 
     def component_status(self, node_id: str = "") -> dict[str, Any] | None:
+        """返回本机或远程节点当前组件任务状态。"""
         if not node_id:
             return self.ctx.installer.current()
         return self.remote_component(node_id, "status").get("job")
 
     def refresh_components(self) -> tuple[bool, str]:
+        """刷新本机适配器注册表与组件探测结果。"""
         from ipclick.adapters import registry
 
         registry.refresh()

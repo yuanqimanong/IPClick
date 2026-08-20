@@ -1,3 +1,5 @@
+"""面向脚本和 AI 代理的结构化查询、请求与运维命令。"""
+
 from __future__ import annotations
 
 import base64
@@ -20,6 +22,7 @@ if TYPE_CHECKING:
 
 
 def config_option(func: Any) -> Any:
+    """为命令添加统一的配置文件选项。"""
     return click.option(
         "--config",
         "-c",
@@ -30,6 +33,7 @@ def config_option(func: Any) -> Any:
 
 
 def server_options(func: Any) -> Any:
+    """为需要连接 gRPC 服务端的命令添加地址、端口和令牌选项。"""
     func = click.option("--token", default=None, help="gRPC 鉴权令牌（覆盖 IPCLICK_AUTH_TOKEN 与配置文件）")(func)
     func = click.option("--port", "-p", type=int, default=None, help="服务端端口（默认取配置）")(func)
     func = click.option("--host", default=None, help="服务端地址（默认取配置，[::]/0.0.0.0 会当成 127.0.0.1）")(func)
@@ -37,6 +41,7 @@ def server_options(func: Any) -> Any:
 
 
 def _load(config: Path | None, as_json: bool = False) -> Settings:
+    """预检显式 TOML 后加载配置，并按输出模式报告错误。"""
     if config is not None:
         import tomllib
 
@@ -54,12 +59,14 @@ def _load(config: Path | None, as_json: bool = False) -> Settings:
 
 
 def _quiet_logs() -> None:
+    """将内部日志压到 ERROR，保护 CLI 的 stdout 输出契约。"""
     from ipclick.utils.log_util import LogUtil
 
     LogUtil.init(level="ERROR")
 
 
 def _server_port(config: Settings, port: int | None) -> int:
+    """解析命令行优先的 gRPC 端口。"""
     if port:
         return port
     try:
@@ -68,7 +75,21 @@ def _server_port(config: Settings, port: int | None) -> int:
         return DEFAULT_GRPC_PORT
 
 
+def _server_host(config: Settings, host: str | None) -> str:
+    """解析命令行优先的连接主机，并把监听通配地址映射到本机。"""
+    resolved = str(host if host is not None else section(config, "SERVER").get("host") or "127.0.0.1").strip()
+    return "127.0.0.1" if resolved in ("", "*", "[::]", "::", "0.0.0.0") else resolved
+
+
+def format_grpc_target(host: str, port: int) -> str:
+    """组装兼容 IPv4、主机名和 IPv6 字面量的 gRPC target。"""
+    normalized = host.strip()
+    target_host = normalized if normalized.startswith("[") else f"[{normalized}]" if ":" in normalized else normalized
+    return f"{target_host}:{port}"
+
+
 def _parse_pairs(values: tuple[str, ...], separator: str, what: str) -> dict[str, str]:
+    """解析可重复的 ``key<separator>value`` 命令行选项。"""
     out: dict[str, str] = {}
     for raw in values:
         key, sep, value = raw.partition(separator)
@@ -79,6 +100,7 @@ def _parse_pairs(values: tuple[str, ...], separator: str, what: str) -> dict[str
 
 
 def _read_body(value: str) -> bytes:
+    """读取字面量、``@文件`` 或 ``@-`` 标准输入形式的请求体。"""
     if not value.startswith("@"):
         return value.encode("utf-8")
     path = value[1:]
@@ -91,6 +113,7 @@ def _read_body(value: str) -> bytes:
 
 
 def _body_payload(content: bytes, limit: int) -> dict[str, Any]:
+    """为 JSON 输出编码响应体，并保证不返回无法解码的半截 base64。"""
     try:
         decoded = content.decode("utf-8")
     except UnicodeDecodeError:
@@ -141,7 +164,7 @@ def _body_payload(content: bytes, limit: int) -> dict[str, Any]:
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help="把响应体完整写进文件（不截断）")
 @click.option(
     "--max-body",
-    type=int,
+    type=click.IntRange(min=0),
     default=DEFAULT_BODY_LIMIT,
     show_default=True,
     help="--json 输出里响应体的字符上限；0 = 不限制",
@@ -172,6 +195,7 @@ def fetch(
     ignore_status: bool,
     as_json: bool,
 ) -> None:
+    """经 IPClick 服务端发送一次 HTTP 请求并输出稳定结果结构。"""
     import json as json_lib
 
     from ipclick.dto.models import HttpMethod, IPClickAdapter
@@ -204,13 +228,14 @@ def fetch(
             raise click.UsageError(f"--json-body 不是合法 JSON：{e}") from None
 
     started = time.monotonic()
-    downloader = Downloader(
-        config_path=str(config) if config else None,
-        host=host,
-        port=port,
-        token=token,
-    )
+    downloader: Downloader | None = None
     try:
+        downloader = Downloader(
+            config_path=str(config) if config else None,
+            host=host,
+            port=port,
+            token=token,
+        )
         response = downloader.request(
             url=url,
             method=http_method,
@@ -230,10 +255,10 @@ def fetch(
     except click.ClickException:
         raise
     except Exception as e:
-        downloader.close()
         fail(f"{type(e).__name__}: {e}", classify(e), as_json=as_json, url=url)
     finally:
-        downloader.close()
+        if downloader is not None:
+            downloader.close()
 
     if output is not None:
         try:
@@ -274,7 +299,11 @@ def fetch(
     }
     if output is not None:
         result["saved_to"] = str(output)
-    result.update(_body_payload(response.content, 0 if output is not None else max(0, max_body)))
+    if output is None:
+        result.update(_body_payload(response.content, max_body))
+    else:
+        # ``-o`` 已承担完整正文交付；JSON 再复制一份会让大文件占用双倍内存并淹没 stdout。
+        result.update({"body_omitted": True, "body_note": "响应体已完整写入 saved_to，未在 JSON 中重复输出"})
 
     if as_json:
         emit(result, as_json=True)
@@ -311,6 +340,7 @@ def status(
     probe_nodes: bool,
     as_json: bool,
 ) -> None:
+    """汇总服务健康、端口、安全、适配器、链路和集群状态。"""
     from ipclick.adapters.browser_settings import BrowserSettings
     from ipclick.auth import load_tokens
     from ipclick.components import snapshot as components_snapshot
@@ -323,23 +353,28 @@ def status(
     _ = token
     config_data = _load(config, as_json)
     resolved_port = _server_port(config_data, port)
-    target = f"{host or '127.0.0.1'}:{resolved_port}"
+    resolved_host = _server_host(config_data, host)
+    target = format_grpc_target(resolved_host, resolved_port)
 
-    healthy, health_detail = check_health(target, timeout=timeout)
+    try:
+        security = section(config_data, "SECURITY")
+        tls_settings = TLSSettings.from_config(security)
+        browser = BrowserSettings.from_config(section(config_data, "BROWSER"))
+        trace_settings = TraceSettings.from_config(
+            placeholders.resolve_for("TRACE", section(config_data, "TRACE"), resolved_port)
+        )
+        web_port = int(section(config_data, "WEB").get("port", DEFAULT_WEB_PORT))
+        components = components_snapshot(browser)
+        nodes = _node_entries(config_data)
+    except Exception as e:
+        fail(f"状态配置无效：{type(e).__name__}: {e}", Exit.REJECTED, as_json=as_json)
 
-    security = section(config_data, "SECURITY")
-    browser = BrowserSettings.from_config(section(config_data, "BROWSER"))
-    trace_settings = TraceSettings.from_config(
-        placeholders.resolve_for("TRACE", section(config_data, "TRACE"), resolved_port)
-    )
+    healthy, health_detail = check_health(target, timeout=timeout, tls=tls_settings)
     try:
         mode = resolve_mode(config_data)
     except Exception as e:
         mode = f"配置错误: {e}"
 
-    web_port = int(section(config_data, "WEB").get("port", DEFAULT_WEB_PORT))
-    components = components_snapshot(browser)
-    nodes = _node_entries(config_data)
     probes: list[dict[str, Any]] = []
     if probe_nodes and nodes:
         probes = [_probe_one(config_data, entry, timeout) for entry in nodes]
@@ -356,11 +391,11 @@ def status(
             "grpc_port": resolved_port,
             "web_port": web_port,
             "web_enabled_in_config": bool(section(config_data, "WEB").get("enabled", False)),
-            "web_reachable": _port_open(host or "127.0.0.1", web_port),
+            "web_reachable": _port_open(resolved_host.strip("[]"), web_port),
         },
         "security": {
             "auth_token_configured": bool(load_tokens(security)),
-            "tls": describe(TLSSettings.from_config(security)),
+            "tls": describe(tls_settings),
             "block_private_networks": bool(security.get("block_private_networks", False)),
             "block_metadata_endpoints": bool(security.get("block_metadata_endpoints", True)),
         },
@@ -407,10 +442,11 @@ def status(
 
 @click.group()
 def trace() -> None:
-    pass
+    """查询已落盘的请求链路。"""
 
 
 def _reader(config_data: Settings, port: int | None, as_json: bool) -> TraceReader:
+    """按端口解析链路库路径，并验证该库可读。"""
     from ipclick.trace import TraceReader, TraceSettings
 
     resolved_port = _server_port(config_data, port)
@@ -436,6 +472,7 @@ def _reader(config_data: Settings, port: int | None, as_json: bool) -> TraceRead
 
 
 def _record_dict(record: Any) -> dict[str, Any]:
+    """把链路记录转换为稳定的 CLI 字段集合。"""
     return {
         "ts": record.ts,
         "when": record.when,
@@ -484,6 +521,7 @@ def trace_list(
     since: float | None,
     as_json: bool,
 ) -> None:
+    """按过滤条件倒序列出请求链路。"""
     _quiet_logs()
     config_data = _load(config, as_json)
     reader = _reader(config_data, port, as_json)
@@ -522,6 +560,7 @@ def trace_list(
 @click.option("--top", type=int, default=10, show_default=True, help="目标站点排行取前几名")
 @json_option
 def trace_stats(config: Path | None, port: int | None, days: int, top: int, as_json: bool) -> None:
+    """统计链路库的成功率、适配器分布和目标站点排行。"""
     _quiet_logs()
     config_data = _load(config, as_json)
     reader = _reader(config_data, port, as_json)
@@ -562,10 +601,11 @@ def trace_stats(config: Path | None, port: int | None, days: int, top: int, as_j
 
 @click.group()
 def node() -> None:
-    pass
+    """查看和探测集群节点。"""
 
 
 def _port_open(host: str, port: int, timeout: float = 1.0) -> bool:
+    """用短 TCP 连接判断指定端口是否有人监听。"""
     import socket
 
     try:
@@ -576,6 +616,7 @@ def _port_open(host: str, port: int, timeout: float = 1.0) -> bool:
 
 
 def _node_entries(config_data: Settings) -> list[dict[str, Any]]:
+    """生成不泄露节点令牌的集群配置摘要。"""
     raw = config_data.get("CLUSTER", {}).get("nodes", []) or []
     out: list[dict[str, Any]] = []
     for index, entry in enumerate(raw):
@@ -594,6 +635,7 @@ def _node_entries(config_data: Settings) -> list[dict[str, Any]]:
 
 
 def _probe_one(config_data: Settings, entry: dict[str, Any], timeout: float) -> dict[str, Any]:
+    """解析并探测单个节点的连通性和内部鉴权。"""
     from ipclick.cluster.node import Node
     from ipclick.cluster.probe import probe_node
     from ipclick.cluster.tokens import cluster_secret
@@ -617,6 +659,7 @@ def _probe_one(config_data: Settings, entry: dict[str, Any], timeout: float) -> 
 @config_option
 @json_option
 def node_list(config: Path | None, as_json: bool) -> None:
+    """列出配置中的集群节点与负载均衡策略。"""
     _quiet_logs()
     config_data = _load(config, as_json)
     nodes = _node_entries(config_data)
@@ -651,6 +694,7 @@ def node_list(config: Path | None, as_json: bool) -> None:
 @click.option("--timeout", type=float, default=5.0, show_default=True, help="单次探测超时（秒）")
 @json_option
 def node_probe(config: Path | None, node_id: str, address: str, timeout: float, as_json: bool) -> None:
+    """探测一个、全部或临时指定的集群节点。"""
     _quiet_logs()
     config_data = _load(config, as_json)
 
@@ -690,13 +734,14 @@ def node_probe(config: Path | None, node_id: str, address: str, timeout: float, 
 
 @click.group()
 def component() -> None:
-    pass
+    """查看、安装或卸载白名单内的可选组件。"""
 
 
 @component.command("list")
 @config_option
 @json_option
 def component_list(config: Path | None, as_json: bool) -> None:
+    """列出组件、浏览器本体及可用包管理器状态。"""
     from ipclick.adapters.browser_settings import BrowserSettings
     from ipclick.components import snapshot as components_snapshot
     from ipclick.web.installer import detect_toolchain
@@ -727,6 +772,7 @@ def component_list(config: Path | None, as_json: bool) -> None:
 
 
 def _run_plan(op: str, extra: str, browser_kind: str, as_json: bool, dry_run: bool) -> None:
+    """规划并执行经过白名单约束的组件操作。"""
     from ipclick.web.installer import execute, plan
 
     prepared, reason = plan(op, extra, browser_kind=browser_kind)
@@ -744,6 +790,7 @@ def _run_plan(op: str, extra: str, browser_kind: str, as_json: bool, dry_run: bo
     lines: list[str] = []
 
     def sink(line: str) -> None:
+        """收集安装输出，并仅在人类模式同步写入 stderr。"""
         lines.append(line)
         if not as_json:
             click.echo(line, err=True)
@@ -788,6 +835,7 @@ def _run_plan(op: str, extra: str, browser_kind: str, as_json: bool, dry_run: bo
 @click.option("--dry-run", is_flag=True, default=False, help="只打印将要执行的命令，不真的装")
 @json_option
 def component_install(extra: str, dry_run: bool, as_json: bool) -> None:
+    """安装指定可选 extra。"""
     _quiet_logs()
     _run_plan("install", extra, "chromium", as_json, dry_run)
 
@@ -797,6 +845,7 @@ def component_install(extra: str, dry_run: bool, as_json: bool) -> None:
 @click.option("--dry-run", is_flag=True, default=False, help="只打印将要执行的命令，不真的卸")
 @json_option
 def component_uninstall(extra: str, dry_run: bool, as_json: bool) -> None:
+    """卸载指定可选 extra 的 Python 包。"""
     _quiet_logs()
     _run_plan("uninstall", extra, "chromium", as_json, dry_run)
 
@@ -813,19 +862,21 @@ def component_uninstall(extra: str, dry_run: bool, as_json: bool) -> None:
 @click.option("--dry-run", is_flag=True, default=False, help="只打印将要执行的命令")
 @json_option
 def component_browser(extra: str, kind: str, dry_run: bool, as_json: bool) -> None:
+    """为浏览器 extra 下载所选浏览器本体。"""
     _quiet_logs()
     _run_plan("browser", extra, kind, as_json, dry_run)
 
 
 @click.group("config")
 def config_group() -> None:
-    pass
+    """查看实际生效且已脱敏的配置。"""
 
 
 _SECRET_HINTS = ("token", "secret", "password", "auth_key", "passwd", "credential")
 
 
 def _redact(value: Any, key: str = "") -> Any:
+    """递归隐藏键名疑似机密的配置值。"""
     lowered = key.lower()
     if any(hint in lowered for hint in _SECRET_HINTS):
         if isinstance(value, (list, tuple)):
@@ -843,6 +894,7 @@ def _redact(value: Any, key: str = "") -> Any:
 @click.option("--section", "-s", default="", help="只看某一节，如 SERVER、DOWNLOADER.retry")
 @json_option
 def config_show(config: Path | None, section: str, as_json: bool) -> None:
+    """展示完整配置或指定配置节，并隐藏机密。"""
     _quiet_logs()
     config_data = _load(config, as_json)
 
@@ -868,6 +920,7 @@ def config_show(config: Path | None, section: str, as_json: bool) -> None:
 @click.argument("path")
 @json_option
 def config_get(config: Path | None, path: str, as_json: bool) -> None:
+    """按点分路径读取单个生效配置值，并隐藏机密。"""
     _quiet_logs()
     config_data = _load(config, as_json)
 

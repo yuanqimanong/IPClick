@@ -38,6 +38,7 @@ def test_default_wait_until_no_longer_silently_drops_late_content() -> None:
 def test_settle_timeout_is_configurable() -> None:
     settings = BrowserSettings.from_config({"timeout": {"settle": 2.5}})
     assert settings.settle_timeout == 2.5
+    assert BrowserSettings.from_config({"timeout": {"settle": 0}}).settle_timeout == 0.0
     assert BrowserSettings.from_config({"timeout": {"settle": "nonsense"}}).settle_timeout == 5.0
 
 

@@ -1,6 +1,9 @@
+"""基础配置与集群配置标签页的 HTML 渲染器。"""
+
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 from ipclick.ports import DEFAULT_GRPC_PORT
 from ipclick.web.templates.base import attr, card, checkbox, esc, hidden_fields, messages_block, page, pill, rows
@@ -39,6 +42,7 @@ def render_config(
     tab: str = "basic",
     cluster: dict[str, Any] | None = None,
 ) -> str:
+    """渲染配置字段、只读安全摘要、凭据生成器与集群节点表格。"""
     active = tab if tab in {key for key, _, _ in CONFIG_TABS} else "basic"
     subtitle = next(sub for key, _, sub in CONFIG_TABS if key == active)
 
@@ -174,6 +178,7 @@ def _cluster_tab(cluster: dict[str, Any], sections: str, csrf: str, tab_field: s
 
 def _node_card(node: dict[str, Any]) -> str:
     node_id = str(node.get("id", ""))
+    node_query = quote(node_id, safe="")
     index = node.get("index", 0)
     is_self = bool(node.get("is_self"))
     return f"""
@@ -193,7 +198,7 @@ def _node_card(node: dict[str, Any]) -> str:
     </div>
     <div class="acts">
       <button type="button" class="small" data-probe="{attr(node_id)}">测试连接</button>
-      <a class="btn small" href="/deploy?node={attr(node_id)}">部署材料</a>
+      <a class="btn small" href="/deploy?node={attr(node_query)}">部署材料</a>
       <button type="submit" class="small danger" form="remove-node-form"
               name="remove_node" value="{attr(node_id)}"
               data-confirm="确定从集群里移除 {attr(node_id)} 吗？（只改本机的节点列表，不动那台机器）"

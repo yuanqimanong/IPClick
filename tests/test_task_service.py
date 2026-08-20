@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import cast
 
 import grpc
@@ -8,6 +9,7 @@ from grpc import ServicerContext
 import pytest
 
 from ipclick.adapters import registry
+from ipclick.adapters.base import StreamHeader
 from ipclick.dto.proto import task_pb2
 from ipclick.exceptions import AdapterError, URLNotAllowedError, ValidationError
 from ipclick.limiter import HostLimitTimeout
@@ -59,6 +61,21 @@ def test_explicit_zero_values_survive_the_wire(service: TaskService) -> None:
 def test_non_positive_timeout_falls_back(service: TaskService) -> None:
     request = task_pb2.ReqTask(url="http://127.0.0.1/x", timeout_seconds=0)
     assert service._build_download_kwargs(request)["timeout"] == service.adapter_settings.download_timeout
+
+
+@pytest.mark.parametrize(
+    "rpc_request",
+    [
+        task_pb2.ReqTask(url="http://127.0.0.1/x", max_retries=21),
+        task_pb2.ReqTask(url="http://127.0.0.1/x", max_retries=-1),
+        task_pb2.ReqTask(url="http://127.0.0.1/x", timeout_seconds=math.nan),
+        task_pb2.ReqTask(url="http://127.0.0.1/x", retry_backoff_seconds=math.inf),
+        task_pb2.ReqTask(url="http://127.0.0.1/x", retry_backoff_seconds=-1),
+    ],
+)
+def test_hostile_retry_and_timeout_values_are_rejected(service: TaskService, rpc_request: task_pb2.ReqTask) -> None:
+    with pytest.raises(ValidationError):
+        service._build_download_kwargs(rpc_request)
 
 
 def test_bodies_are_decoded_when_possible(service: TaskService) -> None:
@@ -215,3 +232,24 @@ def test_stream_reports_a_blocked_url_in_the_header(settings: Settings, monkeypa
     assert recording.code is grpc.StatusCode.PERMISSION_DENIED
     assert chunks[0].header.status_code == -1
     assert chunks[0].header.error_message
+
+
+def test_stream_body_error_uses_trailer_without_sending_a_second_header(
+    service: TaskService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken_stream(_adapter: object, _request: task_pb2.ReqTask):
+        yield StreamHeader(url="https://example.com/final", status_code=200, headers={"x-test": "1"})
+        yield b"partial"
+        raise RuntimeError("connection lost")
+
+    monkeypatch.setattr(service, "_open_stream", broken_stream)
+    recording, context = _context()
+
+    chunks = list(service.SendStream(task_pb2.ReqTask(uuid="mid-error", url="https://example.com/start"), context))
+
+    assert sum(chunk.HasField("header") for chunk in chunks) == 1
+    assert b"".join(chunk.chunk for chunk in chunks if chunk.HasField("chunk")) == b"partial"
+    assert chunks[-1].HasField("trailer")
+    assert chunks[-1].trailer.total_bytes == len(b"partial")
+    assert chunks[-1].trailer.error_message == "内部错误: RuntimeError"
+    assert recording.code is None

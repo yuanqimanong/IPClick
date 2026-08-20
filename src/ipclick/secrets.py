@@ -1,3 +1,5 @@
+"""机密项清单、来源审计和 ``.env`` 模板生成。"""
+
 from dataclasses import dataclass
 import os
 from typing import Any
@@ -7,6 +9,8 @@ from ipclick.utils.log_util import log
 
 @dataclass(frozen=True)
 class SecretSpec:
+    """一个机密在环境变量和配置节中的映射。"""
+
     env: str
     section: str
     key: str
@@ -63,22 +67,28 @@ def _dig(config: Any, path: str) -> dict[str, Any]:
 
 
 def config_value(config: Any, spec: SecretSpec) -> Any:
+    """读取机密在普通配置文件中的原始值。"""
     return _dig(config, spec.section).get(spec.key)
 
 
 def resolve(config: Any, spec: SecretSpec) -> tuple[str | None, str]:
+    """按环境变量优先级解析机密，并返回值及来源。"""
     from_env = (os.getenv(spec.env) or "").strip()
     if from_env:
         return from_env, "env"
     raw = config_value(config, spec)
     if isinstance(raw, str) and raw.strip():
         return raw.strip(), "config"
-    if isinstance(raw, (list, tuple)) and raw:
-        return str(raw[0]), "config"
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            value = str(item).strip()
+            if value:
+                return value, "config"
     return None, "unset"
 
 
 def describe_source(config: Any, spec: SecretSpec) -> str:
+    """返回适合管理界面展示的机密来源说明。"""
     _, origin = resolve(config, spec)
     if origin == "env":
         return "环境变量 / .env"
@@ -88,14 +98,20 @@ def describe_source(config: Any, spec: SecretSpec) -> str:
 
 
 def audit(config: Any) -> list[tuple[SecretSpec, str]]:
+    """列出全部已知机密及其当前来源。"""
     return [(spec, resolve(config, spec)[1]) for spec in SECRETS]
 
 
 def warn_secrets_in_config(config: Any) -> list[SecretSpec]:
+    """检测写入版本化配置的机密并发出集中警告。"""
     found: list[SecretSpec] = []
     for spec in SECRETS:
         raw = config_value(config, spec)
-        if not raw:
+        if isinstance(raw, (list, tuple)):
+            present = any(str(item).strip() for item in raw)
+        else:
+            present = bool(str(raw).strip()) if raw is not None else False
+        if not present:
             continue
         found.append(spec)
 
@@ -119,6 +135,7 @@ def warn_secrets_in_config(config: Any) -> list[SecretSpec]:
 
 
 def proxy_config(config: Any) -> dict[str, Any]:
+    """将代理普通配置与环境变量凭据合并。"""
     merged = dict(_dig(config, "PROXY"))
     for spec in SECRETS:
         if spec.section != "PROXY":
@@ -130,6 +147,7 @@ def proxy_config(config: Any) -> dict[str, Any]:
 
 
 def env_template() -> str:
+    """生成只包含机密项的 ``.env`` 示例内容。"""
     lines = [
         "# IPClick 机密配置",
         "#",

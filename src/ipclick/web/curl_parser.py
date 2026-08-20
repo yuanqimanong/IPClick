@@ -1,3 +1,5 @@
+"""将常见的 curl 命令安全地转换为 Web 测试页表单数据。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -77,6 +79,8 @@ _KNOWN_METHODS = frozenset({"GET", "POST", "HEAD", "PUT", "PATCH", "DELETE", "OP
 @final
 @dataclass
 class ParsedCurl:
+    """curl 导入结果；不支持的选项以提示而非静默丢弃。"""
+
     url: str = ""
     method: str = ""
     headers: dict[str, str] = field(default_factory=dict)
@@ -87,9 +91,11 @@ class ParsedCurl:
 
     @property
     def ok(self) -> bool:
+        """表示命令已成功解析且包含目标 URL。"""
         return not self.error and bool(self.url)
 
     def as_form(self) -> dict[str, str]:
+        """转换为测试页可直接回填的字段字典。"""
         return {
             "url": self.url,
             "method": self.method or "GET",
@@ -100,6 +106,7 @@ class ParsedCurl:
 
 
 def parse_curl(command: str) -> ParsedCurl:
+    """解析单条 curl 命令，不执行命令或读取命令引用的本地文件。"""
     text = (command or "").strip()
     if not text:
         return ParsedCurl(error="请先粘贴一条 curl 命令")

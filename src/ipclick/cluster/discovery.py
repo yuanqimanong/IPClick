@@ -1,3 +1,5 @@
+"""静态列表和 DNS 两种集群节点发现实现。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,13 +17,19 @@ DISCOVERY_MODES: frozenset[str] = frozenset({"static", "dns"})
 
 
 class Discovery(Protocol):
+    """节点发现器协议。"""
+
     name: str
 
-    def resolve(self) -> tuple[Node, ...]: ...
+    def resolve(self) -> tuple[Node, ...]:
+        """解析并返回当前可用的节点集合。"""
+        ...
 
 
 @dataclass(frozen=True)
 class DiscoveryConfig:
+    """节点发现方式及刷新频率配置。"""
+
     mode: str = "static"
     dns_name: str = ""
     port: int = DEFAULT_GRPC_PORT
@@ -29,6 +37,7 @@ class DiscoveryConfig:
 
     @classmethod
     def from_config(cls, cluster_config: dict[str, Any] | None) -> DiscoveryConfig:
+        """从集群配置解析并校验发现参数。"""
         config = dict((cluster_config or {}).get("discovery") or {})
         defaults = cls()
 
@@ -49,16 +58,21 @@ class DiscoveryConfig:
 
 
 class StaticDiscovery:
+    """始终返回配置文件中固定节点列表的发现器。"""
+
     name: str = "static"
 
     def __init__(self, nodes: tuple[Node, ...]):
         self._nodes: tuple[Node, ...] = nodes
 
     def resolve(self) -> tuple[Node, ...]:
+        """返回构造时提供的静态节点。"""
         return self._nodes
 
 
 class DnsDiscovery:
+    """通过 A/AAAA 记录发现节点，并在解析失败时使用最近缓存。"""
+
     name: str = "dns"
 
     def __init__(self, config: DiscoveryConfig, resolver: Any = None):
@@ -67,6 +81,7 @@ class DnsDiscovery:
         self._last: tuple[Node, ...] = ()
 
     def resolve(self) -> tuple[Node, ...]:
+        """解析域名、去重地址并生成稳定排序的节点列表。"""
         name = self._config.dns_name
         port = self._config.port
         try:
@@ -103,6 +118,7 @@ def create_discovery(
     *,
     resolver: Any = None,
 ) -> tuple[Discovery, DiscoveryConfig]:
+    """根据 ``[CLUSTER.discovery]`` 构造对应发现器。"""
     config = DiscoveryConfig.from_config(cluster_config)
     if config.mode == "dns":
         return DnsDiscovery(config, resolver=resolver), config

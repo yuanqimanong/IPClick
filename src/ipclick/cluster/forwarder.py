@@ -1,3 +1,5 @@
+"""服务端集群派发、故障转移和下游连接复用。"""
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -34,6 +36,11 @@ _BROWSER_OVERHEAD = 15.0
 
 _BROWSER_ADAPTER_NAMES = frozenset({"browser", "playwright", "patchright", "camoufox", "DrissionPage"})
 
+# 只有不会改变目标资源的读取方法才能在“下游可能已经执行、只是响应丢失”时
+# 自动换节点。PUT/DELETE 虽在 HTTP 规范中具有幂等语义，但实际下载目标未必严格
+# 实现该保证，因此这里采用保守白名单，避免重复提交产生业务副作用。
+_FAILOVER_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
 _NODE_FAULT_CODES = frozenset(
     {
         grpc.StatusCode.UNAVAILABLE,
@@ -46,6 +53,8 @@ _NODE_FAULT_CODES = frozenset(
 
 
 class ForwardingTaskService(TaskService):
+    """在本地执行与远端节点之间进行负载均衡的任务服务。"""
+
     def __init__(
         self,
         config: Settings,
@@ -86,7 +95,8 @@ class ForwardingTaskService(TaskService):
 
     @override
     def Send(self, request: task_pb2.ReqTask, context: ServicerContext) -> task_pb2.TaskResp:
-        if is_forwarded(context):
+        """派发普通请求，节点级故障耗尽后由入口节点兜底执行。"""
+        if not self.cluster.forwarding_enabled or is_forwarded(context):
             self._local_count += 1
             return super().Send(request, context)
 
@@ -110,20 +120,34 @@ class ForwardingTaskService(TaskService):
             try:
                 response = self._forward(state, request)
             except grpc.RpcError as e:
-                last_error = _rpc_detail(e)
+                last_error = rpc_detail(e)
                 state.record_request(success=False)
-                if _is_node_fault(e):
-                    if _should_mark_unhealthy(e):
+                if is_node_fault(e):
+                    if should_mark_unhealthy(e):
                         state.mark_unhealthy(last_error)
+                    if not is_failover_safe(request):
+                        log.warning(
+                            f"节点 {state.node.id} 处理非幂等请求 {request.uuid} 时结果未知，"
+                            f"为避免重复执行，不再换节点或本地兜底：{last_error}"
+                        )
+                        propagate_rpc_error(context, e)
+                        return self._build_error_response(request, last_error)
                     log.warning(f"转发到 {state.node.id} 失败（第 {attempt + 1}/{attempts} 次）：{last_error}")
                     continue
                 log.warning(f"节点 {state.node.id} 拒绝了请求 {request.uuid}：{last_error}")
-                _propagate(context, e)
+                propagate_rpc_error(context, e)
                 return self._build_error_response(request, last_error)
 
             state.record_request(success=True)
             self._forwarded_count += 1
             return response
+
+        if self.cluster.node_by_id(self.self_id) is None:
+            message = f"请求在 {len(tried)} 个节点上转发均失败，且入口节点未加入执行池：{last_error}"
+            log.warning(f"请求 {request.uuid} {message}")
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details(message)
+            return self._build_error_response(request, message)
 
         log.warning(f"请求 {request.uuid} 在 {len(tried)} 个节点上转发均失败，改由本节点执行：{last_error}")
         self._local_count += 1
@@ -131,9 +155,11 @@ class ForwardingTaskService(TaskService):
 
     @override
     def SendStream(self, request: task_pb2.ReqTask, context: ServicerContext) -> Iterator[task_pb2.TaskRespChunk]:
+        """流式请求在入口本地执行，避免跨节点二次缓冲和续传语义变化。"""
         yield from super().SendStream(request, context)
 
     def send_to_node(self, request: task_pb2.ReqTask, node_id: str) -> task_pb2.TaskResp:
+        """绕过负载均衡，将管理端请求定向发送到指定节点。"""
         node = self.cluster.node_by_id(node_id)
         if node is None:
             raise TransportError(f"节点 {node_id!r} 不在集群节点列表里，已有：{[n.id for n in self.cluster.nodes]}")
@@ -153,6 +179,7 @@ class ForwardingTaskService(TaskService):
         return response
 
     def reload_cluster(self, config: Settings) -> tuple[bool, str]:
+        """热更新静态节点、派发策略和下游连接。"""
         cluster_section = section(config, "CLUSTER")
         with self._reload_lock:
             try:
@@ -161,11 +188,16 @@ class ForwardingTaskService(TaskService):
                 return False, f"新的集群配置不合法，已保持原样：{e}"
 
             previous = {n.id: n for n in self.cluster.nodes}
+            try:
+                added, removed = self._pool.replace(updated)
+            except ConfigError as e:
+                return False, f"新的集群配置不合法，已保持原样：{e}"
+
+            # NodePool 已成功替换后再提交服务状态，避免热更新失败留下半套配置。
             self.config: Settings = config
+            self.components.config = config
             self.cluster = updated
             self._secret = cluster_secret(cluster_section)
-
-            added, removed = self._pool.replace(updated)
 
             stale = set(removed) | {
                 node_id
@@ -175,8 +207,7 @@ class ForwardingTaskService(TaskService):
             self._close_channels(stale)
 
             self.self_id = resolve_self_id(updated, self._server_host, self._server_port)
-            if self.self_id:
-                self.node_id = self.self_id
+            self.node_id = self.self_id or self._recorder.node_id
 
         if not added and not removed and not stale:
             return True, f"集群配置已热更新（{len(updated.nodes)} 个节点，策略 {self._pool.balancer.name}）"
@@ -191,6 +222,7 @@ class ForwardingTaskService(TaskService):
         return True, f"已热更新并立即生效：{summary}"
 
     def _close_channels(self, node_ids: set[str]) -> None:
+        """关闭被删除或地址已变化节点的缓存 channel。"""
         if not node_ids:
             return
         with self._channels_lock:
@@ -201,6 +233,7 @@ class ForwardingTaskService(TaskService):
                     log.debug(f"已关闭到节点 {node_id} 的转发连接")
 
     def _forward(self, state: NodeState, request: task_pb2.ReqTask) -> task_pb2.TaskResp:
+        """携带内部令牌和转发标记调用单个下游节点。"""
         node = state.node
         try:
             adapter_name = IPClickAdapter.from_pb(request.adapter).display_name
@@ -232,6 +265,7 @@ class ForwardingTaskService(TaskService):
             return response
 
     def _timeout_for(self, request: task_pb2.ReqTask) -> float:
+        """根据下载、重试及浏览器冷启动预算推导下游 RPC 超时。"""
         if self.cluster.forward_timeout > 0:
             return self.cluster.forward_timeout
 
@@ -246,6 +280,7 @@ class ForwardingTaskService(TaskService):
         if self._is_browser_request(request):
             base = max(base, self._browser_budget())
         retries = request.max_retries if request.HasField("max_retries") else self.adapter_settings.max_attempts
+        # 下游适配器会为每次重试重新消耗一次下载预算，RPC 外层需覆盖完整尝试链。
         return base * max(1, retries + 1) + FORWARD_TIMEOUT_MARGIN
 
     @staticmethod
@@ -261,12 +296,14 @@ class ForwardingTaskService(TaskService):
         return s.page_load_timeout + s.script_timeout + _BROWSER_COLD_START + _BROWSER_OVERHEAD
 
     def _channel_for(self, node_id: str, host: str, port: int) -> grpc.Channel:
+        """按节点 ID 线程安全地复用 gRPC channel。"""
         channel = self._channels.get(node_id)
         if channel is not None:
             return channel
         with self._channels_lock:
             if node_id not in self._channels:
-                target = f"{host}:{port}"
+                target_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+                target = f"{target_host}:{port}"
                 self._channels[node_id] = open_channel_for(target, self._tls)
                 log.debug(f"已建立到节点 {node_id} ({target}) 的转发连接")
             return self._channels[node_id]
@@ -274,13 +311,15 @@ class ForwardingTaskService(TaskService):
     @property
     @override
     def forward_enabled(self) -> bool:
-        return True
+        """返回当前配置是否实际启用服务端转发。"""
+        return self.cluster.forwarding_enabled
 
     def snapshot(self) -> dict[str, Any]:
+        """在节点池快照上附加转发服务计数和身份信息。"""
         data = self._pool.snapshot()
         data.update(
             {
-                "forward": True,
+                "forward": self.cluster.forwarding_enabled,
                 "self_id": self.self_id,
                 "self_in_pool": bool(self.cluster.node_by_id(self.self_id)),
                 "forwarded_requests": self._forwarded_count,
@@ -290,8 +329,13 @@ class ForwardingTaskService(TaskService):
         )
         return data
 
+    def set_drained(self, node_id: str, drained: bool) -> bool:
+        """由管理端手动摘除或恢复节点。"""
+        return self._pool.drain(node_id) if drained else self._pool.undrain(node_id)
+
     @override
     def cleanup(self) -> None:
+        """停止探活、关闭下游 channel，再释放本地适配器。"""
         self._pool.stop()
         with self._channels_lock:
             for channel in self._channels.values():
@@ -299,8 +343,19 @@ class ForwardingTaskService(TaskService):
             self._channels.clear()
         super().cleanup()
 
+    @override
+    async def acleanup(self) -> None:
+        """异步服务停机时同步释放集群资源并异步关闭适配器。"""
+        self._pool.stop()
+        with self._channels_lock:
+            for channel in self._channels.values():
+                channel.close()
+            self._channels.clear()
+        await super().acleanup()
+
 
 def resolve_self_id(cluster: ClusterConfig, server_host: str = "", server_port: int = 0) -> str:
+    """优先使用显式 ID，否则按本机地址和监听端口识别当前节点。"""
     if cluster.self_id:
         if cluster.nodes and cluster.node_by_id(cluster.self_id) is None:
             log.warning(
@@ -344,28 +399,37 @@ def _local_addresses() -> set[str]:
     return addresses
 
 
-def _rpc_detail(error: grpc.RpcError) -> str:
+def rpc_detail(error: grpc.RpcError) -> str:
+    """提取稳定的 gRPC 状态名称与详情文本。"""
     code = getattr(error, "code", lambda: None)()
     details = getattr(error, "details", lambda: "")() or ""
     name = getattr(code, "name", str(code))
     return f"{name}: {details}" if details else str(name)
 
 
-def _is_node_fault(error: grpc.RpcError) -> bool:
+def is_node_fault(error: grpc.RpcError) -> bool:
+    """判断错误是否表示可通过切换节点恢复的故障。"""
     code = getattr(error, "code", lambda: None)()
     return code in _NODE_FAULT_CODES
 
 
-def _should_mark_unhealthy(error: grpc.RpcError) -> bool:
+def is_failover_safe(request: task_pb2.ReqTask) -> bool:
+    """仅允许无副作用的读取方法在结果未知时自动重投。"""
+    return METHOD_MAP.get(request.method, "") in _FAILOVER_SAFE_METHODS
+
+
+def should_mark_unhealthy(error: grpc.RpcError) -> bool:
+    """判断错误是否足以立即摘除节点。"""
     code = getattr(error, "code", lambda: None)()
     return code is grpc.StatusCode.UNAVAILABLE
 
 
-def _propagate(context: ServicerContext, error: grpc.RpcError) -> None:
+def propagate_rpc_error(context: ServicerContext, error: grpc.RpcError) -> None:
+    """把下游非节点故障的状态和详情复制到入口调用。"""
     code = getattr(error, "code", lambda: None)()
     if code is not None:
         context.set_code(code)
-    context.set_details(_rpc_detail(error))
+    context.set_details(rpc_detail(error))
 
 
 __all__ = ["ForwardingTaskService", "resolve_self_id"]

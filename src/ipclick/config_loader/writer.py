@@ -1,9 +1,14 @@
+"""在保留原 TOML 注释和排版的前提下定点更新配置。"""
+
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
+import tempfile
 import tomllib
 from typing import Any
 
@@ -15,6 +20,7 @@ Scalar = str | int | float | bool
 
 
 def format_value(value: Any) -> str:
+    """把受支持的 Python 标量或序列编码为 TOML 字面量。"""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
@@ -28,6 +34,7 @@ def format_value(value: Any) -> str:
 
 
 def _section_bounds(lines: list[str], section: str) -> tuple[int, int] | None:
+    """定位简单 TOML 表头在源文本中的行区间。"""
     header = re.compile(r"^\s*\[\s*" + re.escape(section) + r"\s*\]\s*(#.*)?$")
     any_header = re.compile(r"^\s*\[")
     start: int | None = None
@@ -47,14 +54,20 @@ _INLINE_TABLE_RE = re.compile(r"^(\s*[^=\s]+\s*=\s*)\{(.*)\}(\s*(?:#.*)?)$")
 
 
 def _split_inline_pairs(body: str) -> list[str] | None:
+    """在不拆开嵌套容器和引号字符串的情况下切分 inline table。"""
     parts: list[str] = []
     current = ""
     depth = 0
     quote = ""
+    escaped = False
     for char in body:
         if quote:
             current += char
-            if char == quote:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote == '"':
+                escaped = True
+            elif char == quote:
                 quote = ""
             continue
         if char in "\"'":
@@ -78,6 +91,7 @@ def _split_inline_pairs(body: str) -> list[str] | None:
 
 
 def _set_in_inline_table(lines: list[str], parent: str, table: str, key: str, literal: str) -> bool:
+    """尝试更新父表中的单行 inline table，并报告是否成功。"""
     bounds = _section_bounds(lines, parent)
     if bounds is None:
         return False
@@ -112,6 +126,7 @@ def _set_in_inline_table(lines: list[str], parent: str, table: str, key: str, li
 
 
 def _find_key(lines: list[str], start: int, end: int, key: str) -> int | None:
+    """在给定行区间查找顶层键。"""
     pattern = re.compile(r"^(\s*)" + re.escape(key) + r"\s*=")
     for index in range(start, end):
         if pattern.match(lines[index]):
@@ -120,6 +135,7 @@ def _find_key(lines: list[str], start: int, end: int, key: str) -> int | None:
 
 
 def _split_comment(text: str) -> tuple[str, str]:
+    """切开 TOML 值和行尾注释，忽略字符串内部的 ``#``。"""
     in_string = False
     quote = ""
     escaped = False
@@ -144,6 +160,7 @@ def _split_comment(text: str) -> tuple[str, str]:
 
 
 def set_values(text: str, updates: dict[str, dict[str, Any]]) -> tuple[str, list[str]]:
+    """定点更新 TOML 文本并返回新文本及可展示的变更摘要。"""
     lines = text.splitlines(keepends=True)
     changes: list[str] = []
 
@@ -189,6 +206,7 @@ def set_values(text: str, updates: dict[str, dict[str, Any]]) -> tuple[str, list
 
 
 def format_nodes(nodes: list[dict[str, Any]]) -> str:
+    """把集群节点列表编码为稳定、易读的 TOML 数组。"""
     if not nodes:
         return "nodes = []\n"
     out = ["nodes = [\n"]
@@ -205,6 +223,7 @@ def format_nodes(nodes: list[dict[str, Any]]) -> str:
 
 
 def set_nodes(text: str, nodes: list[dict[str, Any]]) -> str:
+    """替换或新增 ``[CLUSTER].nodes`` 配置块。"""
     lines = text.splitlines(keepends=True)
     bounds = _section_bounds(lines, "CLUSTER")
     block = format_nodes(nodes)
@@ -233,6 +252,7 @@ def set_nodes(text: str, nodes: list[dict[str, Any]]) -> str:
 
 
 def save(path: Path, text: str, *, backup: bool = True) -> Path | None:
+    """校验 TOML 后原子写入文件，并可在写入前保留 ``.bak``。"""
     path = Path(path)
     try:
         _ = tomllib.loads(text)
@@ -243,26 +263,42 @@ def save(path: Path, text: str, *, backup: bool = True) -> Path | None:
         ) from e
 
     backup_path: Path | None = None
+    temp: Path | None = None
+    fd: int | None = None
     try:
         if backup and path.exists():
             backup_path = path.with_suffix(path.suffix + ".bak")
             _ = shutil.copy2(path, backup_path)
 
-        temp = path.with_name(path.name + ".tmp")
-        mode = 0o600 if path.exists() and (path.stat().st_mode & 0o077) == 0 else 0o644
-        with os.fdopen(os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode), "w", encoding="utf-8") as f:
+        mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
+        # mkstemp 使用 O_EXCL 创建同目录随机文件，避免固定 .tmp 的竞态、symlink 跟随和权限继承。
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temp = Path(temp_name)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = None
             _ = f.write(text)
             f.flush()
             os.fsync(f.fileno())
         os.replace(temp, path)
+        temp = None
     except OSError as e:
         raise ConfigError(f"写入配置文件 {path} 失败：{e}") from e
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if temp is not None:
+            with contextlib.suppress(OSError):
+                temp.unlink()
 
     log.info(f"配置已写回 {path}" + (f"（备份：{backup_path.name}）" if backup_path else ""))
     return backup_path
 
 
 def target_path(config_path: str | Path | None = None, port: int | None = None) -> Path:
+    """选择可写配置目标，并阻止修改包内默认模板。"""
     from ipclick.config_loader.loader import DEFAULT_CONFIG_PATH, candidate_names
 
     if config_path:

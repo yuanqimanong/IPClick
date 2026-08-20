@@ -1,9 +1,11 @@
+"""浏览器渲染配置及基于可用内存的页面并发估算。"""
+
 from dataclasses import dataclass, field
 import os
 import sys
 from typing import Any
 
-from ipclick.utils.coerce import as_bool, as_int, as_optional_text, as_positive_float, as_text, as_text_tuple
+from ipclick.utils.coerce import as_bool, as_float, as_int, as_optional_text, as_positive_float, as_text, as_text_tuple
 from ipclick.utils.config_util import section
 
 
@@ -30,6 +32,8 @@ def _humanize(value: object) -> bool | float:
 
 @dataclass(frozen=True)
 class BrowserSettings:
+    """跨浏览器引擎共享的不可变运行参数。"""
+
     enabled: bool = True
 
     engine: str = "auto"
@@ -65,10 +69,12 @@ class BrowserSettings:
 
     @property
     def viewport(self) -> dict[str, int]:
+        """返回 Playwright context 使用的视口字典。"""
         return {"width": self.viewport_width, "height": self.viewport_height}
 
     @classmethod
     def from_config(cls, browser_config: dict[str, Any] | None) -> "BrowserSettings":
+        """从 ``[BROWSER]`` 配置解析并规范化浏览器参数。"""
         config = dict(browser_config or {})
         timeout = section(config, "timeout")
         proxy = section(config, "proxy")
@@ -94,7 +100,8 @@ class BrowserSettings:
             viewport_height=as_int(viewport.get("height"), defaults.viewport_height, minimum=1),
             page_load_timeout=as_positive_float(timeout.get("page_load"), defaults.page_load_timeout),
             script_timeout=as_positive_float(timeout.get("script_exec"), defaults.script_timeout),
-            settle_timeout=as_positive_float(timeout.get("settle"), defaults.settle_timeout),
+            # settle=0 明确表示不额外等待 networkidle；负数和非有限值回退默认值。
+            settle_timeout=as_float(timeout.get("settle"), defaults.settle_timeout, minimum=0.0),
             wait_until=_one_of(config.get("wait_until"), WAIT_UNTIL_CHOICES, defaults.wait_until),
             block_resources=block_resources,
             max_pages=as_int(config.get("max_pages"), defaults.max_pages, minimum=0),
@@ -131,6 +138,7 @@ MAX_AUTO_PAGES = 16
 
 
 def available_memory_mb() -> int | None:
+    """返回进程当前可用内存，优先考虑容器 cgroup 限额。"""
     import os
     from pathlib import Path as _Path
 
@@ -173,6 +181,7 @@ def available_memory_mb() -> int | None:
 
 
 def resolve_max_pages(configured: int, engine: str) -> int:
+    """解析显式页面上限，或按内存、CPU 和引擎预算自动估算。"""
     if configured > 0:
         return configured
 
@@ -181,6 +190,7 @@ def resolve_max_pages(configured: int, engine: str) -> int:
     if available is None:
         return BrowserSettings.max_pages
 
+    # 先预留系统余量，避免浏览器并发把容器推到 OOM 临界点。
     usable = max(0, available - MEMORY_HEADROOM_MB)
     by_memory = usable // budget
     by_cpu = os.cpu_count() or 1
@@ -188,5 +198,6 @@ def resolve_max_pages(configured: int, engine: str) -> int:
 
 
 def describe_max_pages(configured: int, engine: str) -> str:
+    """返回适合日志展示的页面并发说明。"""
     resolved = resolve_max_pages(configured, engine)
     return str(resolved) if configured > 0 else f"{resolved}（auto）"

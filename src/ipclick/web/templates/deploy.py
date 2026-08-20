@@ -1,6 +1,9 @@
+"""单节点部署说明页面的 HTML 渲染器。"""
+
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 from ipclick.web.templates.base import attr, esc, page
 
@@ -12,7 +15,9 @@ def render_deploy(
     *,
     total_nodes: int,
 ) -> str:
+    """渲染配置、环境变量和多种启动命令，并对内容统一转义。"""
     node_id = str(plan.get("node_id", ""))
+    node_query = quote(node_id, safe="")
     commands = "".join(
         f"""
       <label>{esc(item["title"])}</label>
@@ -34,7 +39,7 @@ def render_deploy(
       <span class="hint">按端口命名，所以几台节点的配置能并排放在同一个目录里</span>
       <div class="head-actions">
         <button type="button" class="small" data-copy="dep-toml">复制</button>
-        <a class="btn small" href="/deploy?node={attr(node_id)}&amp;kind=toml&amp;dl=1"
+        <a class="btn small" href="/deploy?node={attr(node_query)}&amp;kind=toml&amp;dl=1"
            download="{attr(plan.get("toml_name", "ipclick.toml"))}">下载</a>
       </div>
     </div>
@@ -46,7 +51,7 @@ def render_deploy(
       <span class="hint">两个值都取自主控当前生效的那份，复制过去必然对得上</span>
       <div class="head-actions">
         <button type="button" class="small" data-copy="dep-env">复制</button>
-        <a class="btn small" href="/deploy?node={attr(node_id)}&amp;kind=env&amp;dl=1"
+        <a class="btn small" href="/deploy?node={attr(node_query)}&amp;kind=env&amp;dl=1"
            download=".env">下载</a>
       </div>
     </div>
