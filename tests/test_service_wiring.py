@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, cast
+from typing import Any, cast, final
 
 import grpc
 from grpc import ServicerContext
@@ -458,3 +458,73 @@ def test_query_params_are_not_rewritten_into_datetimes() -> None:
     params = json.loads(request.params)
     assert params == {"start": "2024-01-01", "end": "20241231", "q": "hello"}
     assert all(isinstance(v, str) for v in params.values())
+
+
+def test_streaming_honours_the_callers_retry_count() -> None:
+    """流式路径不得静默忽略调用方的 max_retries。
+
+    这条钉住一个来回踩过两次的地方：原实现把 max_retries / retry_delay 从 kwargs 里
+    抹掉（→ 回落到服务端默认 3），后来改成写死 0（→ 完全不重试）。两种都是"参数传了
+    没生效"，而写死 0 还额外抹掉了本来合理的重试。
+
+    抹参数的理由曾写作"避免已发送内容被重复"，但它对现有两条路径都不成立：真流式的
+    适配器没有被 @retry 装饰、根本不看这个值；其余适配器走基类兜底实现（先整体下载完
+    再切块），download() 在第一个分片被 yield 之前就跑完了。
+    """
+    from ipclick.adapters.base import DownloaderAdapter, StreamHeader
+    from ipclick.adapters.retry import retry
+    from ipclick.adapters.settings import AdapterSettings
+    from ipclick.dto.response import Response
+    from ipclick.exceptions import TransportError
+
+    calls: list[int] = []
+
+    @final
+    class _BaseFallbackAdapter(DownloaderAdapter):
+        """不重写 download_stream —— 走基类兜底实现，和浏览器系一样。"""
+
+        adapter_name: str = "test-fallback"
+
+        @retry()
+        def download(self, _url: str, **_kwargs: Any) -> Response:
+            calls.append(1)
+            raise TransportError("transient")
+
+    adapter = _BaseFallbackAdapter(AdapterSettings())
+
+    # 重试耗尽后 @retry 返回错误响应而不是抛异常，所以这里断言尝试次数。
+    # 调用方要求 5 次重试 → 共 6 次尝试
+    calls.clear()
+    events = list(adapter.download_stream("https://example.com/f", max_retries=5, retry_delay=0))
+    assert len(calls) == 6
+    # 全部重试都发生在第一个分片被 yield 之前，所以不存在"重复已发送内容"
+    assert isinstance(events[0], StreamHeader) and events[0].status_code == -1
+
+    # 调用方要求不重试 → 只 1 次
+    calls.clear()
+    _ = list(adapter.download_stream("https://example.com/f", max_retries=0, retry_delay=0))
+    assert len(calls) == 1
+
+
+def test_open_stream_passes_retry_settings_through() -> None:
+    """_open_stream 不得再删掉重试相关的 kwargs。"""
+    service: Any = object.__new__(TaskService)
+    service.adapter_settings = None
+    captured: dict[str, Any] = {}
+
+    @final
+    class _Recording:
+        adapter_name: str = "rec"
+
+        def download_stream(self, url: str, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            _ = url
+            return iter(())
+
+    service._build_download_kwargs = lambda request: {"max_retries": 7, "retry_delay": 1.5, "method": "GET"}
+    service._chunk_size = 1024
+    service._limited_stream = lambda url, stream: stream
+    _ = service._open_stream(cast(Any, _Recording()), task_pb2.ReqTask(url="https://example.com/f"))
+
+    assert captured["max_retries"] == 7
+    assert captured["retry_delay"] == 1.5

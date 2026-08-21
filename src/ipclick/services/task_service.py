@@ -446,14 +446,23 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         log.debug("Stream request {} finished in {}ms, {} bytes", request.uuid, elapsed_ms, total_bytes)
 
     def _open_stream(self, adapter: DownloaderAdapter, request: "task_pb2.ReqTask") -> Iterator[StreamEvent]:
-        """打开不带适配器内部重试的响应流，避免已发送内容被重复。"""
+        """打开响应流；重试参数按调用方要求原样透传。
+
+        这里曾经把 ``max_retries`` / ``retry_delay`` 抹掉，理由写的是"避免已发送内容被
+        重复"。但那个理由对现有的两条流式路径都不成立：
+
+        - 真流式的适配器（curl_cffi、niquests 重写了 ``download_stream``）**没有**被
+          ``@retry()`` 装饰、也不读 ``max_retries``，抹不抹都没有区别；
+        - 其余适配器（浏览器系、DrissionPage）走基类兜底实现，那是"先整体下载完再切块"，
+          ``download()`` 在第一个分片被 yield 之前就已经跑完——重试全部发生在任何字节
+          到达调用方之前，不存在重复发送。
+
+        抹掉的实际后果只有一个：调用方传的 ``max_retries`` 被静默忽略。所以现在原样透传。
+
+        真流式适配器若将来加上 ``@retry()``，就必须在那一层自己判断"已经吐过字节了
+        就不能重投"，而不是靠这里抹参数——那样做只会让调用方的参数看起来生效实际不生效。
+        """
         download_kwargs = self._build_download_kwargs(request)
-        # 显式写 0 而不是 pop 掉：RetryPolicy.resolve 在 kwargs 里找不到 max_retries 时
-        # 会回落到适配器自己的 max_retries（服务端默认 3）——于是没有重写 download_stream
-        # 的适配器（走基类的"整体下载再切块"实现）在流式路径上照样重试三次，
-        # 既不是调用方要求的次数、也不是这里想要的"不重试"。
-        download_kwargs["max_retries"] = 0
-        _ = download_kwargs.pop("retry_delay", None)
         return self._limited_stream(
             request.url,
             adapter.download_stream(request.url, chunk_size=self._chunk_size, **download_kwargs),
