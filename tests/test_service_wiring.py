@@ -364,3 +364,46 @@ def test_entry_node_lets_allowed_urls_through_to_forwarding() -> None:
     request = task_pb2.ReqTask(uuid="u2", url="http://10.0.0.9:8080/ok", method=task_pb2.GET)
 
     assert service._reject_if_url_not_allowed(request, cast(ServicerContext, cast(object, RecordingContext()))) is None
+
+
+def test_async_streaming_and_unary_share_one_quota_pool() -> None:
+    """async 模式下流式与 unary 必须用同一个限流器，不能各占一份配额。
+
+    AsyncTaskService 继承 TaskService 时也建了同步 host_limiter；如果 _limited_stream
+    仍用它，就是两个独立配额池：unary 走 async_limiter、流式走 host_limiter，
+    单 host 的有效并发直接翻倍，而且 limiters_for_sharding() 只上报 async_limiter，
+    同步那份永远拿不到集群限流分片。
+    """
+    service: Any = object.__new__(AsyncTaskService)
+    acquired: list[str] = []
+
+    class _TrackingLimiter:
+        def acquire(self, url: str, _timeout: float | None = None) -> Any:
+            acquired.append(url)
+            raise AssertionError("异步服务的流式路径不该走同步限流器")
+
+    service.host_limiter = _TrackingLimiter()
+
+    def stream() -> Any:
+        yield b"chunk"
+
+    events = list(service._limited_stream("https://example.com/f", stream()))
+
+    assert events == [b"chunk"]
+    assert acquired == []
+
+
+def test_async_limited_stream_still_closes_the_underlying_stream() -> None:
+    """不限流了，但必须仍然保证关掉底层 HTTP 流。"""
+    service: Any = object.__new__(AsyncTaskService)
+    closed: list[bool] = []
+
+    class _Stream:
+        def __iter__(self) -> Any:
+            yield b"a"
+
+        def close(self) -> None:
+            closed.append(True)
+
+    _ = list(service._limited_stream("https://example.com/f", _Stream()))
+    assert closed == [True]

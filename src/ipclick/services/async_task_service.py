@@ -11,7 +11,7 @@ from typing import Any
 from grpc import ServicerContext
 from typing_extensions import override
 
-from ipclick.adapters.base import DownloaderAdapter
+from ipclick.adapters.base import DownloaderAdapter, StreamEvent
 from ipclick.async_limiter import AsyncHostLimiter, build_async_limiter
 from ipclick.dto.proto import task_pb2
 from ipclick.dto.response import Response
@@ -83,10 +83,29 @@ class AsyncTaskService(TaskService):
             return await adapter.adownload(request.url, **self._build_download_kwargs(request))
 
     @override
+    def _limited_stream(self, url: str, stream: Iterator[StreamEvent]) -> Iterator[StreamEvent]:
+        """异步服务不在这里限流——流式配额由 SendStream 用 async_limiter 统一持有。
+
+        继承来的实现用的是同步 ``host_limiter``，那是**另一个独立的配额池**：
+        unary 走 async_limiter、流式走 host_limiter，两边各算一次，单 host 的有效
+        并发直接翻倍；而且 limiters_for_sharding() 只上报 async_limiter，同步那份
+        永远拿不到集群限流分片。所以这里只保证关流，配额在上层取。
+        """
+        _ = url
+        return self._closing_stream(stream)
+
+    @override
     async def SendStream(
         self, request: task_pb2.ReqTask, context: ServicerContext
     ) -> AsyncIterator[task_pb2.TaskRespChunk]:
         """在线程池逐项推进同步流迭代器，避免阻塞事件循环。"""
+        async with self.async_limiter.acquire(request.url):
+            async for chunk in self._stream_chunks(request, context):
+                yield chunk
+
+    async def _stream_chunks(
+        self, request: task_pb2.ReqTask, context: ServicerContext
+    ) -> AsyncIterator[task_pb2.TaskRespChunk]:
         loop = asyncio.get_running_loop()
         iterator: Iterator[task_pb2.TaskRespChunk] = super().SendStream(request, context)
         next_call: asyncio.Future[task_pb2.TaskRespChunk | None] | None = None

@@ -335,12 +335,17 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     def _limited_stream(self, url: str, stream: Iterator[StreamEvent]) -> Iterator[StreamEvent]:
         """在整个响应流生命周期内持有 host 限流槽并保证关闭流。"""
         with self.host_limiter.acquire(url):
-            try:
-                yield from stream
-            finally:
-                closer = getattr(stream, "close", None)
-                if callable(closer):
-                    closer()
+            yield from self._closing_stream(stream)
+
+    @staticmethod
+    def _closing_stream(stream: Iterator[StreamEvent]) -> Iterator[StreamEvent]:
+        """推进响应流，并保证无论如何都关掉底层 HTTP 流。"""
+        try:
+            yield from stream
+        finally:
+            closer = getattr(stream, "close", None)
+            if callable(closer):
+                closer()
 
     @staticmethod
     def _build_grpc_response(
