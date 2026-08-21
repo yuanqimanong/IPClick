@@ -121,7 +121,11 @@ def load_dotenv(path: str | Path | None = None, *, override: bool = False) -> di
 
     applied: dict[str, str] = {}
     for key, value in parse_env(text).items():
-        if not override and key in os.environ:
+        # 只有**非空**的真实环境变量才压过 .env。容器编排里 `environment: - IPCLICK_AUTH_TOKEN`
+        # 这种不带值的透传会往进程里塞一个空串，按"已设置"处理的话，.env 里配好的令牌会被
+        # 它悄悄顶掉——既不用环境变量也不用 .env，直接掉到默认值，鉴权就这么没了。
+        # 项目对 .env 自己的约定本来就是"留空 = 不设置"，这里保持一致。
+        if not override and os.environ.get(key, "").strip():
             continue
         os.environ[key] = value
         applied[key] = value

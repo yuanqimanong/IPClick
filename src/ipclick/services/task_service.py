@@ -269,6 +269,19 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             log.debug(f"{field_name} 不是合法 JSON，按原始字符串处理")
             return text
 
+    @staticmethod
+    def _restore_pairs(value: Any) -> Any:
+        """把 JSON 往返后退化成 ``list[list]`` 的键值对序列还原成 ``list[tuple]``。
+
+        调用方传 ``data=[("a", "1")]`` 时，SDK 会 json.dumps 成 ``[["a", "1"]]``，
+        服务端 json.loads 回来是嵌套 list——curl_cffi 的表单编码只认 2 元 tuple，
+        于是报 "not a valid non-string sequence or mapping object"，
+        键值对形式的 data 根本发不出去。
+        """
+        if isinstance(value, list) and value and all(isinstance(i, list) and len(i) == 2 for i in value):
+            return [(k, v) for k, v in value]
+        return value
+
     def _build_download_kwargs(self, request: task_pb2.ReqTask) -> dict[str, Any]:
         """将 protobuf 可选字段转换为适配器调用参数。"""
         method = METHOD_MAP.get(request.method, "GET")
@@ -293,7 +306,11 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         params = json.loads(request.params) if request.params else None
         # data_is_raw 由客户端按调用方给的类型置位：给 str/bytes 就是原始体，
         # 给 dict/list 才需要还原成结构化对象。旧客户端不带这一位，只能继续靠猜。
-        data = (request.data or None) if request.data_is_raw else self._decode_body(request.data, "data")
+        data = (
+            (request.data or None)
+            if request.data_is_raw
+            else self._restore_pairs(self._decode_body(request.data, "data"))
+        )
         json_data = self._decode_body(request.json, "json")
 
         download_kwargs: dict[str, Any] = {

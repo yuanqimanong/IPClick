@@ -94,7 +94,7 @@ def build_async_server(
     )
 
 
-async def _serve_until_signalled(server: Any) -> None:
+async def _serve_until_signalled(server: Any) -> "asyncio.Future[Any]":
     """等待服务终止，或等到收到停机信号。
 
     同步服务端在 IPClickServer 里装了 signal.signal，异步这条路上一个都没有——
@@ -129,12 +129,17 @@ async def _serve_until_signalled(server: Any) -> None:
         if signalled in done:
             log.info("收到停机信号，开始优雅停机…")
     finally:
-        for task in (termination, signalled):
-            if not task.done():
-                _ = task.cancel()
+        if not signalled.done():
+            _ = signalled.cancel()
+        # 刻意**不**取消 termination：grpc.aio 的 wait_for_termination() 绑着 server 自己的
+        # 停机状态机，取消它会把 server 一起打进 cancelled——随后 server.stop(grace=10) 立刻
+        # 抛 CancelledError，于是 grace 期完全不生效（在途请求被切断成 status_code=0、
+        # error=None 的"假响应"，调用方按 if resp.error 判断根本发现不了），异常还会一路穿到
+        # CLI 顶层让进程以退出码 1 结束。留着它，由下面的 server.stop() 让它自然完成。
         for received in installed:
             with contextlib.suppress(Exception):
                 loop.remove_signal_handler(received)
+    return termination
 
 
 async def serve_async(
@@ -162,6 +167,7 @@ async def serve_async(
         health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
 
     started = False
+    termination: asyncio.Future[Any] | None = None
     try:
         bound = (
             server.add_secure_port(listen_addr, credentials)
@@ -178,7 +184,7 @@ async def serve_async(
             await health_servicer.set("", serving_status)
             await health_servicer.set("task.TaskService", serving_status)
         log.info(f"IPClick async server started on {listen_addr}（实验性：[SERVER].async_mode）")
-        await _serve_until_signalled(server)
+        termination = await _serve_until_signalled(server)
     except asyncio.CancelledError:
         raise
     finally:
@@ -187,6 +193,10 @@ async def serve_async(
                 await health_servicer.enter_graceful_shutdown()
             # 未成功 start 的 server 也持有 migration thread pool，仍需显式 stop。
             await server.stop(grace=10 if started else 0)
+            if termination is not None and not termination.done():
+                # stop() 之后它必然很快完成；显式等一下，免得留下 pending task 警告。
+                with contextlib.suppress(Exception):
+                    await termination
         finally:
             await service.acleanup()
 

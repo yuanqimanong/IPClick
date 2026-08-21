@@ -18,6 +18,7 @@ from ipclick.utils.config_util import Settings, section
 
 
 if TYPE_CHECKING:
+    from ipclick.sdk import Downloader
     from ipclick.trace import TraceReader
 
 
@@ -40,8 +41,30 @@ def server_options(func: Any) -> Any:
     return config_option(func)
 
 
-def _load(config: Path | None, as_json: bool = False) -> Settings:
+def _warn_about_unseen_port_configs(config: Path | None, port: int | None) -> None:
+    """当前目录只有按端口命名的配置、而本次又没指定端口时，明说它不会被读到。
+
+    ``ipclick init --port 19777`` 生成的是 ipclick-19777.toml，而只有传了端口
+    （run --port / 各命令的 -p）时配置发现才会去找这个名字。不提示的话，
+    在这个目录里跑 ``ipclick fetch`` / ``status`` 会静默用内置默认的 9528——
+    人看着目录里明明有配置，命令却连错端口。
+    """
+    if config is not None or port is not None:
+        return
+    cwd = Path.cwd()
+    if (cwd / "ipclick.toml").exists() or (cwd / ".ipclick.toml").exists():
+        return
+    named = sorted(p.name for p in cwd.glob("ipclick-*.toml"))
+    if named:
+        note(
+            f"⚠️  本目录只有按端口命名的配置（{', '.join(named)}），本次没指定端口所以**没有读它**，"
+            f"用的是内置默认值。请加 -p <端口> 或 -c <文件>。"
+        )
+
+
+def _load(config: Path | None, as_json: bool = False, port: int | None = None) -> Settings:
     """预检显式 TOML 后加载配置，并按输出模式报告错误。"""
+    _warn_about_unseen_port_configs(config, port)
     if config is not None:
         import tomllib
 
@@ -53,7 +76,7 @@ def _load(config: Path | None, as_json: bool = False) -> Settings:
             fail(f"配置文件 {config} 不是合法 TOML：{e}", Exit.REJECTED, as_json=as_json)
 
     try:
-        return load_config(str(config) if config else None)
+        return load_config(str(config) if config else None, port)
     except Exception as e:
         fail(f"读取配置失败：{type(e).__name__}: {e}", Exit.REJECTED, as_json=as_json)
 
@@ -95,6 +118,84 @@ def format_grpc_target(host: str, port: int) -> str:
     normalized = host.strip()
     target_host = normalized if normalized.startswith("[") else f"[{normalized}]" if ":" in normalized else normalized
     return f"{target_host}:{port}"
+
+
+def _fetch_failure_shape(url: str) -> dict[str, Any]:
+    """fetch 失败文档的补齐字段，让它和成功文档同形。
+
+    调用方（脚本、AI）拿到的应该是同一套键：原先"连不上目标站点"因为走完了适配器
+    有完整的 15 个键，而"令牌不对"在构造客户端时就抛了，只剩 4 个键——同一个命令、
+    同一个 -J，读 d["status"] 一个能过一个 KeyError。
+    """
+    return {
+        "reached_server": False,
+        "url": url,
+        "status": None,
+        "elapsed_ms": None,
+        "size": 0,
+        "adapter": None,
+        "request_uuid": None,
+        "trace": None,
+        "headers": {},
+        "body": None,
+        "body_encoding": None,
+        "body_truncated": False,
+    }
+
+
+def auth_state(config: Settings) -> tuple[bool, str]:
+    """返回 ``(是否要求鉴权, 人类可读说明)``，按服务端**实际接受的令牌集合**判断。
+
+    只看 ``[SECURITY].auth_token`` 是不够的：配了 ``IPCLICK_CLUSTER_SECRET`` 且能识别出
+    本节点 id 时，服务端会派生一个集群内部令牌，令牌集合随之变成非空——于是整个 gRPC
+    端口开始要求鉴权，普通调用方全被拒。而诊断命令此时仍报"未配置（任何人都能调用）"，
+    两个方向都会误导：以为端口开着的其实锁着，以为什么都没变的其实全线 UNAUTHENTICATED。
+    """
+    from ipclick.auth import load_tokens
+    from ipclick.cluster.forwarder import resolve_self_id
+    from ipclick.cluster.node import ClusterConfig
+    from ipclick.cluster.tokens import cluster_secret, self_tokens
+    from ipclick.server_settings import ServerSettings
+    from ipclick.utils.config_util import section
+
+    security = section(config, "SECURITY")
+    external = load_tokens(security)
+
+    cluster_section = section(config, "CLUSTER")
+    try:
+        settings = ServerSettings.from_config(section(config, "SERVER"))
+        cluster = ClusterConfig.from_config(cluster_section)
+        self_id = resolve_self_id(cluster, settings.host, settings.port)
+        node = cluster.node_by_id(self_id)
+        internal = self_tokens(self_id, node.token if node else "", cluster_secret(cluster_section))
+    except Exception:
+        internal = ()
+
+    if external and internal:
+        return True, "已配置（含集群内部令牌）"
+    if external:
+        return True, "已配置"
+    if internal:
+        return True, "已启用——由 [CLUSTER] 共享密钥派生，普通调用方也必须带令牌"
+    return False, "未配置（任何人都能调用）"
+
+
+def _resolved_proxy(proxy: str | None, downloader: Downloader) -> str | bool | None:
+    """把 ``--proxy config`` 翻译成 SDK 的 ``proxy=True``，并在配置为空时当面说清楚。
+
+    SDK 里本来就有一条 "proxy=True 但 [PROXY] 未提供 host/tunnel_server" 的 WARNING，
+    但 CLI 开头调了 ``_quiet_logs()`` 把日志压到 ERROR，于是这条警告在 CLI 上永远看不到：
+    用户显式写了 --proxy config，请求却静默直连、退出码 0，stderr 一个字节都没有。
+    这个产品的核心价值就是出口 IP 控制——以为换了 IP、实际用的是本机 IP，比报错糟得多。
+    """
+    if proxy != "config":
+        return proxy
+    from ipclick.dto.models import ProxyConfig
+    from ipclick.secrets import proxy_config
+
+    if ProxyConfig(**proxy_config(downloader.config)).to_url() is None:
+        note("⚠️  --proxy config：配置文件的 [PROXY] 没有 host / tunnel_server，本次请求直连（未走代理）")
+    return True
 
 
 def _parse_pairs(values: tuple[str, ...], separator: str, what: str) -> dict[str, str]:
@@ -211,7 +312,7 @@ def fetch(
     from ipclick.sdk import Downloader
 
     _quiet_logs()
-    _ = _load(config, as_json)
+    _ = _load(config, as_json, port)
 
     try:
         http_method = HttpMethod[method.strip().upper()]
@@ -223,7 +324,7 @@ def fetch(
         try:
             resolved_adapter = IPClickAdapter.from_str(adapter)
         except ValueError as e:
-            fail(str(e), Exit.USAGE, as_json=as_json)
+            fail(str(e), Exit.USAGE, as_json=as_json, **_fetch_failure_shape(url))
 
     payload: Any = None
     if data is not None:
@@ -254,7 +355,7 @@ def fetch(
             params=_parse_pairs(params, "=", "查询参数") or None,
             data=payload,
             json=parsed_json,
-            proxy=True if proxy == "config" else proxy,
+            proxy=_resolved_proxy(proxy, downloader),
             timeout=timeout,
             max_retries=retries,
             verify=not no_verify,
@@ -264,7 +365,7 @@ def fetch(
     except click.ClickException:
         raise
     except Exception as e:
-        fail(f"{type(e).__name__}: {e}", classify(e), as_json=as_json, url=url)
+        fail(f"{type(e).__name__}: {e}", classify(e), as_json=as_json, **_fetch_failure_shape(url))
     finally:
         if downloader is not None:
             downloader.close()
@@ -273,7 +374,7 @@ def fetch(
         try:
             _ = output.write_bytes(response.content)
         except OSError as e:
-            fail(f"写文件失败：{e}", Exit.FAILED, as_json=as_json)
+            fail(f"写文件失败：{e}", Exit.FAILED, as_json=as_json, **_fetch_failure_shape(url))
 
     reached_server = response.status_code >= 0 or bool(response.trace.node_id) or bool(response.request_uuid)
     attempt_failed = (
@@ -351,7 +452,6 @@ def status(
 ) -> None:
     """汇总服务健康、端口、安全、适配器、链路和集群状态。"""
     from ipclick.adapters.browser_settings import BrowserSettings
-    from ipclick.auth import load_tokens
     from ipclick.components import snapshot as components_snapshot
     from ipclick.factory import resolve_mode
     from ipclick.health import check_health
@@ -360,7 +460,7 @@ def status(
 
     _quiet_logs()
     _ = token
-    config_data = _load(config, as_json)
+    config_data = _load(config, as_json, port)
     resolved_port = _server_port(config_data, port)
     resolved_host = _server_host(config_data, host)
     target = format_grpc_target(resolved_host, resolved_port)
@@ -403,7 +503,8 @@ def status(
             "web_reachable": _port_open(resolved_host.strip("[]"), web_port),
         },
         "security": {
-            "auth_token_configured": bool(load_tokens(security)),
+            "auth_token_configured": auth_state(config_data)[0],
+            "auth_note": auth_state(config_data)[1],
             "tls": describe(tls_settings),
             "block_private_networks": bool(security.get("block_private_networks", False)),
             "block_metadata_endpoints": bool(security.get("block_metadata_endpoints", True)),
@@ -506,8 +607,10 @@ def _record_dict(record: Any) -> dict[str, Any]:
 @trace.command("list")
 @config_option
 @click.option("--port", "-p", type=int, default=None, help="服务端端口（只用于解析路径里的 {port} 占位符）")
-@click.option("--limit", "-n", type=int, default=20, show_default=True, help="最多几条")
-@click.option("--offset", type=int, default=0, show_default=True, help="跳过前几条")
+# IntRange 而不是裸 int：trace.py 内部用 max(1, limit) 兜底，于是 -n 0 / -n -5 会被静默
+# 钳成 1、返回 1 条记录——既不是"0 条"也不是"不限制"，还没有任何文档说明。
+@click.option("--limit", "-n", type=click.IntRange(min=1), default=20, show_default=True, help="最多几条")
+@click.option("--offset", type=click.IntRange(min=0), default=0, show_default=True, help="跳过前几条")
 @click.option(
     "--status",
     "status_class",
@@ -532,7 +635,7 @@ def trace_list(
 ) -> None:
     """按过滤条件倒序列出请求链路。"""
     _quiet_logs()
-    config_data = _load(config, as_json)
+    config_data = _load(config, as_json, port)
     reader = _reader(config_data, port, as_json)
 
     records = reader.query(
@@ -566,12 +669,12 @@ def trace_list(
 @config_option
 @click.option("--port", "-p", type=int, default=None, help="服务端端口（只用于解析路径里的 {port} 占位符）")
 @click.option("--days", type=int, default=7, show_default=True, help="统计最近多少天；0 = 全部")
-@click.option("--top", type=int, default=10, show_default=True, help="目标站点排行取前几名")
+@click.option("--top", type=click.IntRange(min=1), default=10, show_default=True, help="目标站点排行取前几名")
 @json_option
 def trace_stats(config: Path | None, port: int | None, days: int, top: int, as_json: bool) -> None:
     """统计链路库的成功率、适配器分布和目标站点排行。"""
     _quiet_logs()
-    config_data = _load(config, as_json)
+    config_data = _load(config, as_json, port)
     reader = _reader(config_data, port, as_json)
 
     since = time.time() - days * 86400 if days > 0 else None
@@ -878,7 +981,7 @@ def component_browser(extra: str, kind: str, dry_run: bool, as_json: bool) -> No
 
 @click.group("config")
 def config_group() -> None:
-    """查看实际生效且已脱敏的配置。"""
+    """查看合并后、已脱敏的配置；值不会生效时会另行告警。"""
 
 
 _SECRET_HINTS = ("token", "secret", "password", "auth_key", "passwd", "credential")
@@ -887,7 +990,10 @@ _SECRET_HINTS = ("token", "secret", "password", "auth_key", "passwd", "credentia
 def _redact(value: Any, key: str = "") -> Any:
     """递归隐藏键名疑似机密的配置值。"""
     lowered = key.lower()
-    if any(hint in lowered for hint in _SECRET_HINTS):
+    # 只按键名子串判断会误伤：allow_secrets_in_config 是个布尔开关，键名里带 "secret"
+    # 却不是机密。机密一定是字符串（或字符串列表），布尔和数字一律原样输出——
+    # 否则 false 会被渲染成空串，与"未配置"在输出里无法区分。
+    if any(hint in lowered for hint in _SECRET_HINTS) and not isinstance(value, (bool, int, float)):
         if isinstance(value, (list, tuple)):
             return [f"<已配置：{len(value)} 项>"] if value else []
         return "<已配置>" if str(value or "").strip() else ""
@@ -896,6 +1002,24 @@ def _redact(value: Any, key: str = "") -> Any:
     if isinstance(value, (list, tuple)):
         return [_redact(v, key) for v in value]
     return value
+
+
+def _validation_error(config_data: Settings) -> str:
+    """返回这份配置在服务端启动时会报的第一条校验错误；没有就返回空串。
+
+    ``config show`` / ``config get`` 展示的是合并后的**文件值**，而 ``config-info``
+    会真的构造 ServerSettings。两者曾经对同一个文件给出相反结论——前者照原样打印
+    ``max_workers = 0`` 并退出 0，后者报错退出 1。既然这个命令组自称"实际生效"，
+    至少要在值其实不会生效时明说，而不是让人以为它生效了。
+    """
+    from ipclick.exceptions import ConfigError
+    from ipclick.server_settings import ServerSettings
+
+    try:
+        _ = ServerSettings.from_config(section(config_data, "SERVER"))
+    except ConfigError as e:
+        return str(e)
+    return ""
 
 
 @config_group.command("show")
@@ -916,9 +1040,12 @@ def config_show(config: Path | None, section: str, as_json: bool) -> None:
         node_data = dict(node_data) if hasattr(node_data, "keys") else node_data
 
     redacted = _redact(node_data)
+    invalid = _validation_error(config_data)
     if as_json:
-        emit({"ok": True, "section": section or None, "config": redacted}, as_json=True)
+        emit({"ok": True, "section": section or None, "config": redacted, "invalid": invalid or None}, as_json=True)
     else:
+        if invalid:
+            note(f"⚠️  这份配置起不来，下面的值不会生效：{invalid}")
         import json as json_lib
 
         click.echo(json_lib.dumps(redacted, ensure_ascii=False, indent=2, default=str))
@@ -943,9 +1070,12 @@ def config_get(config: Path | None, path: str, as_json: bool) -> None:
 
     key = path.rsplit(".", 1)[-1]
     value = _redact(dict(node_data) if hasattr(node_data, "keys") else node_data, key)
+    invalid = _validation_error(config_data)
     if as_json:
-        emit({"ok": True, "path": path, "value": value}, as_json=True)
+        emit({"ok": True, "path": path, "value": value, "invalid": invalid or None}, as_json=True)
     else:
+        if invalid:
+            note(f"⚠️  这份配置起不来，下面的值不会生效：{invalid}")
         import json as json_lib
 
         click.echo(value if isinstance(value, str) else json_lib.dumps(value, ensure_ascii=False, default=str))

@@ -9,6 +9,7 @@ import pytest
 from ipclick.dto.proto import task_pb2
 from ipclick.services.components import DISABLED_MESSAGE, ComponentService
 from ipclick.utils.config_util import Settings
+from ipclick.web import installer as installer_module
 
 from .helpers import RecordingContext
 
@@ -150,3 +151,17 @@ def test_installer_is_created_once_under_concurrency(monkeypatch: pytest.MonkeyP
 
     assert len(created) == 1
     assert all(manager is created[0] for manager in managers)
+
+
+def test_browser_download_message_does_not_call_an_http_library_a_chrome_user() -> None:
+    """别把"没有 browser_command"一律当成 DrissionPage。
+
+    niquests 是纯 HTTP 库，跟 Chrome 毫无关系，回一句"用的是本机已装的 Chrome"
+    只会让人更糊涂。
+    """
+    _plan, http_message = installer_module.plan("browser", "niquests")
+    _drission_plan, drission_message = installer_module.plan("browser", "drissionpage")
+
+    assert "不是浏览器引擎" in http_message
+    assert "Chrome" not in http_message
+    assert "Chrome" in drission_message

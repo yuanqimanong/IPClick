@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from ipclick.exceptions import URLNotAllowedError
+from ipclick.exceptions import HostResolutionError, URLNotAllowedError
 from ipclick.utils import url_util
 from ipclick.utils.url_util import DEFAULT_ALLOWED_SCHEMES, URLPolicy, merge_query_params, validate_url
 
@@ -62,10 +62,19 @@ def test_string_boolean_security_switches_are_parsed_by_value() -> None:
 
 
 def test_dns_failure_is_rejected_when_ssrf_checks_are_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """解析不出来仍然必须拒绝——放行等于让 DNS 失败成为绕过准入的口子。
+
+    但抛的是 HostResolutionError 而不是 URLNotAllowedError：解析失败是网络故障，
+    不是"被策略拒绝"。服务端据此把它变成普通的失败响应（status_code == -1），
+    与关闭准入时适配器自己解析失败的表现一致，也与 README 的承诺一致。
+    两者的排查方向完全相反——一个查 DNS，一个去改 [SECURITY] 白名单。
+    """
     monkeypatch.setattr(url_util, "_resolve_host", lambda _host: [])
 
-    with pytest.raises(URLNotAllowedError, match="无法解析主机"):
+    with pytest.raises(HostResolutionError, match="无法解析主机"):
         validate_url("https://temporarily-unresolved.example", URLPolicy())
+
+    assert not issubclass(HostResolutionError, URLNotAllowedError)
 
 
 def test_custom_scheme_allowlist_is_normalised() -> None:

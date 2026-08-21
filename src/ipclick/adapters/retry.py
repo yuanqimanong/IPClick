@@ -120,6 +120,22 @@ class RetryPolicy:
         return capped * uniform(*JITTER_RANGE)
 
 
+def _never_succeeds(error: Exception) -> bool:
+    """这个异常再试多少次结果都一样吗？
+
+    重试解决的是"目标站点抖了"。参数根本不合法时重试只是把失败等待按次数放大：
+    实测 `--impersonate nosuchbrowser999` 在默认 3 次重试下要 14 秒才报错，
+    而 `data=12345` 这种类型错同样白等四轮——两者都不可能因为再试一次而成立。
+    """
+    if isinstance(error, (TypeError, ValueError)):
+        return True
+    try:
+        from curl_cffi.requests.exceptions import ImpersonateError
+    except ImportError:
+        return False
+    return isinstance(error, ImpersonateError)
+
+
 @final
 class RetryLoop:
     """记录单次逻辑请求的尝试次数、最后错误和追踪事件。"""
@@ -162,6 +178,9 @@ class RetryLoop:
         """记录传输异常，返回等待时间或 ``None``。"""
         self.last_error = error
         if attempt >= self.policy.max_retries:
+            return None
+        if _never_succeeds(error):
+            log.warning(f"Download {self.url} failed with a permanent error, not retrying: {error}")
             return None
         if caller_gone():
             # 重试把耗时按尝试次数放大：max_retries 上限是 20，配上退避总和最坏能拖到

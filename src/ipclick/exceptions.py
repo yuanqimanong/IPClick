@@ -46,11 +46,22 @@ class URLNotAllowedError(ValidationError):
     """URL 被协议或 SSRF 准入策略拒绝。"""
 
 
+class HostResolutionError(IPClickError):
+    """目标主机的 DNS 解析失败。
+
+    刻意不继承 ``URLNotAllowedError``：解析不出来是网络故障，不是"被策略拒绝"。
+    两者的排查方向完全相反——一个查 DNS/网络，一个去改 [SECURITY] 白名单。
+    服务端把它映射成普通的失败响应（``status_code == -1`` 且 error 非空），
+    与 README 承诺的"不会因为网络问题抛异常"一致。
+    """
+
+
 __all__ = [
     "AdapterError",
     "AuthenticationError",
     "ClientClosedError",
     "ConfigError",
+    "HostResolutionError",
     "IPClickError",
     "RequestError",
     "TransportError",

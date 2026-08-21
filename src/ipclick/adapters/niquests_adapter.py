@@ -10,7 +10,7 @@ from typing_extensions import override
 from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader
 from ipclick.adapters.redirects import follow_with_policy
 from ipclick.adapters.retry import aretry, retry
-from ipclick.adapters.sessions import AsyncSessionCache, SessionCache
+from ipclick.adapters.sessions import AsyncSessionCache, SessionCache, reset_cookies
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError
@@ -190,6 +190,7 @@ class NiquestsAdapter(DownloaderAdapter):
 
         extra = self.parse_extra_kwargs(kwargs)
         session = self._sessions.get((proxy, verify))
+        reset_cookies(session)
         request_kwargs = self._request_kwargs(
             {
                 "headers": headers,
@@ -229,6 +230,7 @@ class NiquestsAdapter(DownloaderAdapter):
 
         request_kwargs = self._request_kwargs(kwargs, self.parse_extra_kwargs(kwargs.get("kwargs")))
         session = self._async_sessions.get((kwargs.get("proxy"), bool(kwargs.get("verify", True))))
+        reset_cookies(session)
         try:
             resp = await session.request(method, url, **request_kwargs)
             return Response(
@@ -259,6 +261,7 @@ class NiquestsAdapter(DownloaderAdapter):
             return
 
         session = self._sessions.get((kwargs.get("proxy"), bool(kwargs.get("verify", True))))
+        reset_cookies(session)
         request_kwargs = self._request_kwargs(kwargs, self.parse_extra_kwargs(kwargs.get("kwargs")))
 
         try:

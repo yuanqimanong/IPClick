@@ -11,9 +11,15 @@ import uuid_utils as uuid
 
 from ipclick.adapters.settings import HARD_MAX_RETRIES
 from ipclick.dto.proto import task_pb2
-from ipclick.dto.response import decode_content
+from ipclick.dto.response import Headers, decode_content
 from ipclick.exceptions import RequestError, ValidationError
 from ipclick.utils import json_serializer
+
+
+# 只为线上兼容留着的枚举值：服务端一律拒绝（见 adapters/registry.py:_REMOVED_ADAPTERS），
+# 所以不能出现在"可选值"的推荐列表里——照着填必然报"适配器已移除"。
+# 编号不能复用，因为旧客户端仍可能发来这些值，所以枚举成员本身要留着。
+_WIRE_COMPAT_ONLY_ADAPTERS = frozenset({"httpx", "requests", "undetected_chromedriver"})
 
 
 class IPClickAdapter(Enum):
@@ -49,7 +55,7 @@ class IPClickAdapter(Enum):
         for member in cls:
             if member.display_name.lower() == name.lower():
                 return member
-        supported = ", ".join(m.display_name for m in cls)
+        supported = ", ".join(m.display_name for m in cls if m.display_name not in _WIRE_COMPAT_ONLY_ADAPTERS)
         raise ValueError(f"未知的适配器名称: {name!r}，可选值: {supported}")
 
 
@@ -150,6 +156,12 @@ class DownloadTask:
 
         if self.data is not None and self.json is not None:
             raise ValidationError("Cannot specify both data and json")
+
+        # TRACE 留在枚举里是为了让服务端能把线上收到的这个值命名出来（METHOD_MAP），
+        # 但没有任何适配器实现它。在客户端就说清楚，别让人绕一圈 gRPC 才拿到
+        # "Unsupported HTTP method"。
+        if self.method is HttpMethod.TRACE:
+            raise ValidationError("IPClick 不支持 TRACE：curl_cffi 与 niquests 都没有实现它")
 
         # 数据类类型提示不构成运行时边界；外部调用仍可能传入动态 JSON 值。
         max_retries = cast(Any, self.max_retries)
@@ -303,7 +315,7 @@ class DownloadResponse:
     request: Any = None
     url: str = ""
     status_code: int = -1
-    headers: dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = field(default_factory=Headers)
     content: bytes = b""
     text: str = ""
 
@@ -322,7 +334,7 @@ class DownloadResponse:
     @classmethod
     def from_protobuf(cls, pb_response: "task_pb2.TaskResp") -> "DownloadResponse":
         """从服务端响应消息构建用户侧结果。"""
-        headers = dict(pb_response.response_headers)
+        headers = Headers(pb_response.response_headers)
         text = decode_content(pb_response.content, headers)
 
         return cls(
@@ -351,7 +363,7 @@ class DownloadResponse:
             adapter_type=adapter_type,
             request=None,
             status_code=response.status_code,
-            headers=response.headers or {},
+            headers=Headers(response.headers),
             content=response.content or b"",
             text=response.text or "",
             url=response.url,

@@ -246,6 +246,10 @@ def plan(op: str, extra: str, *, browser_kind: str = "chromium") -> tuple[Plan |
         return None, f"未知的组件 {extra!r}。可选：{known}"
 
     if op == "browser":
+        if component.kind != "browser":
+            # 别把"没有 browser_command"一律当成 DrissionPage：niquests 是纯 HTTP 库，
+            # 跟 Chrome 毫无关系，回一句"用的是本机已装的 Chrome"只会让人更糊涂。
+            return None, f"{component.name} 不是浏览器引擎，没有浏览器本体可下"
         if not component.browser_command:
             return None, f"{component.name} 用的是本机已装的 Chrome，不需要下载浏览器本体"
         installed, _ = _package_state(component)

@@ -42,9 +42,14 @@ def dumps(payload: Any) -> str:
 
 
 def emit(payload: dict[str, Any], *, as_json: bool, human: str = "") -> None:
-    """按调用模式输出单个 JSON 文档或人类可读文本。"""
+    """按调用模式输出单个 JSON 文档或人类可读文本。
+
+    成功文档同样补齐 ``ok`` 与 ``exit_code``：SKILL.md 承诺"每个文档都有 ok 和
+    exit_code"，而调用方拿不到进程退出码时就靠这两个字段判断。原先只有失败路径
+    （fail()）带 exit_code，成功路径缺，于是同一份契约在一半场景下不成立。
+    """
     if as_json:
-        click.echo(dumps(payload))
+        click.echo(dumps({"ok": True, "exit_code": int(Exit.OK), **payload}))
     elif human:
         click.echo(human)
 

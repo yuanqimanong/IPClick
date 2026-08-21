@@ -25,6 +25,28 @@ ASYNC_CLOSE_TIMEOUT = 2.0
 DEFAULT_MAX_SESSIONS = 64
 
 
+def reset_cookies(session: Any) -> None:
+    """清空复用 session 上残留的 cookie jar。
+
+    session 按 (proxy, verify, impersonate) 复用，key 里没有任何调用方身份，
+    而 session 自带的 cookie jar 从不清空。于是 A 调用方在目标站点拿到的
+    ``Set-Cookie`` 会被自动带到 B 之后发往同一 host 的请求上——对一个多租户的
+    共享服务端来说，这是跨调用方的会话串号。
+
+    清空放在**发请求之前**：单次请求内部（含重定向链）的 cookie 传递仍由底层库照常处理，
+    变的只是"两次请求之间不再自动保持会话"。服务端本来就没有调用方会话的概念，
+    要保持会话请在请求里显式传 cookies。
+    """
+    jar = getattr(session, "cookies", None)
+    clear = getattr(jar, "clear", None)
+    if not callable(clear):
+        return
+    try:
+        clear()
+    except Exception as e:  # 不同实现的 jar 语义不一，清不掉也不该让请求失败
+        log.debug(f"清空复用 session 的 cookie jar 失败：{type(e).__name__}: {e}")
+
+
 @final
 class SessionCache(Generic[_K]):
     """线程安全地按键惰性创建并复用同步 session，带 LRU 上限。
@@ -180,4 +202,9 @@ class AsyncSessionCache(Generic[_K]):
             log.debug(f"关闭 {self._label} 协程 session 失败: {e}")
 
 
-__all__ = ["ASYNC_CLOSE_TIMEOUT", "AsyncSessionCache", "SessionCache"]
+__all__ = [
+    "ASYNC_CLOSE_TIMEOUT",
+    "AsyncSessionCache",
+    "SessionCache",
+    "reset_cookies",
+]

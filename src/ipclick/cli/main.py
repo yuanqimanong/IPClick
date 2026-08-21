@@ -1,17 +1,30 @@
 """部署、运行、健康检查和配置诊断命令。"""
 
+from collections.abc import Sequence
 import os
 from pathlib import Path
 import re
+import sys
+from typing import Any
 import unicodedata
 
 import click
+from typing_extensions import override
 
 from ipclick import __version__
 from ipclick.adapters.browser_engines import engine_status, resolve_engine
 from ipclick.adapters.browser_settings import BrowserSettings, describe_max_pages
-from ipclick.auth import load_tokens
-from ipclick.cli.agent import component, config_group, fetch, format_grpc_target, node, status, trace
+from ipclick.cli.agent import (
+    auth_state,
+    component,
+    config_group,
+    fetch,
+    format_grpc_target,
+    node,
+    status,
+    trace,
+)
+from ipclick.cli.output import Exit, dumps
 from ipclick.cli.skill_cmd import skill
 from ipclick.config_loader import load_config, placeholders
 from ipclick.config_loader.loader import example_config, example_env
@@ -43,7 +56,47 @@ def _print_example(ctx: click.Context, _param: click.Parameter, value: str | Non
     ctx.exit()
 
 
-@click.group(invoke_without_command=True)
+class _JsonAwareGroup(click.Group):
+    """带 ``--json`` 时，把参数错误也变成 stdout 上的那一个 JSON 文档。
+
+    SKILL.md 承诺"加 --json 时 stdout 上有且只有一个 JSON 文档，成功失败都是，
+    所以 ipclick ... --json | jq 永远安全"。但参数错误由 Click 在命令体运行**之前**
+    抛出，走的是它自带的 usage 文本 + stderr 路径——于是 `-H BAD --json` 之类
+    stdout 是 0 字节，jq 直接崩，而这正是契约里列为退出码 2 的那一类失败。
+    """
+
+    @override
+    def main(
+        self,
+        args: Sequence[str] | None = None,
+        prog_name: str | None = None,
+        complete_var: str | None = None,
+        standalone_mode: bool = True,
+        **extra: Any,
+    ) -> Any:
+        """只在真的要 JSON 时接管错误路径，其余原样交给 Click。"""
+        argv = list(sys.argv[1:]) if args is None else list(args)
+        if not (standalone_mode and ("--json" in argv or "-J" in argv)):
+            return super().main(args, prog_name, complete_var, standalone_mode, **extra)
+
+        try:
+            _ = super().main(args, prog_name, complete_var, standalone_mode=False, **extra)
+        except click.exceptions.Exit as e:
+            # --help / --version / ctx.exit()：Click 自己已经把该印的印完了。
+            raise SystemExit(e.exit_code) from None
+        except click.UsageError as e:
+            click.echo(dumps({"ok": False, "error": e.format_message(), "exit_code": int(Exit.USAGE)}))
+            raise SystemExit(int(Exit.USAGE)) from None
+        except click.Abort:
+            click.echo(dumps({"ok": False, "error": "已中止", "exit_code": int(Exit.FAILED)}))
+            raise SystemExit(int(Exit.FAILED)) from None
+        except click.ClickException as e:
+            click.echo(dumps({"ok": False, "error": e.format_message(), "exit_code": e.exit_code}))
+            raise SystemExit(e.exit_code) from None
+        raise SystemExit(int(Exit.OK))
+
+
+@click.group(invoke_without_command=True, cls=_JsonAwareGroup)
 @click.version_option(version=__version__, prog_name="IPClick")
 @click.option(
     "--example",
@@ -70,25 +123,31 @@ def main(ctx: click.Context) -> None:
 @click.option(
     "--port",
     "-p",
-    type=int,
+    # IntRange 而不是裸 int：不校验的话 --port 70000 会生成一份 ipclick 自己都加载不了的
+    # 配置（加载器只认 1..65535），--port -1 更是生成出文件名带负号的 ipclick--1.toml。
+    type=click.IntRange(1, 65535),
     default=None,
     help="按端口命名：生成 ipclick-<端口>.toml 并把端口填进去。同机起多个实例时用",
 )
 def init(force: bool, target_dir: Path, port: int | None) -> None:
     """生成行为配置和权限收紧的机密环境文件。"""
     target_dir.mkdir(parents=True, exist_ok=True)
-    toml_path = target_dir / (f"ipclick-{port}.toml" if port else "ipclick.toml")
+    # `if port` 在这里是安全的（IntRange 已经排除了 0），但仍写成 is not None：
+    # 端口的"没传"只有 None 一种，别再把它和某个合法值混为一谈。
+    toml_path = target_dir / (f"ipclick-{port}.toml" if port is not None else "ipclick.toml")
     env_path = target_dir / ".env"
 
     existing = [p for p in (toml_path, env_path) if p.exists()]
     if existing and not force:
         for path in existing:
-            click.echo(f"已存在，跳过: {path}", err=True)
+            # 措辞要说实话：下面 raise Abort 是整体中止，一个文件都不会生成，
+            # 说"跳过"会让人以为缺的那个已经补上了。
+            click.echo(f"已存在，中止: {path}", err=True)
         click.echo("要覆盖请加 --force。注意 .env 里可能有正在用的密钥。", err=True)
         raise click.Abort()
 
     template = example_config()
-    if port:
+    if port is not None:
         template = re.sub(
             r"(?ms)(^\[SERVER\].*?^)port = \d+$",
             lambda m: m.group(1) + f"port = {port}",
@@ -130,13 +189,15 @@ def init(force: bool, target_dir: Path, port: int | None) -> None:
 
 @main.command()
 @click.option("--config", "-c", type=click.Path(exists=True, path_type=Path), help="配置文件路径")
-@click.option("--port", "-p", type=int, help="服务端口号")
+# IntRange 而不是裸 int：0 和超范围值原先要么被真假值判断当成"没传"，要么一路走到
+# 绑定失败才在日志里报错。端口是启动前就能判定的参数，该在参数层直接拒。
+@click.option("--port", "-p", type=click.IntRange(1, 65535), help="服务端口号")
 @click.option("--host", default=None, help="绑定地址")
 @click.option("--verbose", "-v", is_flag=True, help="输出 DEBUG 级别日志")
 @click.option("--web", "-w", is_flag=True, default=None, help="同时启动 Web 管理端（登录信息打印到控制台）")
 @click.option(
     "--web-port",
-    type=int,
+    type=click.IntRange(1, 65535),
     default=None,
     help="Web 管理端端口（覆盖 [WEB].port）。同目录起多个实例时必须岔开，否则第二个起不来",
 )
@@ -173,7 +234,7 @@ def run(
         click.echo("Starting IPClick server...")
         if config:
             click.echo(f"Using config file: {config}")
-        if port:
+        if port is not None:
             click.echo(f"Override port: {port}")
         if host:
             click.echo(f"Override host: {host}")
@@ -211,7 +272,15 @@ def run(
 @click.option("--port", "-p", type=int, help="服务端端口（默认取配置）")
 @click.option("--config", "-c", type=click.Path(path_type=Path), help="配置文件路径")
 @click.option("--service", default="", help="要查询的服务名，默认查总体状态")
-@click.option("--timeout", type=float, default=5.0, show_default=True, help="超时（秒）")
+# FloatRange 而不是裸 float：--timeout -5 会让 gRPC 立刻 DEADLINE_EXCEEDED，
+# 于是一个健康的服务端被报成挂了——而 --timeout abc 早就是 exit 2 了，两者该一致。
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0, min_open=True),
+    default=5.0,
+    show_default=True,
+    help="超时（秒）",
+)
 def health(host: str, port: int | None, config: Path | None, service: str, timeout: float) -> None:
     """调用标准 gRPC health 服务并通过退出码报告结果。"""
     LogUtil.init(level="ERROR")
@@ -258,8 +327,8 @@ def config_info(config: Path | None) -> None:
         click.echo("")
         click.echo("Security:")
         click.echo(f"  传输层:       {describe(TLSSettings.from_config(security))}")
-        has_token = bool(load_tokens(security))
-        click.echo(f"  令牌鉴权:     {'已配置' if has_token else '未配置（任何人都能调用）'}")
+        _required, token_note = auth_state(cfg)
+        click.echo(f"  令牌鉴权:     {token_note}")
 
         click.echo("  机密来源:")
         width = max(_display_width(s.label) for s in SECRETS)

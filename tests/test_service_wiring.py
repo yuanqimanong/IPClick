@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import signal
 from typing import Any, cast, final
 
 import grpc
@@ -8,6 +11,7 @@ from grpc import ServicerContext
 import pytest
 from typing_extensions import override
 
+from ipclick import async_server
 from ipclick.adapters import registry
 from ipclick.async_limiter import AsyncHostLimiter
 from ipclick.cluster.async_forwarder import AsyncForwardingTaskService
@@ -15,7 +19,7 @@ from ipclick.cluster.forwarder import ForwardingTaskService
 from ipclick.cluster.node import ClusterConfig, NodeState
 from ipclick.cluster.pool import NodePool
 from ipclick.dto.proto import task_pb2
-from ipclick.exceptions import AdapterError, URLNotAllowedError, ValidationError
+from ipclick.exceptions import AdapterError, HostResolutionError, URLNotAllowedError, ValidationError
 from ipclick.limiter import HostLimitTimeout, build_limiter
 from ipclick.server import IPClickServer
 from ipclick.services.async_task_service import AsyncTaskService
@@ -528,3 +532,55 @@ def test_open_stream_passes_retry_settings_through() -> None:
 
     assert captured["max_retries"] == 7
     assert captured["retry_delay"] == 1.5
+
+
+def test_dns_failure_becomes_an_ordinary_failed_response_not_a_grpc_error() -> None:
+    """DNS 解析失败是网络故障，不该被还原成"被策略拒绝"的异常抛给调用方。
+
+    code=None 意味着不设 gRPC 错误状态，于是它变成一条普通的失败响应
+    （status_code == -1、error 非空），与"连不上目标站点"表现一致，
+    也与 README 承诺的"不会因为网络问题抛异常"一致。
+    真正的策略拒绝仍然是 PERMISSION_DENIED，两者的排查方向完全相反。
+    """
+    dns = classify(HostResolutionError("无法解析主机 'nope.invalid'"))
+    policy = classify(URLNotAllowedError("禁止访问云元数据地址"))
+
+    assert dns.code is None
+    assert dns.label == "dns_failure"
+    assert policy.code is grpc.StatusCode.PERMISSION_DENIED
+
+
+async def test_graceful_shutdown_does_not_cancel_the_servers_own_terminator() -> None:
+    """取消 wait_for_termination() 会把 grpc.aio 的 server 一起打进 cancelled。
+
+    后果是随后的 server.stop(grace=10) 立刻抛 CancelledError：grace 期完全不生效，
+    在途请求被切断成 status_code=0 / error=None 的"假响应"（调用方按 if resp.error
+    判断根本发现不了），异常还会一路穿到 CLI 顶层让进程以退出码 1 结束。
+    """
+
+    @final
+    class _FakeServer:
+        def __init__(self) -> None:
+            self.stopped_with: float | None = None
+            self._terminated: asyncio.Event = asyncio.Event()
+
+        async def wait_for_termination(self) -> None:
+            await self._terminated.wait()
+
+        async def stop(self, grace: float) -> None:
+            self.stopped_with = grace
+            self._terminated.set()
+
+    server = _FakeServer()
+    async with asyncio.timeout(10):
+        loop = asyncio.get_running_loop()
+        _ = loop.call_later(0.05, lambda: os.kill(os.getpid(), signal.SIGTERM))
+        termination = await async_server._serve_until_signalled(cast(Any, server))
+
+        # 关键：信号赢了之后，terminator 必须仍然活着，等 stop() 让它自然完成。
+        assert not termination.cancelled()
+        await server.stop(grace=10)
+        await termination
+
+    assert server.stopped_with == 10
+    assert termination.done() and not termination.cancelled()

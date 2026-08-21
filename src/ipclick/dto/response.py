@@ -10,6 +10,51 @@ from typing_extensions import override
 from ipclick.exceptions import RequestError
 
 
+class Headers(dict[str, str]):
+    """大小写不敏感的响应头映射，保留服务端给的原始拼写。
+
+    HTTP 头字段本就大小写不敏感，但适配器之间不一致：curl_cffi 给全小写，
+    niquests 保留原样。用普通 dict 装的话，照 curl_cffi 写好的
+    ``headers.get("content-type")`` 换成 niquests 就返回 None——不报错、不告警，
+    直接走进错误分支。这里让两种拼写都取得到，同时迭代和打印仍是原始拼写。
+    """
+
+    def __init__(self, data: Mapping[str, str] | None = None) -> None:
+        """按原始拼写存储，并另建一份小写索引。"""
+        super().__init__(data or {})
+        self._index: dict[str, str] = {k.lower(): k for k in self}
+
+    def _actual(self, key: str) -> str:
+        return self._index.get(key.lower(), key)
+
+    @override
+    def __getitem__(self, key: str) -> str:
+        return super().__getitem__(self._actual(key))
+
+    @override
+    def __setitem__(self, key: str, value: str) -> None:
+        existing = self._index.get(key.lower())
+        if existing is not None and existing != key:
+            super().__delitem__(existing)
+        super().__setitem__(key, value)
+        self._index[key.lower()] = key
+
+    @override
+    def __delitem__(self, key: str) -> None:
+        actual = self._actual(key)
+        super().__delitem__(actual)
+        _ = self._index.pop(actual.lower(), None)
+
+    @override
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and key.lower() in self._index
+
+    @override
+    def get(self, key: str, default: str | None = None) -> str | None:
+        actual = self._index.get(key.lower())
+        return default if actual is None else super().__getitem__(actual)
+
+
 def content_type_from_headers(headers: Mapping[str, str] | None) -> str | None:
     """按 HTTP 头字段不区分大小写的规则读取 ``Content-Type``。"""
     return next((value for name, value in (headers or {}).items() if name.lower() == "content-type"), None)

@@ -230,3 +230,29 @@ def test_to_protobuf_marks_raw_bodies_but_not_structured_ones() -> None:
     assert DownloadTask(url="http://example.com", data={"k": 1}).to_protobuf().data_is_raw is False
     assert DownloadTask(url="http://example.com", data=[1, 2]).to_protobuf().data_is_raw is False
     assert DownloadTask(url="http://example.com").to_protobuf().HasField("data_is_raw") is False
+
+
+def test_removed_adapters_are_not_offered_as_alternatives() -> None:
+    """ "可选值"里不能出现服务端一律拒绝的适配器名。
+
+    httpx / requests / undetected_chromedriver 的枚举成员是为线上兼容留着的
+    （旧客户端仍可能发来这些值），但服务端会回"适配器已移除"。把它们列进推荐里，
+    等于让人照着填一个必然失败的值。
+    """
+    with pytest.raises(ValueError, match="未知的适配器名称") as excinfo:
+        _ = IPClickAdapter.from_str("bogus")
+
+    message = str(excinfo.value)
+    for removed in ("httpx", "requests", "undetected_chromedriver"):
+        assert removed not in message
+    for usable in ("curl_cffi", "niquests", "camoufox", "patchright", "playwright", "browser"):
+        assert usable in message
+    # 成员本身必须留着，否则旧客户端发来的枚举值就没法命名了
+    assert IPClickAdapter.from_str("requests") is IPClickAdapter.REQUESTS
+
+
+def test_trace_is_refused_before_it_reaches_the_wire() -> None:
+    """TRACE 留在枚举里是为了让服务端能命名它，但没有适配器实现——客户端就该说清楚。"""
+    assert HttpMethod.TRACE in set(HttpMethod)
+    with pytest.raises(ValidationError, match="不支持 TRACE"):
+        _ = DownloadTask(url="http://example.com", method=HttpMethod.TRACE)
