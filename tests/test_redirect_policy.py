@@ -67,7 +67,9 @@ def test_relative_location_is_resolved_before_validating() -> None:
     assert seen == ["http://169.254.169.254/latest/meta-data/"]
 
 
-@pytest.mark.parametrize(("status", "expected_method"), [(301, "GET"), (302, "GET"), (303, "GET"), (307, "POST"), (308, "POST")])
+@pytest.mark.parametrize(
+    ("status", "expected_method"), [(301, "GET"), (302, "GET"), (303, "GET"), (307, "POST"), (308, "POST")]
+)
 def test_method_rewriting_follows_the_rfc(status: int, expected_method: str) -> None:
     """301/302/303 把 POST 改写成 GET 并丢掉请求体；307/308 保持方法与请求体。"""
     calls: list[tuple[str, str, Any]] = []

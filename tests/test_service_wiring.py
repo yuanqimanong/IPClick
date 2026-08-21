@@ -330,9 +330,7 @@ def _forwarding_service(policy_blocks_private: bool) -> Any:
     from ipclick.utils.url_util import URLPolicy
 
     service: Any = object.__new__(ForwardingTaskService)
-    service.cluster = ClusterConfig.from_config(
-        {"forward": "on", "nodes": [{"id": "n1", "address": "10.0.0.9:9528"}]}
-    )
+    service.cluster = ClusterConfig.from_config({"forward": "on", "nodes": [{"id": "n1", "address": "10.0.0.9:9528"}]})
     service.url_policy = URLPolicy(block_private_networks=policy_blocks_private)
     service._recorder = get_recorder()
     service._local_count = 0
@@ -452,7 +450,9 @@ def test_query_params_are_not_rewritten_into_datetimes() -> None:
     service.adapter_settings = None
 
     request = task_pb2.ReqTask(
-        uuid="u", url="https://api.example.com/orders", method=task_pb2.GET,
+        uuid="u",
+        url="https://api.example.com/orders",
+        method=task_pb2.GET,
         params='{"start": "2024-01-01", "end": "20241231", "q": "hello"}',
     )
     params = json.loads(request.params)

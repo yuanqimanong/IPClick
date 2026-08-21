@@ -120,9 +120,7 @@ class ClusterDownloader(ClientBase):
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         self.close()
 
-    def _with_failover(
-        self, operation: Callable[[Downloader], _T], description: str, *, replayable: bool = True
-    ) -> _T:
+    def _with_failover(self, operation: Callable[[Downloader], _T], description: str, *, replayable: bool = True) -> _T:
         """仅对传输层错误换节点，业务错误直接返回给调用方。
 
         ``replayable=False`` 的调用**不换节点**：传输层错误意味着结果未知，下游可能
@@ -156,8 +154,7 @@ class ClusterDownloader(ClientBase):
                     state.mark_unhealthy(str(e))
                 if not replayable:
                     log.warning(
-                        f"节点 {state.node.id} 处理非幂等的「{description}」时结果未知，"
-                        f"为避免重复执行，不再换节点：{e}"
+                        f"节点 {state.node.id} 处理非幂等的「{description}」时结果未知，为避免重复执行，不再换节点：{e}"
                     )
                     raise
                 log.warning(
@@ -187,9 +184,7 @@ class ClusterDownloader(ClientBase):
 
     def download(self, task: DownloadTask) -> DownloadResponse:
         """下载单个已构造任务。"""
-        return self._with_failover(
-            lambda c: c.download(task), f"下载 {task.url}", replayable=_is_replayable(task)
-        )
+        return self._with_failover(lambda c: c.download(task), f"下载 {task.url}", replayable=_is_replayable(task))
 
     def stream(self, url: str, **kwargs: Any) -> StreamedResponse:
         """建立流式响应；流开始后的中断不会跨节点续传。"""
