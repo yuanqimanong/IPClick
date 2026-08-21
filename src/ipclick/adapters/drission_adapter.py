@@ -72,6 +72,8 @@ class DrissionPageAdapter(DownloaderAdapter):
         self._browser_lock: threading.Lock = threading.Lock()
         self._pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ipclick-drissionpage")
         self._closed: bool = False
+        # 超时后被放弃、但仍在占着那个唯一工作线程的渲染任务数。
+        self._abandoned: int = 0
 
     def _options(self) -> Any:
         s = self.browser_settings
@@ -194,16 +196,39 @@ class DrissionPageAdapter(DownloaderAdapter):
         target = merge_query_params(url, params)
         page_timeout = timeout if timeout and timeout > 0 else self.browser_settings.page_load_timeout
 
+        budget = page_timeout + self.browser_settings.script_timeout + 60
+
+        # 上一次超时的渲染可能还在占着那个唯一的工作线程。此时排队进去只会白等一整个
+        # budget 再报同样的超时——每个后续请求都付一次这个代价。直接快速失败，
+        # 并说清原因和处理方向。
+        with self._browser_lock:
+            stuck = self._abandoned
+        if stuck:
+            raise AdapterError(
+                f"DrissionPage 的渲染线程仍被 {stuck} 个已超时的任务占用（它只有一个工作线程，"
+                f"且超时后无法真正中断）。请等它自行结束，或重启服务；"
+                f"需要并发渲染请换用 playwright / patchright / camoufox 引擎"
+            )
+
         # DrissionPage 对象不是线程安全的，所有浏览器操作固定在同一工作线程。
         future: Future[Response] = self._pool.submit(
             self._render, target, headers, cookies, config, automation_script, page_timeout
         )
-        budget = page_timeout + self.browser_settings.script_timeout + 60
         try:
             return future.result(timeout=budget)
         except TimeoutError:
-            future.cancel()
+            # cancel() 对已经在跑的任务是空操作——它会继续占着工作线程直到自己结束。
+            # 这里只能如实记账，并在它结束时把账销掉。
+            if not future.cancel():
+                with self._browser_lock:
+                    self._abandoned += 1
+                future.add_done_callback(self._release_abandoned)
             raise AdapterError(f"浏览器任务超过 {budget:.0f} 秒未返回") from None
+
+    def _release_abandoned(self, _future: Future[Response]) -> None:
+        """被放弃的渲染任务终于结束了，把占用计数销掉。"""
+        with self._browser_lock:
+            self._abandoned = max(0, self._abandoned - 1)
 
     def _render(
         self,

@@ -405,9 +405,15 @@ max_pages = 4
 #     automation_script = "return document.querySelector('#price').innerText"
 # 返回值经 x-ipclick-script-result 响应头带回。脚本写错（SyntaxError / ReferenceError）
 # 会被判为参数错误直接报 INVALID_ARGUMENT，不重试。
-# ⚠️ 默认关闭。页面内的 JS 会自己发请求，[SECURITY] 那套 URL 策略（禁云元数据、
-# 禁内网）对它完全不起作用——放开它等于把 SSRF 防线让开一整条。
+# ⚠️ 默认关闭。放开它等于允许调用方在页面里跑任意 JS，而 [SECURITY] 那套 URL 策略
+# （禁云元数据、禁内网）对页面内发出的请求完全不起作用。
 # 只有在确认调用方全部可信时才打开。
+#
+# 但要清楚它挡住的**只是 automation_script 这一条通道**：关着它的时候，
+# 目标页面自己的 JS 照样在执行，同样能 fetch 内网地址。也就是说只要用浏览器渲染
+# 不可信的 URL，页面内发起的请求就绕不过——那是"用真浏览器"这件事本身的代价，
+# 不是这个开关能补上的。真正需要隔离时请靠网络层（出网受限的网络命名空间 / 安全组），
+# 而不是这一项。
 allow_scripts = false
 # ---- 以下三项只对 camoufox 生效 ----
 # 伪装的语言环境，如 "zh-CN"。留空则由 camoufox 自行生成。
@@ -425,7 +431,10 @@ gateway = ""                     # 例如 "http://127.0.0.1:8080"
 bypass_list = []                 # 例如 ["*.internal.com"]
 # 渲染超时控制（秒）
 [BROWSER.timeout]
-page_load = 30      # 页面加载超时
+# 页面加载超时。注意这只是**兜底默认值**：RPC 与 SDK 的每个请求都带自己的 timeout，
+# 服务端优先用那个，所以走正常调用路径时这一项其实用不到。它只在进程内直接构造
+# 适配器、且没传 timeout 时生效。
+page_load = 30
 script_exec = 60    # automation_script 执行超时
 # wait_until = "networkidle" 时，load 之后额外等网络空闲的预算上限（秒）。
 # 等不到不算失败，只是按 load 时的内容返回。设 0 等于不等。

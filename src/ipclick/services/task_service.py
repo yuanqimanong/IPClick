@@ -494,12 +494,18 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         finished: queue.Queue[Future[task_pb2.TaskResp]] = queue.Queue()
         in_flight = 0
         submitted = 0
+        # 记下所有已提交的 future：调用方中途断开时，还排在队列里没开始跑的那些必须
+        # 取消掉。之前只是 break 出循环，已提交的任务照样一个个执行完——子任务用的是
+        # DetachedContext，它的 is_active() 恒为 True，所以它们也没法自己放弃。
+        # 结果是调用方早就走了，服务端还在替它把整批请求打给目标站点。
+        pending: list[Future[task_pb2.TaskResp]] = []
 
         for request in request_iterator:
             if not context.is_active():
                 log.info("Batch cancelled by client")
                 break
-            future = pool.submit(self._handle_one, request, batch_metadata(context))
+            future: Future[task_pb2.TaskResp] = pool.submit(self._handle_one, request, batch_metadata(context))
+            pending.append(future)
             future.add_done_callback(finished.put)
             in_flight += 1
             submitted += 1
@@ -526,6 +532,9 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             in_flight -= 1
             yield done.result()
 
+        cancelled = sum(1 for future in pending if future.cancel())
+        if cancelled:
+            log.info(f"调用方已断开，取消了 {cancelled} 个尚未开始的批量子任务")
         log.info(f"Batch finished, {submitted} tasks")
 
     def _batch_pool(self) -> ThreadPoolExecutor:
