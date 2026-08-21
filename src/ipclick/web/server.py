@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import sys
 import threading
-from typing import Any, final
+from typing import Any, ClassVar, final
 from urllib.parse import parse_qs, quote
 
 from typing_extensions import override
@@ -144,6 +144,15 @@ class WebServer:
 
             server_version: str = "IPClickWeb/1.0"
 
+            # 读请求行与 body 的超时。不设的话（标准库默认 None），一条声明了
+            # Content-Length 却只发半截 body 的连接会让 rfile.read() 无限期阻塞，
+            # 每条这样的连接占死一个 handler 线程。默认只监听 127.0.0.1 时影响有限，
+            # 但 [WEB].host = 0.0.0.0 / --web-lan 之后局域网里谁都能这么占。
+            timeout: ClassVar[float | None] = 30.0
+
+            # do_HEAD 把它置上，_send 据此略过响应体。
+            _head_only: bool = False
+
             @override
             def log_message(self, format: str, *args: Any) -> None:
                 """关闭标准库逐请求 stderr 日志，统一使用项目日志。"""
@@ -185,7 +194,9 @@ class WebServer:
                 for key, value in extra_headers or []:
                     self.send_header(key, value)
                 self.end_headers()
-                self.wfile.write(body)
+                # HEAD 要给出与 GET 完全相同的状态码和响应头（含 Content-Length），只是不带体。
+                if not self._head_only:
+                    self.wfile.write(body)
 
             def _redirect(self, location: str, extra_headers: list[tuple[str, str]] | None = None) -> None:
                 self._send(
@@ -323,6 +334,19 @@ class WebServer:
                 body = json.dumps(payload, ensure_ascii=False, default=str).encode()
                 return self._send(status, body, "application/json; charset=utf-8")
 
+            def do_HEAD(self) -> None:
+                """按 GET 的状态码与响应头作答，但不返回响应体。
+
+                实现了 GET 就该实现 HEAD（HTTP 规范如此）。缺了它会落到标准库的
+                501 兜底，于是用 HEAD 的监控探针、反向代理健康检查、链接检查器
+                会把一个健康的管理端判成故障。
+                """
+                self._head_only = True
+                try:
+                    self.do_GET()
+                finally:
+                    self._head_only = False
+
             def do_POST(self) -> None:
                 """处理登录及经会话和 CSRF 双重校验的状态变更。"""
                 path = self.path.split("?", 1)[0].rstrip("/") or "/"
@@ -411,6 +435,15 @@ class WebServer:
                 form = self._read_form()
                 username = form.get("username", "")
                 password = form.get("password", "")
+                # 完全没提交凭据的请求是畸形请求，不是一次"密码错误"。不区分的话，
+                # 5 个空 body 的 POST（Content-Length 为 0、非数字、超 256KB 上限，
+                # 或连接中途断开导致 body 读不全）就能把管理员锁在门外 300 秒——
+                # 而这几种请求任何人都发得出来，不需要知道用户名。
+                if not username and not password:
+                    log.warning(f"Web 端收到不含凭据的登录请求，来源 {self.source}（不计入失败锁定）")
+                    return self._send(
+                        HTTPStatus.BAD_REQUEST, "登录请求缺少用户名或密码".encode(), "text/plain; charset=utf-8"
+                    )
                 if not server._credentials.verify(username, password):
                     server.sessions.record_failure(self.source)
                     return self._send(HTTPStatus.UNAUTHORIZED, render_login(error="用户名或密码错误").encode())

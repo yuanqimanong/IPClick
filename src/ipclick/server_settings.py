@@ -93,7 +93,9 @@ class ServerSettings:
             return self
         return ServerSettings(
             host=host or self.host,
-            port=port or self.port,
+            # `port or self.port` 会把显式传进来的 0 当成"没传"；0 是非法端口，
+            # 该让 __post_init__ 把它拦下来，而不是伪装成"沿用原值"。
+            port=self.port if port is None else port,
             max_workers=self.max_workers,
             max_concurrent_rpcs=self.max_concurrent_rpcs,
             max_concurrent_streams=self.max_concurrent_streams,
@@ -109,7 +111,11 @@ class ServerSettings:
         defaults = cls()
         return cls(
             host=as_text(config.get("host"), defaults.host),
-            port=as_int(config.get("port"), defaults.port, minimum=1),
+            # 必须用 require_int：as_int 越界时**静默回落默认值**，于是 port = -1 / 0 在
+            # __post_init__ 的 1..65535 校验之前就已经变成 9528 了——config-info 照实显示 -1，
+            # 服务端却去绑 9528，等于起了一个没人知道端口的服务。而 port = 70000 因为没给
+            # 上界参数、原样穿过去才被校验到，同一项配置两个方向行为不一致。
+            port=require_int(config.get("port"), "SERVER.port", defaults.port, minimum=1),
             max_workers=require_int(config.get("max_workers"), "SERVER.max_workers", defaults.max_workers, minimum=1),
             max_concurrent_rpcs=as_int(config.get("max_concurrent_rpcs"), DERIVE, minimum=DERIVE),
             max_concurrent_streams=as_int(config.get("max_concurrent_streams"), DERIVE, minimum=DERIVE),

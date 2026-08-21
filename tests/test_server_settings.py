@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import grpc
 import pytest
 
@@ -118,3 +120,30 @@ def test_multiprocess_degrades_where_fork_is_missing(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(server_settings, "fork_supported", lambda: False)
     assert resolve_processes(4) == 1
     assert resolve_processes(1) == 1
+
+
+@pytest.mark.parametrize("port", [-1, 0])
+def test_out_of_range_ports_are_refused_at_both_ends(port: int) -> None:
+    """端口的**下界**也必须真的拦住，而不是静默回落到默认值。
+
+    原实现用 as_int(..., minimum=1)，越界即回落——于是 port = -1 在 __post_init__
+    的 1..65535 校验之前就已经变成 9528 了：config-info 照实显示 -1，服务端却去绑
+    9528，等于起了一个没人知道端口的服务。而 port = 70000 因为没给上界参数、
+    原样穿过去才被校验到，同一项配置两个方向行为不一致。
+    """
+    with pytest.raises(ConfigError, match=re.escape("SERVER.port")):
+        _ = ServerSettings.from_config({"port": port})
+
+
+def test_upper_bound_is_still_refused() -> None:
+    with pytest.raises(ConfigError, match=re.escape("1..65535")):
+        _ = ServerSettings.from_config({"port": 70000})
+
+
+def test_replace_endpoint_does_not_swallow_an_explicit_zero() -> None:
+    """`port or self.port` 会把显式传进来的 0 当成"没传"；0 是非法端口。"""
+    settings = ServerSettings.from_config({"port": 19528})
+
+    assert settings.replace_endpoint(port=None).port == 19528
+    with pytest.raises(ConfigError, match=re.escape("SERVER.port")):
+        _ = settings.replace_endpoint(port=0)

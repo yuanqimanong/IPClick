@@ -15,7 +15,7 @@ from ipclick.cluster.forwarder import ForwardingTaskService
 from ipclick.cluster.node import ClusterConfig, NodeState
 from ipclick.cluster.pool import NodePool
 from ipclick.dto.proto import task_pb2
-from ipclick.exceptions import AdapterError, URLNotAllowedError, ValidationError
+from ipclick.exceptions import AdapterError, HostResolutionError, URLNotAllowedError, ValidationError
 from ipclick.limiter import HostLimitTimeout, build_limiter
 from ipclick.server import IPClickServer
 from ipclick.services.async_task_service import AsyncTaskService
@@ -528,3 +528,19 @@ def test_open_stream_passes_retry_settings_through() -> None:
 
     assert captured["max_retries"] == 7
     assert captured["retry_delay"] == 1.5
+
+
+def test_dns_failure_becomes_an_ordinary_failed_response_not_a_grpc_error() -> None:
+    """DNS 解析失败是网络故障，不该被还原成"被策略拒绝"的异常抛给调用方。
+
+    code=None 意味着不设 gRPC 错误状态，于是它变成一条普通的失败响应
+    （status_code == -1、error 非空），与"连不上目标站点"表现一致，
+    也与 README 承诺的"不会因为网络问题抛异常"一致。
+    真正的策略拒绝仍然是 PERMISSION_DENIED，两者的排查方向完全相反。
+    """
+    dns = classify(HostResolutionError("无法解析主机 'nope.invalid'"))
+    policy = classify(URLNotAllowedError("禁止访问云元数据地址"))
+
+    assert dns.code is None
+    assert dns.label == "dns_failure"
+    assert policy.code is grpc.StatusCode.PERMISSION_DENIED

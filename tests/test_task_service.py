@@ -287,3 +287,22 @@ def test_structured_data_body_is_still_restored(service: TaskService) -> None:
     request = task_pb2.ReqTask(url="https://example.com/", data=b'{"a": 1}')
 
     assert service._build_download_kwargs(request)["data"] == {"a": 1}
+
+
+def test_key_value_pair_bodies_survive_the_json_round_trip(service: TaskService) -> None:
+    """data=[("a", "1")] 过线时被 json.dumps 成 [["a", "1"]]，回来是嵌套 list。
+
+    curl_cffi 的表单编码只认 2 元 tuple，于是报
+    "not a valid non-string sequence or mapping object"——键值对形式的 data
+    根本发不出去。服务端要把它还原回去。
+    """
+    request = task_pb2.ReqTask(url="https://example.com/", data=b'[["a", "1"], ["b", "2"]]')
+
+    assert service._build_download_kwargs(request)["data"] == [("a", "1"), ("b", "2")]
+
+
+def test_ordinary_json_lists_are_left_alone(service: TaskService) -> None:
+    """只还原成对的那种；普通 JSON 数组不能被改成 tuple。"""
+    request = task_pb2.ReqTask(url="https://example.com/", data=b"[1, 2, 3]")
+
+    assert service._build_download_kwargs(request)["data"] == [1, 2, 3]

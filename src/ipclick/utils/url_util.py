@@ -6,7 +6,7 @@ import socket
 from typing import Any
 from urllib.parse import urlencode, urlparse, urlsplit, urlunparse
 
-from ipclick.exceptions import URLNotAllowedError
+from ipclick.exceptions import HostResolutionError, URLNotAllowedError
 from ipclick.utils.coerce import as_bool
 
 
@@ -123,8 +123,11 @@ def validate_url(url: str, policy: URLPolicy | None = None) -> None:
 
     resolved = _resolve_host(host)
     if not resolved:
-        # 安全开关开启时不能因 DNS 临时失败而跳过检查，随后由适配器再次解析并访问。
-        raise URLNotAllowedError(f"无法解析主机 {host!r}，为避免绕过 SSRF 准入已拒绝请求")
+        # 安全开关开启时不能因 DNS 临时失败而跳过检查——放行等于让解析失败成为绕过准入的口子。
+        # 但这不是"被策略拒绝"：抛 HostResolutionError 而不是 URLNotAllowedError，服务端会把它
+        # 变成普通的失败响应（status_code == -1），与关闭准入时适配器自己解析失败的表现一致，
+        # 也与 README 承诺的"不会因为网络问题抛异常"一致。
+        raise HostResolutionError(f"无法解析主机 {host!r}（DNS 解析失败；安全准入需要先解析出 IP 才能放行）")
 
     # 任一 A/AAAA 记录落入禁区就拒绝，避免多地址主机绕过准入。
     for ip in resolved:

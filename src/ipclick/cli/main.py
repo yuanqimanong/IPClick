@@ -70,25 +70,31 @@ def main(ctx: click.Context) -> None:
 @click.option(
     "--port",
     "-p",
-    type=int,
+    # IntRange 而不是裸 int：不校验的话 --port 70000 会生成一份 ipclick 自己都加载不了的
+    # 配置（加载器只认 1..65535），--port -1 更是生成出文件名带负号的 ipclick--1.toml。
+    type=click.IntRange(1, 65535),
     default=None,
     help="按端口命名：生成 ipclick-<端口>.toml 并把端口填进去。同机起多个实例时用",
 )
 def init(force: bool, target_dir: Path, port: int | None) -> None:
     """生成行为配置和权限收紧的机密环境文件。"""
     target_dir.mkdir(parents=True, exist_ok=True)
-    toml_path = target_dir / (f"ipclick-{port}.toml" if port else "ipclick.toml")
+    # `if port` 在这里是安全的（IntRange 已经排除了 0），但仍写成 is not None：
+    # 端口的"没传"只有 None 一种，别再把它和某个合法值混为一谈。
+    toml_path = target_dir / (f"ipclick-{port}.toml" if port is not None else "ipclick.toml")
     env_path = target_dir / ".env"
 
     existing = [p for p in (toml_path, env_path) if p.exists()]
     if existing and not force:
         for path in existing:
-            click.echo(f"已存在，跳过: {path}", err=True)
+            # 措辞要说实话：下面 raise Abort 是整体中止，一个文件都不会生成，
+            # 说"跳过"会让人以为缺的那个已经补上了。
+            click.echo(f"已存在，中止: {path}", err=True)
         click.echo("要覆盖请加 --force。注意 .env 里可能有正在用的密钥。", err=True)
         raise click.Abort()
 
     template = example_config()
-    if port:
+    if port is not None:
         template = re.sub(
             r"(?ms)(^\[SERVER\].*?^)port = \d+$",
             lambda m: m.group(1) + f"port = {port}",
@@ -211,7 +217,15 @@ def run(
 @click.option("--port", "-p", type=int, help="服务端端口（默认取配置）")
 @click.option("--config", "-c", type=click.Path(path_type=Path), help="配置文件路径")
 @click.option("--service", default="", help="要查询的服务名，默认查总体状态")
-@click.option("--timeout", type=float, default=5.0, show_default=True, help="超时（秒）")
+# FloatRange 而不是裸 float：--timeout -5 会让 gRPC 立刻 DEADLINE_EXCEEDED，
+# 于是一个健康的服务端被报成挂了——而 --timeout abc 早就是 exit 2 了，两者该一致。
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0, min_open=True),
+    default=5.0,
+    show_default=True,
+    help="超时（秒）",
+)
 def health(host: str, port: int | None, config: Path | None, service: str, timeout: float) -> None:
     """调用标准 gRPC health 服务并通过退出码报告结果。"""
     LogUtil.init(level="ERROR")

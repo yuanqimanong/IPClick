@@ -8,7 +8,7 @@ from typing_extensions import override
 from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader
 from ipclick.adapters.redirects import follow_with_policy
 from ipclick.adapters.retry import aretry, retry
-from ipclick.adapters.sessions import AsyncSessionCache, SessionCache
+from ipclick.adapters.sessions import AsyncSessionCache, SessionCache, reset_cookies
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError
@@ -201,6 +201,7 @@ class CurlCffiAdapter(DownloaderAdapter):
 
         # proxy/证书校验/指纹会改变连接属性，必须分开复用连接池。
         session = self._sessions.get((proxy, verify, impersonate))
+        reset_cookies(session)
 
         try:
             curl_cffi_resp = self._request_following_policy(session, method, url, request_kwargs, allow_redirects)
@@ -230,6 +231,7 @@ class CurlCffiAdapter(DownloaderAdapter):
         session = self._async_sessions.get(
             (kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate"))
         )
+        reset_cookies(session)
         try:
             resp = await session.request(method, url, **request_kwargs)
             return Response(
@@ -259,6 +261,7 @@ class CurlCffiAdapter(DownloaderAdapter):
             return
 
         session = self._sessions.get((kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate")))
+        reset_cookies(session)
 
         # 与普通请求共用白名单 builder，避免切换到 stream 后静默丢失指纹、证书等参数。
         request_kwargs = self._build_request_kwargs(kwargs)

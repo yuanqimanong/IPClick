@@ -7,7 +7,7 @@ from typing import Literal, final
 
 import grpc
 
-from ipclick.exceptions import AdapterError, URLNotAllowedError
+from ipclick.exceptions import AdapterError, HostResolutionError, URLNotAllowedError
 from ipclick.limiter import HostLimitTimeout
 from ipclick.trace import TraceRecorder
 from ipclick.utils.log_util import log
@@ -50,6 +50,11 @@ class _Rule:
 
 _RULES: tuple[_Rule, ...] = (
     _Rule(CallerGone, None, "", "调用方已断开", level="info"),
+    # code=None：不设 gRPC 错误状态，于是它变成一条普通的失败响应（status_code == -1、
+    # error 非空），而不是被 SDK 还原成异常抛出去。DNS 解析不出来是网络故障，
+    # 和"连不上目标站点"应当表现一致。必须排在 URLNotAllowedError 之前——虽然
+    # 现在两者没有继承关系，但排前面能保证以后也不会被更宽的规则先接走。
+    _Rule(HostResolutionError, None, "dns_failure", "目标主机 DNS 解析失败", level="info"),
     _Rule(URLNotAllowedError, grpc.StatusCode.PERMISSION_DENIED, "url_not_allowed", "被 URL 策略拒绝"),
     _Rule(HostLimitTimeout, grpc.StatusCode.RESOURCE_EXHAUSTED, "host_limit", "被按 host 限流挡住"),
     _Rule(AdapterError, grpc.StatusCode.FAILED_PRECONDITION, "failed_precondition", "服务端无法处理"),

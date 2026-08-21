@@ -878,7 +878,7 @@ def component_browser(extra: str, kind: str, dry_run: bool, as_json: bool) -> No
 
 @click.group("config")
 def config_group() -> None:
-    """查看实际生效且已脱敏的配置。"""
+    """查看合并后、已脱敏的配置；值不会生效时会另行告警。"""
 
 
 _SECRET_HINTS = ("token", "secret", "password", "auth_key", "passwd", "credential")
@@ -887,7 +887,10 @@ _SECRET_HINTS = ("token", "secret", "password", "auth_key", "passwd", "credentia
 def _redact(value: Any, key: str = "") -> Any:
     """递归隐藏键名疑似机密的配置值。"""
     lowered = key.lower()
-    if any(hint in lowered for hint in _SECRET_HINTS):
+    # 只按键名子串判断会误伤：allow_secrets_in_config 是个布尔开关，键名里带 "secret"
+    # 却不是机密。机密一定是字符串（或字符串列表），布尔和数字一律原样输出——
+    # 否则 false 会被渲染成空串，与"未配置"在输出里无法区分。
+    if any(hint in lowered for hint in _SECRET_HINTS) and not isinstance(value, (bool, int, float)):
         if isinstance(value, (list, tuple)):
             return [f"<已配置：{len(value)} 项>"] if value else []
         return "<已配置>" if str(value or "").strip() else ""
@@ -896,6 +899,24 @@ def _redact(value: Any, key: str = "") -> Any:
     if isinstance(value, (list, tuple)):
         return [_redact(v, key) for v in value]
     return value
+
+
+def _validation_error(config_data: Settings) -> str:
+    """返回这份配置在服务端启动时会报的第一条校验错误；没有就返回空串。
+
+    ``config show`` / ``config get`` 展示的是合并后的**文件值**，而 ``config-info``
+    会真的构造 ServerSettings。两者曾经对同一个文件给出相反结论——前者照原样打印
+    ``max_workers = 0`` 并退出 0，后者报错退出 1。既然这个命令组自称"实际生效"，
+    至少要在值其实不会生效时明说，而不是让人以为它生效了。
+    """
+    from ipclick.exceptions import ConfigError
+    from ipclick.server_settings import ServerSettings
+
+    try:
+        _ = ServerSettings.from_config(section(config_data, "SERVER"))
+    except ConfigError as e:
+        return str(e)
+    return ""
 
 
 @config_group.command("show")
@@ -916,9 +937,12 @@ def config_show(config: Path | None, section: str, as_json: bool) -> None:
         node_data = dict(node_data) if hasattr(node_data, "keys") else node_data
 
     redacted = _redact(node_data)
+    invalid = _validation_error(config_data)
     if as_json:
-        emit({"ok": True, "section": section or None, "config": redacted}, as_json=True)
+        emit({"ok": True, "section": section or None, "config": redacted, "invalid": invalid or None}, as_json=True)
     else:
+        if invalid:
+            note(f"⚠️  这份配置起不来，下面的值不会生效：{invalid}")
         import json as json_lib
 
         click.echo(json_lib.dumps(redacted, ensure_ascii=False, indent=2, default=str))
@@ -943,9 +967,12 @@ def config_get(config: Path | None, path: str, as_json: bool) -> None:
 
     key = path.rsplit(".", 1)[-1]
     value = _redact(dict(node_data) if hasattr(node_data, "keys") else node_data, key)
+    invalid = _validation_error(config_data)
     if as_json:
-        emit({"ok": True, "path": path, "value": value}, as_json=True)
+        emit({"ok": True, "path": path, "value": value, "invalid": invalid or None}, as_json=True)
     else:
+        if invalid:
+            note(f"⚠️  这份配置起不来，下面的值不会生效：{invalid}")
         import json as json_lib
 
         click.echo(value if isinstance(value, str) else json_lib.dumps(value, ensure_ascii=False, default=str))
