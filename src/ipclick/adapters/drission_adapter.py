@@ -181,6 +181,15 @@ class DrissionPageAdapter(DownloaderAdapter):
                 "DrissionPage 的代理是浏览器进程级的，不支持按请求指定。"
                 "请改用 [BROWSER.proxy].gateway 全局配置，或换用 camoufox / patchright / playwright 引擎。"
             )
+        if not verify:
+            # 之前是静默忽略：verify=False 照样按校验证书执行，请求自签名站点仍然失败，
+            # 而调用方明明传了参数、从结果里看不出它没生效。证书校验对 DrissionPage
+            # 是浏览器启动开关（同 proxy 一样进程级），按请求切不了，所以明确报错。
+            raise ValidationError(
+                "DrissionPage 不支持按请求关闭证书校验（verify=False）：那是浏览器进程级的启动开关。"
+                "需要跳过证书校验请换用 camoufox / patchright / playwright 引擎——"
+                "它们按 context 设置 ignore_https_errors，可以按请求生效。"
+            )
 
         target = merge_query_params(url, params)
         page_timeout = timeout if timeout and timeout > 0 else self.browser_settings.page_load_timeout

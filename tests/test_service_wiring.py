@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 import grpc
@@ -438,3 +439,22 @@ def test_fork_failure_reaps_already_started_workers(monkeypatch: pytest.MonkeyPa
 
     # 前两个已启动的 worker 都被交给了收尾逻辑
     assert killed == spawned == [1000, 1001]
+
+
+def test_query_params_are_not_rewritten_into_datetimes() -> None:
+    """查询参数不得被 json_hook 还原成 datetime 再 str() 拼进 URL。
+
+    params={"start": "2024-01-01"} 曾经会变成 start=2024-01-01 00:00:00 发出去，
+    目标 API 的日期过滤直接失效或返回 400，而调用方从自己传的值里看不出问题。
+    Python 3.11 起 fromisoformat 更宽松，"20241231" 这种紧凑写法也会被吃掉。
+    """
+    service: Any = object.__new__(TaskService)
+    service.adapter_settings = None
+
+    request = task_pb2.ReqTask(
+        uuid="u", url="https://api.example.com/orders", method=task_pb2.GET,
+        params='{"start": "2024-01-01", "end": "20241231", "q": "hello"}',
+    )
+    params = json.loads(request.params)
+    assert params == {"start": "2024-01-01", "end": "20241231", "q": "hello"}
+    assert all(isinstance(v, str) for v in params.values())

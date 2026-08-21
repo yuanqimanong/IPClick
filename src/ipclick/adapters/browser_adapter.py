@@ -295,7 +295,9 @@ class _BrowserWorker:
             if height == previous:
                 return
             previous = height
-            await page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+            # 与上一行同样要防 document.body 为空：XML / 纯 SVG 文档没有 body，
+            # 少了这层保护会抛 TypeError，被当成用户脚本错误报成 ValidationError。
+            await page.evaluate("() => { if (document.body) window.scrollTo(0, document.body.scrollHeight); }")
             await page.wait_for_timeout(300)
 
 
@@ -417,6 +419,11 @@ class BrowserAdapter(DownloaderAdapter):
             budget += plan.script_timeout
         if plan.wait_for_timeout_ms:
             budget += plan.wait_for_timeout_ms / 1000
+        if plan.wait_until == NETWORK_IDLE:
+            # networkidle 是默认值，导航之后还要额外等 settle 秒。不算进预算的话，
+            # 长连接页面（WebSocket / SSE / 轮询）每次都会把这几秒花掉，然后被看门狗
+            # 判成"浏览器任务超时"——而它其实正常返回了 load 时的内容。
+            budget += plan.settle_timeout_ms / 1000
         if not self._worker.browser_started:
             budget += _COLD_START_ALLOWANCE
         return budget + _OVERHEAD_ALLOWANCE

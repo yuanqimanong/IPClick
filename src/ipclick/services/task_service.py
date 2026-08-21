@@ -34,7 +34,6 @@ from ipclick.services.components import ComponentService
 from ipclick.services.detached import DetachedContext
 from ipclick.services.errors import CallerGone, classify, report
 from ipclick.trace import RequestTrace, TraceRecorder, get_recorder
-from ipclick.utils import json_hook
 from ipclick.utils.coerce import as_int
 from ipclick.utils.config_util import Settings, section
 from ipclick.utils.log_util import log
@@ -282,7 +281,12 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         headers = dict(request.headers) if request.headers else None
         cookies = dict(request.cookies) if request.cookies else None
 
-        params = json.loads(request.params, object_hook=json_hook) if request.params else None
+        # 查询参数**不过** json_hook：它会把形似 ISO 的字符串还原成 datetime，
+        # 而这些值最终要被 str() 拼进 URL。于是 params={"start": "2024-01-01"} 发出去
+        # 变成 start=2024-01-01+00:00:00，目标 API 的日期过滤直接失效或返回 400，
+        # 而调用方从自己传的值里完全看不出问题。Python 3.11 起 fromisoformat 更宽松，
+        # "20241231" 这种紧凑写法也会被吃掉。
+        params = json.loads(request.params) if request.params else None
         data = self._decode_body(request.data, "data")
         json_data = self._decode_body(request.json, "json")
 

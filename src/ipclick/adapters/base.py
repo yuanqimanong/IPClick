@@ -48,7 +48,10 @@ def normalize_js(script: str) -> str:
         return text
     if text.startswith(_JS_FUNCTION_PREFIXES):
         return text
-    if re.search(r"\breturn\b", text):
+    # 只认**行首**的 return（允许前面有缩进）：原来用 \breturn\b 全文搜，
+    # 于是 "document.title + ' return '" 这种表达式里只要出现这个单词，就会被包成
+    # 函数体 () => { ... }——没有 return 语句，返回值静默变成 undefined。
+    if re.search(r"(?m)^\s*return\b", text):
         return f"() => {{ {text} }}"
     return f"() => ({text})"
 

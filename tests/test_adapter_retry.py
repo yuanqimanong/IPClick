@@ -299,3 +299,27 @@ def test_retries_stop_once_the_caller_is_gone() -> None:
 def test_caller_gone_defaults_to_false_without_a_binding() -> None:
     """没有绑定判定时（进程内直接用适配器）不得误判成"调用方走了"。"""
     assert caller_gone() is False
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        # 含 return 单词的表达式不该被包成函数体——那样返回值会静默变成 undefined
+        ("document.title + ' return '", "() => (document.title + ' return ')"),
+        ("o.returnValue", "() => (o.returnValue)"),
+        # 真正的 return 语句仍然识别，含缩进与多行
+        ("return document.title;", "() => { return document.title; }"),
+        ("  return 1;", "() => { return 1; }"),
+        ("const x = 1;\nreturn x;", "() => { const x = 1;\nreturn x; }"),
+        # 自带函数前缀的原样透传
+        ("async () => { await x(); return 1; }", "async () => { await x(); return 1; }"),
+    ],
+)
+def test_normalize_js_only_wraps_real_return_statements(script: str, expected: str) -> None:
+    """只有行首的 return 才算返回语句。
+
+    原来用 \\breturn\\b 全文搜，于是表达式里只要出现这个单词（字符串字面量、
+    o.returnValue 之类）就会被包成 () => { ... } —— 没有 return 语句，
+    返回值静默变成 undefined，而请求是成功的、没有任何报错。
+    """
+    assert normalize_js(script) == expected
