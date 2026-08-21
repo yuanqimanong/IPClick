@@ -1,6 +1,7 @@
 """在异步入口中复用同步 gRPC channel 执行集群转发。"""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, final
 
 import grpc
@@ -19,12 +20,34 @@ from ipclick.dto.proto import task_pb2
 from ipclick.exceptions import TransportError
 from ipclick.services.async_task_service import AsyncTaskService
 from ipclick.services.task_service import is_forwarded
+from ipclick.utils.config_util import section
 from ipclick.utils.log_util import log
 
 
 @final
 class AsyncForwardingTaskService(AsyncTaskService, ForwardingTaskService):
     """将阻塞式下游转发移交线程池的异步转发服务。"""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # 转发用**专属**线程池，不能用 run_in_executor(None) 的默认池：那个池是整个
+        # 事件循环共用的（默认只有 min(32, cpu+4) 个线程，4 核机器上就是 8 个），
+        # 还同时承载着 SendStream 逐项推流和适配器的同步兜底。转发是阻塞调用、
+        # 一占就是整个下游 RPC 的时长，挤在同一个池里能把本地执行和流式请求一起饿死。
+        self._forward_pool: ThreadPoolExecutor = ThreadPoolExecutor(
+            max_workers=max(2, self.settings_max_workers), thread_name_prefix="ipclick-forward"
+        )
+
+    @property
+    def settings_max_workers(self) -> int:
+        """转发线程池容量：跟随 [SERVER].max_workers。"""
+        return int(section(self.config, "SERVER").get("max_workers") or 32)
+
+    @override
+    async def acleanup(self) -> None:
+        """先停掉转发线程池，再走集群与适配器的收尾。"""
+        self._forward_pool.shutdown(wait=False, cancel_futures=True)
+        await super().acleanup()
 
     @override
     async def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":
@@ -58,7 +81,7 @@ class AsyncForwardingTaskService(AsyncTaskService, ForwardingTaskService):
                 return await AsyncTaskService.Send(self, request, context)
 
             try:
-                response = await loop.run_in_executor(None, self._forward, state, request)
+                response = await loop.run_in_executor(self._forward_pool, self._forward, state, request)
             except ValueError as e:
                 # channel 在停机或热更新的边缘被关掉时，grpc 抛的是 ValueError
                 # （"Cannot invoke RPC on closed channel!"）而不是 RpcError，上面那个
