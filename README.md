@@ -26,7 +26,9 @@ IPClick 是一个基于 gRPC 的分布式 HTTP 请求代理。你把请求交给
 | [性能与容量](https://github.com/yuanqimanong/IPClick/wiki/Performance) | 进程、线程、连接池、按 host 限流 |
 | [链路记录](https://github.com/yuanqimanong/IPClick/wiki/Observability) | 记了什么、怎么查 |
 | [故障排查](https://github.com/yuanqimanong/IPClick/wiki/Troubleshooting) | 连不上、被拦、装不上 |
+| [示例集](https://github.com/yuanqimanong/IPClick/wiki/Recipes) | 按场景可直接抄的代码 |
 | [API 参考](https://github.com/yuanqimanong/IPClick/wiki/API-Reference) | 类型与签名 |
+| [开发](https://github.com/yuanqimanong/IPClick/wiki/Development) | 本地环境、门禁、项目结构、发布 |
 
 ## ✨ 特性
 
@@ -68,8 +70,10 @@ pip install "ipclick[camoufox]"         # 加浏览器渲染（还需下载浏�
 # 使用默认配置启动
 ipclick run
 
-# 指定端口和地址
-ipclick run --host 0.0.0.0 --port 9528
+# 指定端口和地址。注意 gRPC 端默认已经是 "[::]"（所有网卡，v4 + v6），
+# 写 --host 0.0.0.0 不是"打开对外"，而是把监听收窄成只 IPv4。
+# 真正默认只听本机的是 Web 管理端
+ipclick run --host 0.0.0.0 --port 9628
 
 # 使用自定义配置文件（TOML 格式）
 ipclick run --config /path/to/ipclick.toml
@@ -78,7 +82,8 @@ ipclick run --config /path/to/ipclick.toml
 ipclick run --verbose
 
 # 同一目录起第二个实例：gRPC 与 Web 两个端口都要岔开
-ipclick run --port 9528 --web-port 9531 -w
+# （9528 / 9527 就是这两者的默认值，所以两个都得改）
+ipclick run --port 9628 --web-port 9531 -w
 ```
 
 默认端口是 **gRPC 9528** 与 **Web 9527**。两者都跑在 HTTP/2 之上但协议不同，
@@ -99,6 +104,10 @@ ipclick run --port 9528 --web-port 9531 -w
 processes = 4        # 0 = 按 CPU 核数自动（上限 8）；1 = 单进程（默认）
 ```
 
+**仅 Unix。** Windows 上没有 `os.fork`，会打一条告警后降级成单进程。另外 Web 管理端
+只在 0 号进程里起（否则几个进程抢同一个 Web 端口），内存按进程数线性增长——每进程各有
+一份适配器与连接池，开浏览器渲染时尤其要算。
+
 并发上去之后大面积失败、而服务端 CPU 却很空闲，是另一件事——那是准入上限：
 
 ```toml
@@ -107,8 +116,7 @@ max_concurrent_rpcs = 0    # 0 = max_workers × 8。这一项决定"排队能排
                            # 和 max_workers（"同时能干多少活"）是两件事
 ```
 
-实测并发 100 时：单进程 196.6 → 331.1 QPS，四进程 → 544.6 QPS；
-1000 并发的成功率从 25.8%（异步客户端）回到 100%。
+实测 1 → 4 进程，吞吐从 **313 QPS 涨到 663 QPS**。
 
 服务端也可以整体换成协程（实验性，默认关）：
 
@@ -144,7 +152,7 @@ ipclick -e env > .env            # 机密模板（注意自己 chmod 600）
 | **`ipclick.toml`** | 行为配置：超时、重试、限流、浏览器引擎、SSRF 策略 | ✅ 应该 |
 | **`.env`** | **只放机密**：令牌、密码、带凭据的连接串 | ❌ 绝不 |
 
-`.env` 里只有这 6 项：
+`.env` 模板里就这 6 项（`ipclick -e env` 生成的、`config-info` 审计来源的都是这一份）：
 
 ```
 IPCLICK_AUTH_TOKEN            gRPC 鉴权令牌
@@ -244,7 +252,7 @@ IPCLICK_WEB_USER=ops IPCLICK_WEB_PASSWORD=... ipclick run -w
 | **配置** `/config` | 两个分页：**基础设置**（端口、线程、超时、日志…）与**集群设置**（转发开关、节点增删、子节点部署材料）。写回 `ipclick.toml`，可一键**生成凭据** |
 | **AI 接入** `/skill` | 给 AI 代理用的技能包：装它的命令、全文、以及 `SKILL.md` 下载 |
 
-> 节点管理并在 `/config?tab=cluster` 里——它本来就是集群配置的一部分。`/nodes` 会自动跳过去。
+> 节点管理并入 `/config?tab=cluster`——它本来就是集群配置的一部分。`/nodes` 会自动跳过去。
 
 页面上的**时间一律按你浏览器所在时区显示**。服务端跑在 UTC 的容器里时，
 东八区的人看到的仍是自己的钟点。
@@ -344,8 +352,8 @@ theme = "light"   # light / dark
 
 ## 🤖 命令行（给人，也给 AI）
 
-除了部署用的 `init` / `run` / `health`，还有一组**结构化输出**的命令，供脚本和 AI 代理调用。
-全部支持 `-J/--json`。
+部署那一组是四条：`init` / `run` / `health` / `config-info`，都是给人看的，**不支持
+`--json`**。另有一组**结构化输出**的命令供脚本和 AI 代理调用，全部支持 `-J/--json`。
 
 ```bash
 ipclick status  --json              # 服务端在不在、这台机器能用哪些适配器
@@ -359,8 +367,12 @@ ipclick config  show --json         # 生效配置（机密脱敏）
 ### 输出契约
 
 加 `--json` 后，**stdout 上有且只有一个 JSON 文档**，成功失败都是；日志与进度走
-stderr。所以 `ipclick ... --json | jq` 永远安全。每个文档都带 `ok` 和 `exit_code`，
-和进程退出码一致。
+stderr。所以 `ipclick ... --json | jq` 永远安全。
+
+每个文档都带 `ok`。`fetch` / `status` / `node probe` 还额外带 `exit_code`，与进程退出码
+一致；**其余命令的成功输出里没有这个键**（`trace list`、`node list`、`component list`、
+`config show/get`、`skill *`），请读进程退出码——`jq -e .exit_code` 在那些命令上会空手
+而归。所有失败路径都带 `exit_code`。
 
 | 退出码 | 含义 | 往哪儿查 |
 |---|---|---|
@@ -376,7 +388,8 @@ stderr。所以 `ipclick ... --json | jq` 永远安全。每个文档都带 `ok`
 
 ### 响应体
 
-最容易踩的一处。`--json` 时 `body` 默认截断到 64 KiB，并给出 `body_truncated: true`：
+最容易踩的一处。`--json` 时 `body` 默认截断到 **65536 个字符**（不是字节——抓中文页面时
+实际字节数会大出两三倍），并给出 `body_truncated: true`：
 
 ```bash
 ipclick fetch <URL> --json --max-body 0     # 不截断
@@ -510,7 +523,10 @@ IPClick/
 ```bash
 docker build -f docker/Dockerfile -t ipclick:latest .
 docker run -d -p 9528:9528 --name ipclick ipclick:latest              # gRPC
-docker run -d -p 9528:9528 -p 9527:9527 --name ipclick ipclick:latest  # 再带上 Web 管理端
+# 再带上 Web 管理端：容器里必须显式开，而且要听 0.0.0.0——
+# 默认只听 127.0.0.1，那是容器自己的回环，-p 映射进不去
+docker run -d -p 9528:9528 -p 127.0.0.1:9527:9527 --name ipclick ipclick:latest \
+  ipclick run -w --web-lan
 ```
 
 镜像基于 **python:3.14-slim**，多阶段构建、非 root 运行，并且**默认自带浏览器渲染
@@ -536,7 +552,11 @@ docker build -f docker/Dockerfile --build-arg ENGINE=none -t ipclick:slim .
   Range 请求才能不重复数据。批量请求整批发给同一个节点，不跨节点拆分。
 - **没有文件上传字段**。要发 multipart 就自己拼好请求体，用 `data=<bytes>` 加上
   `Content-Type: multipart/form-data; boundary=...` 发出去。
-- **请求之间不共享 cookie jar**，每次请求相互独立。
+- **cookie 按 session 复用，不按调用方隔离。** `curl_cffi` / `niquests` 适配器按
+  （代理, 证书校验, 指纹）缓存 Session，同一组合的请求**共用一个 cookie jar**，
+  缓存活到进程结束——A 的 `Set-Cookie` 会跟着 B 的请求发出去，链路记录里也看不出来。
+  要隔离就换代理或指纹组合，或者走浏览器适配器（每请求独立 context，DrissionPage
+  每次清 cookie）。目前**没有**"每次请求干净开始"这个开关。
 
 ## 🛠️ 开发
 
