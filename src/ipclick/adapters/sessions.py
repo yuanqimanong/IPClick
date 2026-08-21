@@ -27,7 +27,11 @@ DEFAULT_MAX_SESSIONS = 64
 
 @final
 class SessionCache(Generic[_K]):
-    """线程安全地按键惰性创建并复用同步 session。"""
+    """线程安全地按键惰性创建并复用同步 session，带 LRU 上限。
+
+    上限是必须的：key 里含每请求可变的代理串，粘性会话代理的常规用法就是每个请求一个
+    会话 ID，不淘汰的话每个请求都会留下一个持有连接池的 session。
+    """
 
     def __init__(self, label: str, factory: Callable[[_K], Any], *, max_sessions: int = DEFAULT_MAX_SESSIONS) -> None:
         """保存诊断标签、session 工厂与缓存上限。"""
@@ -92,7 +96,7 @@ class SessionCache(Generic[_K]):
 
 @final
 class AsyncSessionCache(Generic[_K]):
-    """按事件循环和连接键复用异步 session。"""
+    """按事件循环和连接键复用异步 session，带 LRU 上限（理由同 ``SessionCache``）。"""
 
     def __init__(self, label: str, factory: Callable[[_K], Any], *, max_sessions: int = DEFAULT_MAX_SESSIONS) -> None:
         """初始化跨线程可管理的异步 session 表。"""

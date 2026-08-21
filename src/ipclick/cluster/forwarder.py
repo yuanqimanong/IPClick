@@ -275,7 +275,11 @@ class ForwardingTaskService(TaskService):
         return None
 
     def _close_channels(self, node_ids: set[str]) -> None:
-        """关闭被删除或地址已变化节点的缓存 channel。"""
+        """把被删除或地址已变化节点的 channel 从缓存里摘除。
+
+        没有在途使用者的当场关闭；还被在途请求持有的只做标记，实际 close 由最后一个
+        使用者退出时执行（见 ``_leased_stub``）。
+        """
         if not node_ids:
             return
         with self._channels_lock:
@@ -408,14 +412,17 @@ class ForwardingTaskService(TaskService):
 
     @override
     def cleanup(self) -> None:
-        """停止探活、关闭下游 channel，再释放本地适配器。"""
+        """停止探活、摘除下游 channel（在途请求结束后关闭），再释放本地适配器。"""
         self._pool.stop()
         self._close_channels(set(self._channels))
         super().cleanup()
 
     @override
     async def acleanup(self) -> None:
-        """异步服务停机时同步释放集群资源并异步关闭适配器。"""
+        """异步服务停机时同步释放集群资源并异步关闭适配器。
+
+        channel 同样是先摘除、由最后一个在途请求收尾关闭，不会在调用中途 close 掉。
+        """
         self._pool.stop()
         self._close_channels(set(self._channels))
         await super().acleanup()
