@@ -163,8 +163,16 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
         with self._cache_lock:
             if key not in self._adapter_cache:
-                self._adapter_cache[key] = get_adapter(name, self.adapter_settings, self.browser_settings)
+                created = get_adapter(name, self.adapter_settings, self.browser_settings)
+                # 注入逐跳校验器：准入只看入口 URL，重定向目标必须在发出之前再过一遍，
+                # 否则一次 302 就能跳到云元数据地址而完全绕过 [SECURITY] 策略。
+                created.url_validator = self._validate_redirect_target
+                self._adapter_cache[key] = created
             return self._adapter_cache[key]
+
+    def _validate_redirect_target(self, url: str) -> None:
+        """校验重定向目标；不被允许时抛 ``URLNotAllowedError``。"""
+        validate_url(url, self.url_policy)
 
     @override
     def Send(self, request: "task_pb2.ReqTask", context: ServicerContext) -> "task_pb2.TaskResp":

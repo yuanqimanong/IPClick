@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 
 import pytest
 
@@ -119,3 +120,81 @@ def test_cluster_secret_prefers_the_environment(monkeypatch: pytest.MonkeyPatch)
     assert cluster_secret({"secret": "from-config"}) == "from-config"
     monkeypatch.setenv(CLUSTER_SECRET_ENV, " from-env ")
     assert cluster_secret({"secret": "from-config"}) == "from-env"
+
+
+class _FakeChannel:
+    """只记录 close 是否被调用的假 channel。"""
+
+    def __init__(self) -> None:
+        self.closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _forwarder_with_fake_channels(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """构造一个只装了 channel 缓存的转发器，避免起真实服务。"""
+    import threading
+
+    from ipclick.cluster import forwarder as fwd
+
+    service: Any = object.__new__(fwd.ForwardingTaskService)
+    service._channels = {}
+    service._channels_lock = threading.Lock()
+    service._tls = None
+    monkeypatch.setattr(fwd, "open_channel_for", lambda target, tls: _FakeChannel())
+    from ipclick.dto.proto import task_pb2_grpc
+
+    monkeypatch.setattr(task_pb2_grpc, "TaskServiceStub", lambda channel: object())
+    return service
+
+
+def test_channel_is_not_closed_while_a_request_still_holds_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """热更新摘除节点时，被在途请求持有的 channel 不得当场关闭。
+
+    在已 close() 的 channel 上构造 stub 会让进程直接段错误，在它上面发起调用则抛
+    ValueError（不是 RpcError，两处 except 都接不住）。所以 close 必须推迟到最后一个
+    使用者放手之后。
+    """
+    service = _forwarder_with_fake_channels(monkeypatch)
+
+    with service._leased_stub("n1", "127.0.0.1", 9528):
+        entry = service._channels["n1"]
+        channel = entry.channel
+        assert entry.users == 1
+
+        service._close_channels({"n1"})
+
+        # 已从缓存摘除（后续请求拿不到它），但因为还有人用着，不能关
+        assert "n1" not in service._channels
+        assert channel.closed is False
+        assert entry.retired is True
+
+    # 最后一个使用者退出后才真正关闭
+    assert channel.closed is True
+
+
+def test_channel_closes_immediately_when_nobody_holds_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """没有在途使用者时，摘除即关闭，不留悬挂连接。"""
+    service = _forwarder_with_fake_channels(monkeypatch)
+
+    with service._leased_stub("n1", "127.0.0.1", 9528):
+        pass
+    channel = service._channels["n1"].channel
+
+    service._close_channels({"n1"})
+
+    assert channel.closed is True
+    assert "n1" not in service._channels
+
+
+def test_leased_stub_reuses_one_channel_per_node(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同一节点的多次租借复用同一个 channel，且计数正确回落到零。"""
+    service = _forwarder_with_fake_channels(monkeypatch)
+
+    with service._leased_stub("n1", "127.0.0.1", 9528):
+        with service._leased_stub("n1", "127.0.0.1", 9528):
+            assert service._channels["n1"].users == 2
+        assert service._channels["n1"].users == 1
+    assert service._channels["n1"].users == 0
+    assert service._channels["n1"].channel.closed is False

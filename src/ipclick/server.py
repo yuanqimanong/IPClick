@@ -23,6 +23,7 @@ from ipclick.dto.proto import task_pb2_grpc
 from ipclick.exceptions import ConfigError
 from ipclick.health import HealthReporter
 from ipclick.multiprocess import run_workers
+from ipclick.protocols import ShardableLimiter
 from ipclick.rpc import server_options
 from ipclick.secrets import warn_secrets_in_config
 from ipclick.server_settings import ServerSettings, resolve_processes
@@ -158,6 +159,12 @@ class IPClickServer:
         announce(credentials, url)
 
     def _start_node_pool(self) -> None:
+        # 幂等：_wire_rate_sharding() 与 _start_web() 都会调这里，不挡住的话第二次会
+        # 覆盖 self._node_pool，而**第一个池的探活线程还在跑**——每个节点被探两遍，
+        # 且限流分片的回调留在被遗弃的那个池上，Web 端的摘除/恢复作用在新池上却
+        # 影响不到限流。stop() 也只停得掉后一个。
+        if self._node_pool is not None:
+            return
         cluster_config = section(self.config, "CLUSTER")
         try:
             parsed = ClusterConfig.from_config(cluster_config)
@@ -201,6 +208,8 @@ class IPClickServer:
             self._node_pool.stop()
             self._node_pool = None
         self._start_node_pool()
+        # 新池不带回调，必须重挂，否则限流分片会冻结在重建前的存活节点数上。
+        _ = self._attach_rate_sharding()
         count = len(self._node_pool) if self._node_pool is not None else 0
         return True, f"节点列表已更新（{count} 个节点在探活中）。本进程未开启服务端转发，不参与转发路由"
 
@@ -409,14 +418,30 @@ class IPClickServer:
 
         if self._node_pool is None:
             self._start_node_pool()
-        pool = self._node_pool
-        if pool is None:
+        if self._node_pool is None:
             log.warning("集群限流分片未启用：节点池起不来，本节点将按完整 per_host_qps 限速")
             return
+        if self._attach_rate_sharding(limiters):
+            log.info(f"集群限流分片已启用：{len(self.cluster_config.nodes)} 个节点，份额随健康探测变化")
 
+    def _attach_rate_sharding(self, limiters: list[ShardableLimiter] | None = None) -> bool:
+        """把当前节点池的健康变化回调挂到限流器上。
+
+        单独拆出来是因为热更新会**重建**节点池：新池不带任何回调，不重挂的话限流器的
+        存活节点数会永久冻结在重建前的那一刻——加了节点之后每台仍按旧的（更大的）份额
+        发，集群总 QPS 直接超配，而且没有任何报错。
+        """
+        service = self.task_service
+        pool = self._node_pool
+        if service is None or pool is None or self.cluster_config.forwarding_enabled:
+            return False
+        if limiters is None:
+            limiters = service.limiters_for_sharding()
+        if not limiters or limiters[0].settings.per_host_qps <= 0 or not self.cluster_config.nodes:
+            return False
         for limiter in limiters:
             pool.on_health_change(limiter.set_cluster_size)
-        log.info(f"集群限流分片已启用：{len(self.cluster_config.nodes)} 个节点，份额随健康探测变化")
+        return True
 
     def _setup_signal_handlers(self) -> None:
         def handler(signum: int, _frame: FrameType | None) -> None:

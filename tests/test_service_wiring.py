@@ -15,7 +15,8 @@ from ipclick.cluster.node import ClusterConfig, NodeState
 from ipclick.cluster.pool import NodePool
 from ipclick.dto.proto import task_pb2
 from ipclick.exceptions import AdapterError, URLNotAllowedError, ValidationError
-from ipclick.limiter import HostLimitTimeout
+from ipclick.limiter import HostLimitTimeout, build_limiter
+from ipclick.server import IPClickServer
 from ipclick.services.async_task_service import AsyncTaskService
 from ipclick.services.errors import CALLER_GONE_MESSAGE, CallerGone, classify
 from ipclick.services.task_service import TaskService
@@ -260,3 +261,61 @@ def test_internal_errors_do_not_leak_their_text() -> None:
     failure = classify(RuntimeError("db password is hunter2"))
     assert "hunter2" not in failure.message
     assert failure.level == "exception"
+
+
+class _FakePool:
+    """记录回调挂载的假节点池。"""
+
+    def __init__(self) -> None:
+        self.callbacks: list[object] = []
+        self.stopped: bool = False
+
+    def on_health_change(self, callback: object) -> None:
+        self.callbacks.append(callback)
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def drain(self, node_id: str) -> None:
+        _ = node_id
+
+    def __len__(self) -> int:
+        return 2
+
+
+def test_start_node_pool_is_idempotent() -> None:
+    """第二次调用不得覆盖已有节点池。
+
+    _wire_rate_sharding() 与 _start_web() 都会调 _start_node_pool()。不幂等的话第二次
+    会顶掉第一个池，而第一个池的探活线程还在跑——每个节点被探两遍，限流分片的回调留在
+    被遗弃的池上，而 stop() 只停得掉后一个。
+    """
+    server: Any = object.__new__(IPClickServer)
+    existing = _FakePool()
+    server._node_pool = existing
+
+    server._start_node_pool()
+
+    assert server._node_pool is existing
+
+
+def test_hot_reload_reattaches_rate_sharding() -> None:
+    """热更新重建节点池后必须重挂 set_cluster_size。
+
+    不重挂的话限流器的存活节点数会永久冻结在重建前那一刻：加了节点之后每台仍按旧的
+    （更大的）份额发，集群总 QPS 超配，且没有任何报错。
+    """
+    limiter = build_limiter({"rate_limit": {"per_host_qps": 10}})
+    service: Any = object.__new__(TaskService)
+    service.host_limiter = limiter
+
+    server: Any = object.__new__(IPClickServer)
+    server.task_service = service
+    server.cluster_config = ClusterConfig.from_config(
+        {"forward": "off", "nodes": [{"id": "n1", "address": "127.0.0.1:9528"}]}
+    )
+    pool = _FakePool()
+    server._node_pool = pool
+
+    assert server._attach_rate_sharding() is True
+    assert limiter.set_cluster_size in pool.callbacks

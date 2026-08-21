@@ -53,6 +53,18 @@ class AsyncForwardingTaskService(AsyncTaskService, ForwardingTaskService):
 
             try:
                 response = await loop.run_in_executor(None, self._forward, state, request)
+            except ValueError as e:
+                # channel 在停机或热更新的边缘被关掉时，grpc 抛的是 ValueError
+                # （"Cannot invoke RPC on closed channel!"）而不是 RpcError，上面那个
+                # except 接不住，异常会穿透 servicer：不记链路、不换节点、不本地兜底，
+                # 调用方只看到一个 UNKNOWN。引用计数已经让这条路极难走到，这里是兜底。
+                last_error = f"到节点 {state.node.id} 的连接已关闭：{e}"
+                state.record_request(success=False)
+                if not is_failover_safe(request):
+                    log.warning(f"非幂等请求 {request.uuid} 遇到连接关闭，不重投：{last_error}")
+                    return self._build_error_response(request, last_error)
+                log.warning(f"转发到 {state.node.id} 时连接已关闭（第 {attempt + 1}/{attempts} 次），换一台重试")
+                continue
             except grpc.RpcError as e:
                 last_error = rpc_detail(e)
                 state.record_request(success=False)

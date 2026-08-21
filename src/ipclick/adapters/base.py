@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 import asyncio
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 import functools
 from random import randrange
@@ -103,6 +103,11 @@ class DownloaderAdapter(ABC):
     """所有本地 HTTP/浏览器下载适配器的统一接口。"""
 
     adapter_name: str = "base_downloader_adapter"
+
+    # 逐跳重定向校验器，由服务层在缓存适配器时注入（进程内直接用适配器时为 None）。
+    # 有它才逐跳跟随重定向：SSRF 准入只校验入口 URL，让底层库自行跟随的话，
+    # 一次 302 就能跳到云元数据或内网地址而完全绕过策略。
+    url_validator: Callable[[str], None] | None = None
 
     def __init__(self, settings: AdapterSettings | None = None):
         """应用通用超时、重试、环境代理和 User-Agent 设置。"""

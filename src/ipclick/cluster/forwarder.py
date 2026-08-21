@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 import threading
-from typing import Any
+from typing import Any, final
 
 import grpc
 from grpc import ServicerContext
@@ -41,6 +43,22 @@ _BROWSER_ADAPTER_NAMES = frozenset({"browser", "playwright", "patchright", "camo
 # 实现该保证，因此这里采用保守白名单，避免重复提交产生业务副作用。
 _FAILOVER_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
+
+@final
+@dataclass
+class _ChannelEntry:
+    """一个下游 channel 及其在途使用者计数。
+
+    热更新（改节点地址、删节点）会关闭 channel，而在途的转发请求可能正拿着它——
+    在已关闭的 channel 上构造 stub 会让进程直接段错误，在它上面发起调用则抛
+    ValueError（**不是** grpc.RpcError，所以两处 except grpc.RpcError 都接不住，
+    异常会穿透 servicer）。所以 close 必须推迟到最后一个使用者放手之后。
+    """
+
+    channel: grpc.Channel
+    users: int = 0
+    retired: bool = False
+
 _NODE_FAULT_CODES = frozenset(
     {
         grpc.StatusCode.UNAVAILABLE,
@@ -75,7 +93,7 @@ class ForwardingTaskService(TaskService):
             self.node_id: str = self.self_id
 
         self._pool: NodePool = pool or NodePool(self.cluster, tls=self._tls)
-        self._channels: dict[str, grpc.Channel] = {}
+        self._channels: dict[str, _ChannelEntry] = {}
         self._channels_lock: threading.Lock = threading.Lock()
         self._compression: CompressionPolicy = CompressionPolicy(section(config, "CLIENT"))
         self._forwarded_count: int = 0
@@ -119,6 +137,18 @@ class ForwardingTaskService(TaskService):
 
             try:
                 response = self._forward(state, request)
+            except ValueError as e:
+                # channel 在停机或热更新的边缘被关掉时，grpc 抛的是 ValueError
+                # （"Cannot invoke RPC on closed channel!"）而不是 RpcError，上面那个
+                # except 接不住，异常会穿透 servicer：不记链路、不换节点、不本地兜底，
+                # 调用方只看到一个 UNKNOWN。引用计数已经让这条路极难走到，这里是兜底。
+                last_error = f"到节点 {state.node.id} 的连接已关闭：{e}"
+                state.record_request(success=False)
+                if not is_failover_safe(request):
+                    log.warning(f"非幂等请求 {request.uuid} 遇到连接关闭，不重投：{last_error}")
+                    return self._build_error_response(request, last_error)
+                log.warning(f"转发到 {state.node.id} 时连接已关闭（第 {attempt + 1}/{attempts} 次），换一台重试")
+                continue
             except grpc.RpcError as e:
                 last_error = rpc_detail(e)
                 state.record_request(success=False)
@@ -227,10 +257,16 @@ class ForwardingTaskService(TaskService):
             return
         with self._channels_lock:
             for node_id in node_ids:
-                channel = self._channels.pop(node_id, None)
-                if channel is not None:
-                    channel.close()
+                entry = self._channels.pop(node_id, None)
+                if entry is None:
+                    continue
+                if entry.users == 0:
+                    entry.channel.close()
                     log.debug(f"已关闭到节点 {node_id} 的转发连接")
+                else:
+                    # 还有在途请求拿着它，标记待关闭，由最后一个使用者收尾。
+                    entry.retired = True
+                    log.debug(f"到节点 {node_id} 的转发连接有 {entry.users} 个在途请求，待其结束后关闭")
 
     def _forward(self, state: NodeState, request: task_pb2.ReqTask) -> task_pb2.TaskResp:
         """携带内部令牌和转发标记调用单个下游节点。"""
@@ -245,14 +281,14 @@ class ForwardingTaskService(TaskService):
             tr.forwarded = True
             tr.node_id = node.id
 
-            stub = task_pb2_grpc.TaskServiceStub(self._channel_for(node.id, node.host, node.port))
             metadata = ((FORWARD_HEADER, "1"), *build_client_metadata(token_for(node.id, node.token, self._secret)))
-            response = stub.Send(
-                request,
-                timeout=self._timeout_for(request),
-                metadata=metadata,
-                compression=self._compression.for_request(request),
-            )
+            with self._leased_stub(node.id, node.host, node.port) as stub:
+                response = stub.Send(
+                    request,
+                    timeout=self._timeout_for(request),
+                    metadata=metadata,
+                    compression=self._compression.for_request(request),
+                )
 
             tr.status_code = response.status_code
             tr.size = len(response.content)
@@ -295,18 +331,32 @@ class ForwardingTaskService(TaskService):
         s = self.browser_settings
         return s.page_load_timeout + s.script_timeout + _BROWSER_COLD_START + _BROWSER_OVERHEAD
 
-    def _channel_for(self, node_id: str, host: str, port: int) -> grpc.Channel:
-        """按节点 ID 线程安全地复用 gRPC channel。"""
-        channel = self._channels.get(node_id)
-        if channel is not None:
-            return channel
+    @contextmanager
+    def _leased_stub(self, node_id: str, host: str, port: int) -> Generator[Any]:
+        """租借一个下游 stub，并在使用期间阻止它的 channel 被关闭。
+
+        stub 的构造也放在锁内：在一个已被 close() 的 channel 上构造 stub 会触发
+        grpc 的 registered-call 查找，实测直接 SIGSEGV——那是信号杀进程，Python
+        层面接不住，所以只能靠不让它发生。
+        """
         with self._channels_lock:
-            if node_id not in self._channels:
+            entry = self._channels.get(node_id)
+            if entry is None:
                 target_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
                 target = f"{target_host}:{port}"
-                self._channels[node_id] = open_channel_for(target, self._tls)
+                entry = _ChannelEntry(open_channel_for(target, self._tls))
+                self._channels[node_id] = entry
                 log.debug(f"已建立到节点 {node_id} ({target}) 的转发连接")
-            return self._channels[node_id]
+            entry.users += 1
+            stub = task_pb2_grpc.TaskServiceStub(entry.channel)
+        try:
+            yield stub
+        finally:
+            with self._channels_lock:
+                entry.users -= 1
+                if entry.retired and entry.users == 0:
+                    entry.channel.close()
+                    log.debug(f"到节点 {node_id} 的转发连接已在最后一个在途请求结束后关闭")
 
     @property
     @override
@@ -337,20 +387,14 @@ class ForwardingTaskService(TaskService):
     def cleanup(self) -> None:
         """停止探活、关闭下游 channel，再释放本地适配器。"""
         self._pool.stop()
-        with self._channels_lock:
-            for channel in self._channels.values():
-                channel.close()
-            self._channels.clear()
+        self._close_channels(set(self._channels))
         super().cleanup()
 
     @override
     async def acleanup(self) -> None:
         """异步服务停机时同步释放集群资源并异步关闭适配器。"""
         self._pool.stop()
-        with self._channels_lock:
-            for channel in self._channels.values():
-                channel.close()
-            self._channels.clear()
+        self._close_channels(set(self._channels))
         await super().acleanup()
 
 

@@ -8,6 +8,7 @@ from typing import Any
 from typing_extensions import override
 
 from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader
+from ipclick.adapters.redirects import follow_with_policy
 from ipclick.adapters.retry import aretry, retry
 from ipclick.adapters.sessions import AsyncSessionCache, SessionCache
 from ipclick.adapters.settings import AdapterSettings
@@ -124,6 +125,37 @@ class NiquestsAdapter(DownloaderAdapter):
                 built[key] = extra[key]
         return {k: v for k, v in built.items() if v is not None}
 
+    def _request_following_policy(
+        self,
+        session: Any,
+        method: str,
+        url: str,
+        request_kwargs: dict[str, Any],
+        allow_redirects: bool,
+    ) -> Any:
+        """发一次请求；装了 url_validator 时逐跳跟随重定向并逐跳校验。
+
+        理由同 curl_cffi 适配器：SSRF 准入只校验入口 URL，让底层库自行跟随重定向的话，
+        一次 302 就能跳到云元数据或内网地址而完全绕过 [SECURITY] 策略。
+        """
+        validator = self.url_validator
+        if validator is None or not allow_redirects:
+            return session.request(method, url, **request_kwargs)
+
+        hop_kwargs = dict(request_kwargs)
+        hop_kwargs["allow_redirects"] = False
+        body_keys = ("data", "json", "files")
+        saved_body = {key: hop_kwargs.get(key) for key in body_keys}
+
+        def send(hop_url: str, hop_method: str, body: Any) -> Any:
+            kw = dict(hop_kwargs)
+            if body is None:
+                for key in body_keys:
+                    _ = kw.pop(key, None)
+            return session.request(hop_method, hop_url, **kw)
+
+        return follow_with_policy(send, url, method, saved_body, validator)
+
     @override
     @retry()
     def download(
@@ -173,7 +205,7 @@ class NiquestsAdapter(DownloaderAdapter):
         )
 
         try:
-            resp = session.request(method, url, **request_kwargs)
+            resp = self._request_following_policy(session, method, url, request_kwargs, allow_redirects)
             return Response(
                 url=str(resp.url),
                 status_code=resp.status_code,
