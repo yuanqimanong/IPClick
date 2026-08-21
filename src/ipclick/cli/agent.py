@@ -67,7 +67,9 @@ def _quiet_logs() -> None:
 
 def _server_port(config: Settings, port: int | None) -> int:
     """解析命令行优先的 gRPC 端口。"""
-    if port:
+    # `if port` 会把 --port 0 当成"没传"而静默回落到配置端口；0 是非法端口，
+    # 该让它走到 format_grpc_target 里被明确拒绝，而不是伪装成默认值。
+    if port is not None:
         return port
     try:
         return int(section(config, "SERVER").get("port", DEFAULT_GRPC_PORT))
@@ -82,7 +84,14 @@ def _server_host(config: Settings, host: str | None) -> str:
 
 
 def format_grpc_target(host: str, port: int) -> str:
-    """组装兼容 IPv4、主机名和 IPv6 字面量的 gRPC target。"""
+    """组装兼容 IPv4、主机名和 IPv6 字面量的 gRPC target。
+
+    端口必须先落在 1..65535 内。gRPC 底层会把超范围的端口按 mod 65536 回绕，
+    于是 ``health -p 75064`` 实际连的是 9528 并回答 SERVING、退出码 0——
+    对着一个不可能存在的端口报健康，比直接报错危险得多。
+    """
+    if not 1 <= port <= 65535:
+        raise click.UsageError(f"端口必须在 1..65535 之间，收到 {port}")
     normalized = host.strip()
     target_host = normalized if normalized.startswith("[") else f"[{normalized}]" if ":" in normalized else normalized
     return f"{target_host}:{port}"

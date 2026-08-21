@@ -200,6 +200,16 @@ class DownloadTask:
             return body.encode("utf-8")
         return json.dumps(body, default=json_serializer).encode("utf-8")
 
+    def _data_is_raw(self) -> bool | None:
+        """请求体是否是原始字节/文本——决定服务端要不要把它还原成结构化对象。
+
+        str/bytes 一律原样发出：``data='{"a": 1}'`` 是一段 JSON 文本，不是表单。
+        dict/list 走 JSON 序列化过线，服务端再还原回来交给适配器编码成表单。
+        """
+        if self.data is None:
+            return None
+        return isinstance(self.data, (str, bytes, bytearray, memoryview))
+
     @staticmethod
     def _cookies_to_map(cookies: dict[str, Any] | str | None) -> dict[str, str] | None:
         """兼容字典或 Cookie 请求头形式，并归一为键值映射。"""
@@ -241,6 +251,7 @@ class DownloadTask:
                 cookies=self._cookies_to_map(self.cookies),
                 params=json.dumps(self.params, default=json_serializer) if self.params else None,
                 data=self._encode_body(self.data),
+                data_is_raw=self._data_is_raw(),
                 json=json.dumps(self.json, default=json_serializer) if self.json is not None else None,
                 proxy=self._proxy_to_str(),
                 timeout_seconds=self.timeout,

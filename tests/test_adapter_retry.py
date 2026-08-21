@@ -237,6 +237,7 @@ def test_policy_backoff_is_capped_and_jittered() -> None:
     assert 20.0 <= policy.delay_for(5) <= 30.0
     assert policy.total_attempts == 4
 
+
 def test_mark_utf8_charset_rewrites_charset_but_keeps_media_type() -> None:
     """浏览器适配器把正文重编码成 UTF-8，headers 的 charset 必须跟着改。
 

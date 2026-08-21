@@ -114,8 +114,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         self._chunk_size: int = as_int(configured_chunk, DEFAULT_CHUNK_SIZE, minimum=1)
         if configured_chunk is not None and self._chunk_size != configured_chunk:
             log.warning(
-                f"[DOWNLOADER].chunk_size={configured_chunk!r} 不是 >= 1 的整数，"
-                f"改用默认值 {DEFAULT_CHUNK_SIZE}"
+                f"[DOWNLOADER].chunk_size={configured_chunk!r} 不是 >= 1 的整数，改用默认值 {DEFAULT_CHUNK_SIZE}"
             )
         self._batch_concurrency: int = ServerSettings.from_config(section(self.config, "SERVER")).max_workers
         self._batch_executor: ThreadPoolExecutor | None = None
@@ -127,6 +126,11 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         self.host_limiter: HostLimiter = build_limiter(downloader_config)
 
         self.default_adapter: DownloaderAdapter = get_default_adapter(self.adapter_settings)
+        # 逐跳校验器必须在放进缓存**之前**注入：_get_cached_adapter 只给现场新建的
+        # 适配器注入，而默认适配器是在这里预先塞进缓存的，永远走不到那一支。
+        # 漏了它 = 默认路径（curl_cffi）完全不校验重定向目标：max_redirects 形同虚设，
+        # 一次 302 就能跳到云元数据地址、绕开整套 [SECURITY] 准入。
+        self.default_adapter.url_validator = self._validate_redirect_target
         self._adapter_cache[self.default_adapter.adapter_name] = self.default_adapter
 
         log.debug(
@@ -287,7 +291,9 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         # 而调用方从自己传的值里完全看不出问题。Python 3.11 起 fromisoformat 更宽松，
         # "20241231" 这种紧凑写法也会被吃掉。
         params = json.loads(request.params) if request.params else None
-        data = self._decode_body(request.data, "data")
+        # data_is_raw 由客户端按调用方给的类型置位：给 str/bytes 就是原始体，
+        # 给 dict/list 才需要还原成结构化对象。旧客户端不带这一位，只能继续靠猜。
+        data = (request.data or None) if request.data_is_raw else self._decode_body(request.data, "data")
         json_data = self._decode_body(request.json, "json")
 
         download_kwargs: dict[str, Any] = {

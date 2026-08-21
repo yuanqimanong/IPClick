@@ -50,7 +50,7 @@ OPTIONS: HttpMethod
 TRACE: HttpMethod
 
 class ReqTask(_message.Message):
-    __slots__ = ("uuid", "adapter", "method", "url", "headers", "cookies", "params", "data", "json", "proxy", "timeout_seconds", "max_retries", "retry_backoff_seconds", "verify_ssl", "allow_redirects", "stream", "impersonate", "automation_config", "automation_script", "allowed_status_codes", "kwargs")
+    __slots__ = ("uuid", "adapter", "method", "url", "headers", "cookies", "params", "data", "json", "proxy", "timeout_seconds", "max_retries", "retry_backoff_seconds", "verify_ssl", "allow_redirects", "stream", "impersonate", "automation_config", "automation_script", "allowed_status_codes", "kwargs", "data_is_raw")
     class HeadersEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -86,6 +86,7 @@ class ReqTask(_message.Message):
     AUTOMATION_SCRIPT_FIELD_NUMBER: _ClassVar[int]
     ALLOWED_STATUS_CODES_FIELD_NUMBER: _ClassVar[int]
     KWARGS_FIELD_NUMBER: _ClassVar[int]
+    DATA_IS_RAW_FIELD_NUMBER: _ClassVar[int]
     uuid: str
     adapter: AdapterType
     method: HttpMethod
@@ -107,7 +108,8 @@ class ReqTask(_message.Message):
     automation_script: str
     allowed_status_codes: _containers.RepeatedScalarFieldContainer[int]
     kwargs: str
-    def __init__(self, uuid: _Optional[str] = ..., adapter: _Optional[_Union[AdapterType, str]] = ..., method: _Optional[_Union[HttpMethod, str]] = ..., url: _Optional[str] = ..., headers: _Optional[_Mapping[str, str]] = ..., cookies: _Optional[_Mapping[str, str]] = ..., params: _Optional[str] = ..., data: _Optional[bytes] = ..., json: _Optional[str] = ..., proxy: _Optional[str] = ..., timeout_seconds: _Optional[float] = ..., max_retries: _Optional[int] = ..., retry_backoff_seconds: _Optional[float] = ..., verify_ssl: _Optional[bool] = ..., allow_redirects: _Optional[bool] = ..., stream: _Optional[bool] = ..., impersonate: _Optional[str] = ..., automation_config: _Optional[str] = ..., automation_script: _Optional[str] = ..., allowed_status_codes: _Optional[_Iterable[int]] = ..., kwargs: _Optional[str] = ...) -> None: ...
+    data_is_raw: bool
+    def __init__(self, uuid: _Optional[str] = ..., adapter: _Optional[_Union[AdapterType, str]] = ..., method: _Optional[_Union[HttpMethod, str]] = ..., url: _Optional[str] = ..., headers: _Optional[_Mapping[str, str]] = ..., cookies: _Optional[_Mapping[str, str]] = ..., params: _Optional[str] = ..., data: _Optional[bytes] = ..., json: _Optional[str] = ..., proxy: _Optional[str] = ..., timeout_seconds: _Optional[float] = ..., max_retries: _Optional[int] = ..., retry_backoff_seconds: _Optional[float] = ..., verify_ssl: _Optional[bool] = ..., allow_redirects: _Optional[bool] = ..., stream: _Optional[bool] = ..., impersonate: _Optional[str] = ..., automation_config: _Optional[str] = ..., automation_script: _Optional[str] = ..., allowed_status_codes: _Optional[_Iterable[int]] = ..., kwargs: _Optional[str] = ..., data_is_raw: _Optional[bool] = ...) -> None: ...
 
 class TaskResp(_message.Message):
     __slots__ = ("request_uuid", "adapter", "effective_url", "status_code", "response_headers", "content", "error_message", "response_time_ms", "trace")

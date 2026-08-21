@@ -60,6 +60,7 @@ class _ChannelEntry:
     users: int = 0
     retired: bool = False
 
+
 _NODE_FAULT_CODES = frozenset(
     {
         grpc.StatusCode.UNAVAILABLE,

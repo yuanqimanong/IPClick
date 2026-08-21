@@ -91,6 +91,18 @@ message ReqTask {
   repeated int32 allowed_status_codes = 21;  // 重试白名单，如 [200, 404]
 
   string kwargs = 22; // 其他参数
+
+  // data 里装的是**原始字节**，服务端不要再解释它。
+  //
+  // 没有这一位时，服务端只能靠"能不能 json.loads"来猜 data 是结构化的还是原始的，
+  // 于是 data=b'{"a":1}' 这种合法 JSON 文本会被还原成 dict、再被适配器编码成
+  // a=1 的 form-urlencoded body —— 调用方发的是 JSON，目标站点收到的是表单。
+  // 更糟的是 data=b'12345'：json.loads 出 int，适配器直接抛
+  // "data must be dict/list/tuple, str, BytesIO or bytes"，纯数字请求体根本发不出去。
+  //
+  // 未设置（旧客户端）时保持原来的猜测行为，线上兼容；新客户端在调用方给的是
+  // str/bytes 时置 true，给的是 dict/list 时不置，两种意图从此在协议上可区分。
+  optional bool data_is_raw = 23;
 }
 
 // 响应消息
