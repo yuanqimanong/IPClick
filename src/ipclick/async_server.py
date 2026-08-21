@@ -2,6 +2,8 @@
 
 import asyncio
 from concurrent import futures
+import contextlib
+import signal
 from typing import Any
 
 import grpc
@@ -92,6 +94,49 @@ def build_async_server(
     )
 
 
+async def _serve_until_signalled(server: Any) -> None:
+    """等待服务终止，或等到收到停机信号。
+
+    同步服务端在 IPClickServer 里装了 signal.signal，异步这条路上一个都没有——
+    默认处置就是**直接杀进程**：在途 RPC 在响应中途被切断（客户端收到 UNAVAILABLE
+    而不是正常完成），service.acleanup() 不跑（浏览器适配器起的进程留成孤儿），
+    链路记录缓冲里没落盘的那部分直接丢。容器里 docker stop / kubectl delete pod
+    发的就是 SIGTERM，所以这不是边角情况。
+
+    用 loop.add_signal_handler 而不是 signal.signal：后者在协程里触发时无法唤醒
+    正在 await 的事件循环，只能等下一次 IO 才被处理。
+    """
+    loop = asyncio.get_running_loop()
+    stopping = asyncio.Event()
+    installed: list[Any] = []
+
+    for name in ("SIGINT", "SIGTERM"):
+        received = getattr(signal, name, None)
+        if received is None:
+            continue
+        try:
+            loop.add_signal_handler(received, stopping.set)
+        except (NotImplementedError, RuntimeError):
+            # Windows 的事件循环不支持 add_signal_handler；那边本来也不走多进程。
+            log.debug(f"当前事件循环不支持接管 {name}，停机将依赖上层处理")
+            continue
+        installed.append(received)
+
+    termination = asyncio.ensure_future(server.wait_for_termination())
+    signalled = asyncio.ensure_future(stopping.wait())
+    try:
+        done, _pending = await asyncio.wait({termination, signalled}, return_when=asyncio.FIRST_COMPLETED)
+        if signalled in done:
+            log.info("收到停机信号，开始优雅停机…")
+    finally:
+        for task in (termination, signalled):
+            if not task.done():
+                _ = task.cancel()
+        for received in installed:
+            with contextlib.suppress(Exception):
+                loop.remove_signal_handler(received)
+
+
 async def serve_async(
     service: AsyncTaskService,
     listen_addr: str,
@@ -133,7 +178,7 @@ async def serve_async(
             await health_servicer.set("", serving_status)
             await health_servicer.set("task.TaskService", serving_status)
         log.info(f"IPClick async server started on {listen_addr}（实验性：[SERVER].async_mode）")
-        await server.wait_for_termination()
+        await _serve_until_signalled(server)
     except asyncio.CancelledError:
         raise
     finally:

@@ -407,3 +407,34 @@ def test_async_limited_stream_still_closes_the_underlying_stream() -> None:
 
     _ = list(service._limited_stream("https://example.com/f", _Stream()))
     assert closed == [True]
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "fork"), reason="多进程模式仅 Unix")
+def test_fork_failure_reaps_already_started_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """中途 fork 失败时，已启动的 worker 必须被收掉，不能留成孤儿。
+
+    留下的孤儿靠 SO_REUSEPORT 继续占着端口对外服务，表现是"启动报错了，但端口还通、
+    改了配置也没反应"——极难定位。
+    """
+    import ipclick.multiprocess as mp
+    from ipclick.server_settings import ServerSettings
+
+    spawned: list[int] = []
+    killed: list[int] = []
+
+    def fake_spawn(index: int, _worker: Any) -> int:
+        if index == 2:
+            raise OSError("fork 失败：Resource temporarily unavailable")
+        pid = 1000 + index
+        spawned.append(pid)
+        return pid
+
+    monkeypatch.setattr(mp, "_spawn", fake_spawn)
+    monkeypatch.setattr(mp, "probe_port", lambda host, port: None)
+    monkeypatch.setattr(mp, "_shutdown_children", lambda children: killed.extend(children))
+
+    with pytest.raises(OSError, match="fork 失败"):
+        mp.run_workers(4, ServerSettings(), lambda index: None)
+
+    # 前两个已启动的 worker 都被交给了收尾逻辑
+    assert killed == spawned == [1000, 1001]

@@ -53,7 +53,20 @@ def run_workers(processes: int, endpoint: ServerSettings, worker: Callable[[int]
     """启动、监控并统一终止共享端口的 worker 进程。"""
     probe_port(endpoint.host, endpoint.port)
 
-    children = [_spawn(index, worker) for index in range(processes)]
+    # 逐个 spawn 而不是列表推导：中途 fork 失败（EAGAIN、内存不够、被 cgroup pids
+    # 限制挡住）时，已经起来的 worker 必须先收掉。否则父进程带着异常退出，
+    # 那些 worker 变成没人管的孤儿，还靠 SO_REUSEPORT 继续占着端口对外服务——
+    # 表现是"启动报错了，但端口还通，而且改了配置也没反应"。
+    children: list[int] = []
+    try:
+        for index in range(processes):
+            children.append(_spawn(index, worker))
+    except BaseException:
+        if children:
+            log.error(f"启动第 {len(children) + 1} 个 worker 失败，正在收掉已启动的 {len(children)} 个")
+            _shutdown_children(children)
+        raise
+
     log.info(f"IPClick 多进程模式：{processes} 个 worker 共享 {endpoint.listen_addr}（SO_REUSEPORT）")
 
     shutdown_requested = _forward_signals_to(children)
@@ -102,6 +115,16 @@ def _spawn(index: int, worker: Callable[[int], None]) -> int:
         log.exception(f"worker {index} 退出: {e}")
         os._exit(WORKER_FAILURE_EXIT_CODE)
     os._exit(0)
+
+
+def _shutdown_children(children: list[int]) -> None:
+    """给已启动的 worker 发 SIGTERM 并回收，避免留下占着端口的孤儿进程。"""
+    for pid in children:
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.kill(pid, signal.SIGTERM)
+    for pid in children:
+        with contextlib.suppress(ChildProcessError, OSError):
+            _ = os.waitpid(pid, 0)
 
 
 def _forward_signals_to(children: list[int]) -> threading.Event:
