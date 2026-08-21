@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
 import json as jsonlib
@@ -28,7 +29,7 @@ from ipclick.adapters.browser_settings import (
 from ipclick.adapters.retry import retry
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
-from ipclick.exceptions import AdapterError, ValidationError
+from ipclick.exceptions import AdapterError, URLNotAllowedError, ValidationError
 from ipclick.utils.log_util import log
 from ipclick.utils.url_util import merge_query_params
 
@@ -244,6 +245,8 @@ class _BrowserWorker:
         if response is None:
             raise AdapterError(f"浏览器没有为 {plan.url} 产生任何响应（可能是下载或 about: 跳转）")
 
+        _reject_disallowed_redirects(response, plan)
+
         await _settle(page, plan)
 
         if plan.wait_for_selector:
@@ -296,6 +299,43 @@ class _BrowserWorker:
             await page.wait_for_timeout(300)
 
 
+def _reject_disallowed_redirects(response: Any, plan: _RenderPlan) -> None:
+    """走一遍重定向链，任一跳不被策略允许就拒绝返回这次响应。
+
+    这里是**事后**校验，和 HTTP 适配器的逐跳前置校验不同——Playwright 的
+    ``context.route`` 处理器对重定向目标不会再次触发（重定向由浏览器网络栈内部
+    跟随完），所以在浏览器路径上拦不住请求真的发出去。
+
+    能做到的是不把响应体交回调用方：SSRF 读云元数据这类攻击的目的就是拿到那段正文，
+    掐掉它仍然有实际意义。但要清楚这**不等于**请求没发生——带副作用的内网写操作
+    （比如 POST 到内网管理接口）依然会执行。真正不可信的调用方面前，浏览器路径应当
+    靠网络层隔离，而不是靠这一层。
+    """
+    validator = plan.url_validator
+    if validator is None:
+        return
+
+    chain: list[str] = []
+    request = getattr(response, "request", None)
+    seen = 0
+    while request is not None and seen < 20:
+        url = str(getattr(request, "url", "") or "")
+        if url and url != plan.url and url not in chain:
+            chain.append(url)
+        request = getattr(request, "redirected_from", None)
+        seen += 1
+
+    final_url = str(getattr(response, "url", "") or "")
+    if final_url and final_url != plan.url and final_url not in chain:
+        chain.append(final_url)
+
+    for url in chain:
+        try:
+            validator(url)
+        except Exception as e:
+            raise URLNotAllowedError(f"重定向目标被 URL 策略拒绝（{url}）：{e}") from e
+
+
 @dataclass(frozen=True)
 class _RenderPlan:
     url: str
@@ -311,6 +351,8 @@ class _RenderPlan:
     scroll_to_bottom: bool = False
     screenshot: bool = False
     script: str | None = None
+    # 逐跳重定向校验器，由适配器从自身的 url_validator 传下来。
+    url_validator: Callable[[str], None] | None = None
 
 
 class BrowserAdapter(DownloaderAdapter):
@@ -449,6 +491,7 @@ class BrowserAdapter(DownloaderAdapter):
             screenshot=bool(config.get("screenshot")),
             script=automation_script or None,
             script_timeout=s.script_timeout,
+            url_validator=self.url_validator,
         )
 
     @override

@@ -134,3 +134,72 @@ def test_adapters_skip_manual_following_without_a_validator() -> None:
 
 def test_default_max_redirects_is_sane() -> None:
     assert 5 <= DEFAULT_MAX_REDIRECTS <= 20
+
+
+@final
+class _FakeRequest:
+    def __init__(self, url: str, redirected_from: Any = None) -> None:
+        self.url: str = url
+        self.redirected_from: Any = redirected_from
+
+
+@final
+class _FakeBrowserResponse:
+    def __init__(self, url: str, request: Any) -> None:
+        self.url: str = url
+        self.request: Any = request
+
+
+def _plan(url: str, validator: Any) -> Any:
+    from ipclick.adapters.browser_adapter import _RenderPlan
+
+    return _RenderPlan(
+        url=url,
+        context_options={},
+        cookies=[],
+        block_resources=(),
+        wait_until="load",
+        page_timeout_ms=1000,
+        script_timeout=1.0,
+        url_validator=validator,
+    )
+
+
+def test_browser_rejects_a_redirect_chain_that_violates_policy() -> None:
+    """浏览器路径拦不住请求发出，但必须拒绝把响应体交回调用方。
+
+    Playwright 的 context.route 处理器对重定向目标不会再次触发（重定向由浏览器网络栈
+    内部跟随完），所以这里只能事后走重定向链。掐掉正文仍有实际意义——SSRF 读云元数据
+    的目的就是拿到那段正文。
+    """
+    from ipclick.adapters.browser_adapter import _reject_disallowed_redirects
+
+    first = _FakeRequest("http://attacker.example/r")
+    second = _FakeRequest("http://169.254.169.254/latest/meta-data/", redirected_from=first)
+    response = _FakeBrowserResponse("http://169.254.169.254/latest/meta-data/", second)
+
+    def validate(url: str) -> None:
+        if "169.254.169.254" in url:
+            raise URLNotAllowedError("禁止访问云元数据地址")
+
+    with pytest.raises(URLNotAllowedError, match="重定向目标被 URL 策略拒绝"):
+        _reject_disallowed_redirects(response, _plan("http://attacker.example/r", validate))
+
+
+def test_browser_allows_a_clean_redirect_chain() -> None:
+    """链上每一跳都合规时不得误伤。"""
+    from ipclick.adapters.browser_adapter import _reject_disallowed_redirects
+
+    first = _FakeRequest("http://example.com/a")
+    second = _FakeRequest("http://example.com/b", redirected_from=first)
+    response = _FakeBrowserResponse("http://example.com/b", second)
+
+    _reject_disallowed_redirects(response, _plan("http://example.com/a", lambda _u: None))
+
+
+def test_browser_skips_the_check_without_a_validator() -> None:
+    """没注入校验器时（进程内直接用适配器）不做任何额外校验。"""
+    from ipclick.adapters.browser_adapter import _reject_disallowed_redirects
+
+    response = _FakeBrowserResponse("http://169.254.169.254/", _FakeRequest("http://169.254.169.254/"))
+    _reject_disallowed_redirects(response, _plan("http://attacker.example/", None))
