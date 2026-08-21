@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+from enum import Enum
+from pathlib import Path
+import sys
+from types import ModuleType
+
 import pytest
 
+from ipclick.adapters import browser_engines
 from ipclick.adapters.browser_adapter import NETWORK_IDLE, _goto_state, _RenderPlan, _settle
 from ipclick.adapters.browser_settings import BrowserSettings
 
@@ -78,3 +84,49 @@ async def test_settle_is_skipped_when_not_asked_for(wait_until: str, settle_ms: 
 def test_unknown_wait_until_falls_back_to_the_default() -> None:
     assert BrowserSettings.from_config({"wait_until": "whenever"}).wait_until == NETWORK_IDLE
     assert BrowserSettings.from_config({"wait_until": " LOAD "}).wait_until == "load"
+
+
+def _fake_addons_module(addons_dir: Path, names: tuple[str, ...]) -> ModuleType:
+    """伪造 camoufox.addons：只要 ADDONS_DIR 和 DefaultAddons 两个符号。"""
+    module = ModuleType("camoufox.addons")
+    module.ADDONS_DIR = addons_dir  # pyright: ignore[reportAttributeAccessIssue]
+    module.DefaultAddons = Enum("DefaultAddons", {n: n for n in names})  # pyright: ignore[reportAttributeAccessIssue]
+    return module
+
+
+def test_an_empty_addon_directory_is_reported_as_not_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ "目录在、内容是空的"必须判成未就绪，不能报"就绪"。
+
+    camoufox 的 maybe_download_addons() 只看插件目录存不存在、不看内容，空目录照样被
+    当成有效插件塞进启动参数，直到 confirm_paths() 才抛 InvalidAddonPath。而这种空目录
+    很容易留下：`python -m camoufox fetch` 下插件失败时（addons.mozilla.org 会按地区
+    返回 451）先 makedirs 再下载，异常被它自己吞掉，退出码仍是 0。
+    只看浏览器二进制的话，就会对一个**必然启动失败**的引擎回答"就绪"。
+    """
+    addons = tmp_path / "addons"
+    (addons / "UBO").mkdir(parents=True)
+    monkeypatch.setitem(sys.modules, "camoufox.addons", _fake_addons_module(addons, ("UBO",)))
+
+    assert browser_engines._broken_camoufox_addons() == str(addons / "UBO")
+
+
+def test_a_complete_addon_directory_is_fine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    addons = tmp_path / "addons"
+    (addons / "UBO").mkdir(parents=True)
+    (addons / "UBO" / "manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setitem(sys.modules, "camoufox.addons", _fake_addons_module(addons, ("UBO",)))
+
+    assert browser_engines._broken_camoufox_addons() == ""
+
+
+def test_a_missing_addon_directory_is_not_treated_as_broken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """目录整个不存在是另一回事：camoufox 启动时会尝试补下，失败也只是跳过该插件，能起来。
+
+    Dockerfile 的 --build-arg CAMOUFOX_REQUIRE_ADDONS=0 走的正是这条路——把空目录删掉，
+    换来一个稳定可用、只是不带插件的镜像。所以这里绝不能把"没有"也判成坏。
+    """
+    addons = tmp_path / "addons"
+    addons.mkdir()
+    monkeypatch.setitem(sys.modules, "camoufox.addons", _fake_addons_module(addons, ("UBO",)))
+
+    assert browser_engines._broken_camoufox_addons() == ""

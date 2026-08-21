@@ -181,6 +181,30 @@ def _resolve_camoufox_binary() -> str:
     return str(root / LAUNCH_FILE[OS_NAME])
 
 
+def _broken_camoufox_addons() -> str:
+    """返回"目录在、内容却是空的"那些默认插件的路径；没有就返回空串。
+
+    camoufox 的 maybe_download_addons() 只看插件目录**存不存在**、不看内容：目录空着也照样
+    当成有效插件塞进启动参数，直到 confirm_paths() 才抛 "manifest.json is missing"。
+    而这种空目录很容易留下——`python -m camoufox fetch` 下插件失败时（例如
+    addons.mozilla.org 按地区返回 451）会先 makedirs 再下载，异常被它自己吞掉，
+    只在 stdout 打一行，退出码仍是 0。
+
+    于是就绪判定如果只看浏览器二进制，就会对一个**必然启动失败**的引擎回答"就绪"。
+    这里补上这一层：只认 confirm_paths() 那个口径——目录存在但缺 manifest.json 才算坏。
+    目录整个不存在是另一回事，camoufox 会在启动时尝试补下、失败也只是跳过该插件，能起来。
+    """
+    try:
+        from camoufox.addons import ADDONS_DIR, DefaultAddons
+    except ImportError:
+        return ""
+    for addon in DefaultAddons:
+        path = Path(str(ADDONS_DIR)) / addon.name
+        if path.is_dir() and not (path / "manifest.json").exists():
+            return str(path)
+    return ""
+
+
 def _camoufox_browser_ready() -> tuple[bool | None, str]:
     try:
         path = _resolve_camoufox_binary()
@@ -190,6 +214,8 @@ def _camoufox_browser_ready() -> tuple[bool | None, str]:
         return False, f"未下载（{type(e).__name__}），需要 python -m camoufox fetch"
     if not os.path.isfile(path):
         return False, f"{path} 不存在，需要 python -m camoufox fetch"
+    if broken := _broken_camoufox_addons():
+        return False, f"插件目录 {broken} 是空的（缺 manifest.json），启动时会抛 InvalidAddonPath；删掉它或重新 fetch"
     return True, path
 
 

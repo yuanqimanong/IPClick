@@ -62,6 +62,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python:${PYTHON_VERSION}-slim AS runtime
 
 ARG ENGINE
+# camoufox 的默认插件（当前只有 uBlock Origin）必须真的下下来才算构建成功。
+# 置 0 则明确放弃插件：把空目录清掉，让 camoufox 启动时按"没有这个插件"处理。
+ARG CAMOUFOX_REQUIRE_ADDONS=1
 
 WORKDIR /app
 
@@ -85,7 +88,19 @@ COPY --from=builder --chown=ipclick:ipclick /app/src /app/src
 # （libnss3、libatk 那一堆），那是 root 才能做的事。装完把目录放成所有人可读可执行，
 # 否则切到 ipclick 用户后起不来浏览器。
 #
-# 最后那个 case 是给 camoufox 补一个可写的 fontconfig 目录：camoufox 0.5.5 起
+# 最后那个 case 干两件事，都是 camoufox 专属的。
+#
+# 一是把默认插件查实。`python -m camoufox fetch` 下插件失败时（addons.mozilla.org 会按
+# 地区返回 451）**不会**让自己失败：它先 makedirs 再下载，异常被自己吞掉、只在 stdout
+# 打一行，退出码仍是 0。留下的空目录才是真正的坑——camoufox 的 maybe_download_addons()
+# 只看目录存不存在、不看内容，空目录照样被当成有效插件塞进启动参数，直到 confirm_paths()
+# 才抛 "manifest.json is missing"。结果就是：镜像构建全绿、1.8 GB 推上去、一起浏览器就死。
+# 所以在这里当场拦住。真要不带插件就传 --build-arg CAMOUFOX_REQUIRE_ADDONS=0，
+# 那时把空目录删掉——目录不存在时 camoufox 会在启动时尝试补下，失败也只是跳过该插件，
+# 而这个镜像里 addons 的父目录是 root 只读的，它连补下都做不到，于是每次都稳定地跳过。
+# 关键是别留下"装了但是空的"这种半残状态。
+#
+# 二是给 camoufox 补一个可写的 fontconfig 目录：camoufox 0.5.5 起
 # fontconfig 缓存跟着 XDG_CACHE_HOME 走（0.5.4 及以前硬编码 ~/.cache/camoufox/fontconfig，
 # 落在用户家目录里天然可写）。现在它落进上面刚设成 a+rX 只读的 /opt/cache，而这份
 # fontconfig 是**运行期**由 ipclick 用户起浏览器时才写的（_generate_fontconfig() 只在
@@ -116,6 +131,22 @@ RUN set -eu; \
     done; \
     case "$ENGINE" in \
       camoufox|linux) \
+        if [ "$CAMOUFOX_REQUIRE_ADDONS" = "1" ]; then \
+          for a in /opt/cache/camoufox/addons/*/; do \
+            [ -d "$a" ] || continue; \
+            [ -f "$a/manifest.json" ] || { \
+              echo "构建中止：插件 $a 是空的，说明 camoufox fetch 没能把它下下来" >&2; \
+              echo "（addons.mozilla.org 常按地区返回 451）。这种镜像能构建成功，但一起" >&2; \
+              echo "浏览器就会抛 InvalidAddonPath。换个网络重建，或用" >&2; \
+              echo "--build-arg CAMOUFOX_REQUIRE_ADDONS=0 明确构建一个不带插件的镜像。" >&2; \
+              exit 1; }; \
+          done; \
+        else \
+          for a in /opt/cache/camoufox/addons/*/; do \
+            [ -d "$a" ] && [ ! -f "$a/manifest.json" ] && rm -rf "$a"; \
+          done; \
+          echo "CAMOUFOX_REQUIRE_ADDONS=0：已清掉未下载成功的插件目录，镜像不带插件"; \
+        fi; \
         mkdir -p /opt/cache/camoufox/fontconfig; \
         chown -R ipclick:ipclick /opt/cache/camoufox/fontconfig ;; \
     esac
