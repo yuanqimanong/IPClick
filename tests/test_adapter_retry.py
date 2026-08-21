@@ -7,7 +7,7 @@ import pytest
 
 from ipclick.adapters import retry as retry_module
 from ipclick.adapters.base import mark_utf8_charset, normalize_js
-from ipclick.adapters.retry import RetryPolicy, aretry, caller_alive_check, caller_gone, retry
+from ipclick.adapters.retry import RetryLoop, RetryPolicy, aretry, caller_alive_check, caller_gone, retry
 from ipclick.adapters.settings import HARD_MAX_RETRIES, AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, TransportError, ValidationError
@@ -324,3 +324,28 @@ def test_normalize_js_only_wraps_real_return_statements(script: str, expected: s
     返回值静默变成 undefined，而请求是成功的、没有任何报错。
     """
     assert normalize_js(script) == expected
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TypeError("data must be dict/list/tuple, str, BytesIO or bytes"), ValueError("bad argument")],
+)
+def test_permanent_parameter_errors_are_not_retried(error: Exception) -> None:
+    """重试解决的是"目标站点抖了"，参数根本不合法时重试只是把失败等待按次数放大。
+
+    实测 --impersonate nosuchbrowser999 在默认 3 次重试下要 14 秒才报错，
+    data=12345 这种类型错同样白等四轮——两者都不可能因为再试一次而成立。
+    """
+    loop = RetryLoop(RetryPolicy(max_retries=3), "https://example.com/", "curl_cffi")
+
+    assert loop.on_error(0, error) is None
+    assert loop.last_error is error
+
+
+def test_transport_errors_are_still_retried() -> None:
+    """别把正常的传输失败也一起 fail-fast 了。"""
+    loop = RetryLoop(RetryPolicy(max_retries=3, base_delay=0.01), "https://example.com/", "curl_cffi")
+
+    delay = loop.on_error(0, ConnectionError("connection reset"))
+
+    assert delay is not None and delay > 0

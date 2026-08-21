@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import signal
 from typing import Any, cast, final
 
 import grpc
@@ -8,6 +11,7 @@ from grpc import ServicerContext
 import pytest
 from typing_extensions import override
 
+from ipclick import async_server
 from ipclick.adapters import registry
 from ipclick.async_limiter import AsyncHostLimiter
 from ipclick.cluster.async_forwarder import AsyncForwardingTaskService
@@ -544,3 +548,39 @@ def test_dns_failure_becomes_an_ordinary_failed_response_not_a_grpc_error() -> N
     assert dns.code is None
     assert dns.label == "dns_failure"
     assert policy.code is grpc.StatusCode.PERMISSION_DENIED
+
+
+async def test_graceful_shutdown_does_not_cancel_the_servers_own_terminator() -> None:
+    """取消 wait_for_termination() 会把 grpc.aio 的 server 一起打进 cancelled。
+
+    后果是随后的 server.stop(grace=10) 立刻抛 CancelledError：grace 期完全不生效，
+    在途请求被切断成 status_code=0 / error=None 的"假响应"（调用方按 if resp.error
+    判断根本发现不了），异常还会一路穿到 CLI 顶层让进程以退出码 1 结束。
+    """
+
+    @final
+    class _FakeServer:
+        def __init__(self) -> None:
+            self.stopped_with: float | None = None
+            self._terminated: asyncio.Event = asyncio.Event()
+
+        async def wait_for_termination(self) -> None:
+            await self._terminated.wait()
+
+        async def stop(self, grace: float) -> None:
+            self.stopped_with = grace
+            self._terminated.set()
+
+    server = _FakeServer()
+    async with asyncio.timeout(10):
+        loop = asyncio.get_running_loop()
+        _ = loop.call_later(0.05, lambda: os.kill(os.getpid(), signal.SIGTERM))
+        termination = await async_server._serve_until_signalled(cast(Any, server))
+
+        # 关键：信号赢了之后，terminator 必须仍然活着，等 stop() 让它自然完成。
+        assert not termination.cancelled()
+        await server.stop(grace=10)
+        await termination
+
+    assert server.stopped_with == 10
+    assert termination.done() and not termination.cancelled()

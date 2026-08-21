@@ -306,3 +306,32 @@ def test_ordinary_json_lists_are_left_alone(service: TaskService) -> None:
     request = task_pb2.ReqTask(url="https://example.com/", data=b"[1, 2, 3]")
 
     assert service._build_download_kwargs(request)["data"] == [1, 2, 3]
+
+
+def test_fetch_failure_documents_have_the_same_shape_as_successful_ones() -> None:
+    """同一个命令、同一个 -J，失败文档不该少一半的键。
+
+    原先"连不上目标站点"因为走完了适配器有完整 15 个键，而"令牌不对"在构造客户端时
+    就抛了、只剩 4 个键——脚本读 d["status"] 一个能过一个 KeyError。
+    """
+    from ipclick.cli.agent import _fetch_failure_shape
+
+    shape = _fetch_failure_shape("http://example.com/")
+    expected = {
+        "reached_server",
+        "url",
+        "status",
+        "elapsed_ms",
+        "size",
+        "adapter",
+        "request_uuid",
+        "trace",
+        "headers",
+        "body",
+        "body_encoding",
+        "body_truncated",
+    }
+
+    assert set(shape) == expected
+    assert shape["url"] == "http://example.com/"
+    assert shape["status"] is None

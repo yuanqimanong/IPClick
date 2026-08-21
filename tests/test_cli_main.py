@@ -279,3 +279,64 @@ def test_config_show_flags_values_that_will_not_take_effect(tmp_path: Path) -> N
     good.write_text("[SERVER]\nport = 19528\n", encoding="utf-8")
     ok_result = CliRunner().invoke(main, ["config", "show", "-c", str(good), "--json"])
     assert json.loads(ok_result.output)["invalid"] is None
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["fetch", "-J", "-H", "BAD", "http://127.0.0.1:9/"],
+        ["fetch", "-J", "-X", "FROBNICATE", "http://127.0.0.1:9/"],
+        ["fetch", "-J", "--max-body", "-1", "http://127.0.0.1:9/"],
+        ["fetch", "-J"],
+        ["nosuchcommand", "-J"],
+    ],
+)
+def test_usage_errors_still_honour_the_json_contract(args: list[str]) -> None:
+    """SKILL.md：加 --json 时 stdout 上有且只有一个 JSON 文档，成功失败都是。
+
+    参数错误由 Click 在命令体运行**之前**抛出，原先走它自带的 usage 文本 + stderr，
+    于是 stdout 是 0 字节、`ipclick ... --json | jq` 直接崩——而这正是契约里
+    列为退出码 2 的那一类失败。
+    """
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 2, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["exit_code"] == 2
+    assert payload["error"]
+
+
+def test_non_json_usage_errors_keep_the_click_output() -> None:
+    """不带 --json 时行为一个字都不变。"""
+    result = CliRunner().invoke(main, ["fetch", "-H", "BAD", "http://127.0.0.1:9/"])
+
+    assert result.exit_code == 2
+    assert "Usage:" in result.output
+
+
+@pytest.mark.parametrize("args", [["run", "--port", "0"], ["run", "--web-port", "0"], ["run", "--port", "70000"]])
+def test_run_refuses_out_of_range_ports(args: list[str]) -> None:
+    """--port 0 原先被真假值判断当成"没传"，超范围值一路走到绑定失败才在日志里报错。"""
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 2, result.output
+    assert "1<=x<=65535" in result.output
+
+
+def test_config_info_reports_auth_that_comes_from_the_cluster_secret(tmp_path: Path) -> None:
+    """配了共享密钥且能识别本节点 id 时，整个端口其实已经要求鉴权了。
+
+    只看 [SECURITY].auth_token 的话会报"未配置（任何人都能调用）"——两个方向都误导：
+    以为端口开着的其实锁着，以为什么都没变的其实普通调用方全线 UNAUTHENTICATED。
+    """
+    config = tmp_path / "cluster.toml"
+    config.write_text('[SERVER]\nport = 19528\n[CLUSTER]\nself_id = "node-a"\n', encoding="utf-8")
+
+    with_secret = CliRunner(env={"IPCLICK_CLUSTER_SECRET": "shared-secret"}).invoke(
+        main, ["config-info", "-c", str(config)]
+    )
+    without = CliRunner(env={"IPCLICK_CLUSTER_SECRET": ""}).invoke(main, ["config-info", "-c", str(config)])
+
+    assert "共享密钥派生" in with_secret.output, with_secret.output
+    assert "未配置（任何人都能调用）" in without.output, without.output

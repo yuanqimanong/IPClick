@@ -49,7 +49,12 @@ def skill_show(as_json: bool) -> None:
 @json_option
 def skill_install(target_dir: Path | None, force: bool, as_json: bool) -> None:
     """将技能文件安装到项目级技能目录。"""
-    result = skill_pkg.install(target_dir, force=force)
+    try:
+        result = skill_pkg.install(target_dir, force=force)
+    except OSError as e:
+        # 目标目录不可写、路径上有同名普通文件、盘满……都是很普通的文件系统错误，
+        # 不该以 traceback 结束，更不该在 --json 下让 stdout 空着。
+        fail(f"装不了技能文件：{e}", Exit.FAILED, as_json=as_json, path=str(target_dir) if target_dir else None)
     if not result.written and not result.unchanged:
         fail(result.message, Exit.FAILED, as_json=as_json, path=str(result.path))
 
