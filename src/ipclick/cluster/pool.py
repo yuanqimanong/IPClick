@@ -88,10 +88,15 @@ class NodePool:
             callbacks = list(self._health_callbacks)
         with self._lock:
             drained = set(self._drained)
-        healthy = sum(1 for state in states if state.status is NodeStatus.HEALTHY and state.node.id not in drained)
+        # 计入"未被判定为不健康"的节点，而不是只算 HEALTHY。这个计数唯一的用途是限流
+        # 分片（每台分 1/N 的 per_host_qps），而节点的初始状态是 UNKNOWN——只认 HEALTHY
+        # 的话，从启动到第一轮探活完成的这段窗口里计数是 0，分片直接不生效，
+        # **每台都按完整 QPS 跑**，N 台集群就是 N 倍的全局限额打到目标站点上。
+        # 限流这件事上，"没证据说它挂了就假定它在"是更安全的方向：宁可分得偏保守。
+        live = sum(1 for state in states if state.status is not NodeStatus.UNHEALTHY and state.node.id not in drained)
         for callback in callbacks:
             try:
-                callback(healthy)
+                callback(live)
             except Exception as e:
                 log.warning(f"健康状态回调失败：{e}")
 

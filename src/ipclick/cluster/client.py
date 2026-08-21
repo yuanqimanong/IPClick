@@ -6,6 +6,8 @@ from collections.abc import Callable, Iterable, Iterator
 import threading
 from typing import Any, TypeVar
 
+import grpc
+
 from ipclick.cluster.discovery import create_discovery
 from ipclick.cluster.node import ClusterConfig, NodeState
 from ipclick.cluster.pool import NodePool
@@ -146,7 +148,12 @@ class ClusterDownloader(ClientBase):
             except TransportError as e:
                 last_error = e
                 state.record_request(success=False)
-                state.mark_unhealthy(str(e))
+                # 只有"连接压根没建起来"才立刻摘节点，与服务端转发的 should_mark_unhealthy
+                # 保持同一口径。之前对任何传输错误都立即摘除，于是抓一个让服务端报错的
+                # 目标（INTERNAL / UNKNOWN）就能把整个集群摘空；而且绕过了
+                # failure_threshold 的迟滞，与服务端行为也不一致。
+                if getattr(e, "grpc_code", None) is grpc.StatusCode.UNAVAILABLE:
+                    state.mark_unhealthy(str(e))
                 if not replayable:
                     log.warning(
                         f"节点 {state.node.id} 处理非幂等的「{description}」时结果未知，"

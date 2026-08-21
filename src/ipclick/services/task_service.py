@@ -448,8 +448,12 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
     def _open_stream(self, adapter: DownloaderAdapter, request: "task_pb2.ReqTask") -> Iterator[StreamEvent]:
         """打开不带适配器内部重试的响应流，避免已发送内容被重复。"""
         download_kwargs = self._build_download_kwargs(request)
-        for retry_key in ("max_retries", "retry_delay"):
-            _ = download_kwargs.pop(retry_key, None)
+        # 显式写 0 而不是 pop 掉：RetryPolicy.resolve 在 kwargs 里找不到 max_retries 时
+        # 会回落到适配器自己的 max_retries（服务端默认 3）——于是没有重写 download_stream
+        # 的适配器（走基类的"整体下载再切块"实现）在流式路径上照样重试三次，
+        # 既不是调用方要求的次数、也不是这里想要的"不重试"。
+        download_kwargs["max_retries"] = 0
+        _ = download_kwargs.pop("retry_delay", None)
         return self._limited_stream(
             request.url,
             adapter.download_stream(request.url, chunk_size=self._chunk_size, **download_kwargs),

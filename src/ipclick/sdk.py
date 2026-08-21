@@ -246,8 +246,10 @@ class ClientBase:
         if code is grpc.StatusCode.RESOURCE_EXHAUSTED:
             return HostLimitTimeout(f"服务端限流：{details}")
         if code is grpc.StatusCode.UNAVAILABLE:
-            return TransportError(f"gRPC 调用失败 [{code}]: {details}{unavailable_hint(details, self.port)}")
-        return TransportError(f"gRPC 调用失败 [{code}]: {details}")
+            return TransportError(
+                f"gRPC 调用失败 [{code}]: {details}{unavailable_hint(details, self.port)}", grpc_code=code
+            )
+        return TransportError(f"gRPC 调用失败 [{code}]: {details}", grpc_code=code)
 
     def _should_retry_rpc(self, error: grpc.RpcError, attempt: int) -> bool:
         if attempt >= self.rpc_max_retries:

@@ -4,6 +4,7 @@ from collections import Counter
 from typing import Any
 
 import pytest
+from typing_extensions import override
 
 from ipclick.cluster.balancer import RoundRobinBalancer, create_balancer
 from ipclick.cluster.node import ClusterConfig, Node, NodeState, NodeStatus
@@ -231,3 +232,76 @@ def test_client_failover_matches_the_server_side_whitelist() -> None:
     from ipclick.cluster.forwarder import _FAILOVER_SAFE_METHODS
 
     assert {m.name for m in _REPLAYABLE_METHODS} == set(_FAILOVER_SAFE_METHODS)
+
+
+def test_node_pool_counts_unknown_nodes_as_live() -> None:
+    """限流分片的节点计数必须把 UNKNOWN 也算进去。
+
+    节点初始状态是 UNKNOWN。只认 HEALTHY 的话，从启动到第一轮探活完成的这段窗口里
+    计数是 0，分片直接不生效——每台都按完整 per_host_qps 跑，N 台集群就是 N 倍的
+    全局限额打到目标站点上。限流这件事上"没证据说它挂了就假定它在"是更安全的方向。
+    """
+    from ipclick.cluster.node import ClusterConfig
+    from ipclick.cluster.pool import NodePool
+
+    config = ClusterConfig.from_config(
+        {
+            "forward": "off",
+            "nodes": [
+                {"id": "n1", "address": "10.0.0.1:9528"},
+                {"id": "n2", "address": "10.0.0.2:9528"},
+                {"id": "n3", "address": "10.0.0.3:9528"},
+            ],
+        }
+    )
+    pool = NodePool(config)
+    try:
+        seen: list[int] = []
+        pool.on_health_change(seen.append)
+        pool._notify_health()
+
+        # 三个节点都还没探活过（UNKNOWN），仍应报 3 而不是 0
+        assert seen == [3]
+
+        # 明确判定为不健康的才不计入
+        for state in pool._states:
+            if state.node.id == "n2":
+                state.mark_unhealthy("probe failed")
+        seen.clear()
+        pool._notify_health()
+        assert seen == [2]
+    finally:
+        pool.stop()
+
+
+def test_transport_error_carries_the_grpc_code() -> None:
+    """集群客户端要靠原始状态码区分"连不上"和"服务端内部出错"。
+
+    之前对任何 TransportError 都立即摘除节点，于是抓一个让服务端报错的目标
+    （INTERNAL / UNKNOWN）就能把整个集群摘空，而且绕过了 failure_threshold 的迟滞。
+    """
+    from typing import Any as _Any
+
+    import grpc as _grpc
+
+    from ipclick.sdk import Downloader
+
+    class _Err(_grpc.RpcError):
+        def __init__(self, code: _Any) -> None:
+            self._code: _Any = code
+
+        @override
+        def code(self) -> _Any:
+            return self._code
+
+        @override
+        def details(self) -> str:
+            return "boom"
+
+    downloader: _Any = object.__new__(Downloader)
+    downloader.port = 9528
+    downloader._metadata = ()
+
+    for code in (_grpc.StatusCode.UNAVAILABLE, _grpc.StatusCode.INTERNAL, _grpc.StatusCode.UNKNOWN):
+        error = downloader._rpc_error(_Err(code))
+        assert getattr(error, "grpc_code", None) is code

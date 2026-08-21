@@ -14,7 +14,16 @@ class AdapterError(IPClickError):
 
 
 class TransportError(IPClickError):
-    """客户端与 gRPC 服务端之间的传输失败。"""
+    """客户端与 gRPC 服务端之间的传输失败。
+
+    ``grpc_code`` 保留原始的 gRPC 状态码（没有对应码时为 ``None``）。集群客户端要靠它
+    区分"连都没连上"和"连上了但服务端内部出错"——前者该立刻把节点摘掉，后者不该，
+    否则抓一个让服务端报错的目标就能把整个集群摘空。
+    """
+
+    def __init__(self, *args: object, grpc_code: object = None) -> None:
+        super().__init__(*args)
+        self.grpc_code: object = grpc_code
 
 
 class ClientClosedError(IPClickError):
