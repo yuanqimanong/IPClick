@@ -1,0 +1,32 @@
+# Dependabot 版本更新。
+#
+# 加它的直接原因：astral-sh/setup-uv 从 v8 起不再发布移动的 major/minor 标签，
+# workflow 里只能钉精确版本（当前 v10.0.1）。actions/* 那几个写的是 @v7 / @v8，
+# 会自己跟着走；setup-uv 不会——没人管就一直停在这个版本上，直到某天它连
+# 新版 uv 都装不了才被发现。让 Dependabot 替我们盯着。
+#
+# 刻意只管 GitHub Actions，不管 Python 依赖：uv.lock 里几百个包，按周开 PR 会把
+# 这个仓库淹掉，而 CI 用的是 `uv sync --frozen`，锁文件本来就该由人决定什么时候动。
+# 需要的话再单独加一条 package-ecosystem: "uv"。
+
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    # github-actions 生态下 "/" 指的就是 .github/workflows/，不是仓库根目录下的某个清单文件。
+    directory: "/"
+    schedule:
+      # Action 的发布频率本来就低，按月足够。安全更新不受这里影响，Dependabot
+      # 发现漏洞时会立刻单独开 PR。
+      interval: "monthly"
+    groups:
+      # 全部合成一个 PR：不分组的话一次大版本潮能开五个，而它们要一起验证才有意义
+      # （比如 upload-artifact 和 download-artifact 的大版本是配套的）。
+      actions:
+        patterns:
+          - "*"
+    # 分组之后正常只会有一个 PR；留 2 是给"分组 PR 还没合、又来了安全更新"留位置。
+    open-pull-requests-limit: 2
+    commit-message:
+      # 跟仓库现有的提交前缀对齐（见 ac731f3）。
+      prefix: "chore(ci)"
