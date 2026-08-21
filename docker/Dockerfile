@@ -85,6 +85,13 @@ COPY --from=builder --chown=ipclick:ipclick /app/src /app/src
 # （libnss3、libatk 那一堆），那是 root 才能做的事。装完把目录放成所有人可读可执行，
 # 否则切到 ipclick 用户后起不来浏览器。
 #
+# 最后那个 case 是给 camoufox 补一个可写的 fontconfig 目录：camoufox 0.5.5 起
+# fontconfig 缓存跟着 XDG_CACHE_HOME 走（0.5.4 及以前硬编码 ~/.cache/camoufox/fontconfig，
+# 落在用户家目录里天然可写）。现在它落进上面刚设成 a+rX 只读的 /opt/cache，而这份
+# fontconfig 是**运行期**由 ipclick 用户起浏览器时才写的（_generate_fontconfig() 只在
+# launch 路径上调，python -m camoufox fetch 走不到），不放开写就是当场 PermissionError。
+# 只放开这一个子目录，浏览器本体仍然只读。
+#
 # 这一层刻意和上面的依赖层分开：浏览器本体是几百 MB 到 1 GB，
 # 改源码时不该让它重新下一遍。
 RUN set -eu; \
@@ -106,7 +113,12 @@ RUN set -eu; \
     esac; \
     for d in /opt/ms-playwright /opt/cache; do \
       [ -d "$d" ] && chmod -R a+rX "$d" || true; \
-    done
+    done; \
+    case "$ENGINE" in \
+      camoufox|linux) \
+        mkdir -p /opt/cache/camoufox/fontconfig; \
+        chown -R ipclick:ipclick /opt/cache/camoufox/fontconfig ;; \
+    esac
 
 # 配置目录（可通过 -v 挂载 ipclick.toml 进来）
 RUN mkdir -p /home/ipclick/.ipclick /app/data \
