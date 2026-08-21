@@ -21,6 +21,15 @@ from ipclick.utils.log_util import log
 _T = TypeVar("_T")
 
 
+# 与服务端转发的方法白名单保持一致：只有无副作用的读取方法在结果未知时可以重投。
+_REPLAYABLE_METHODS = frozenset({HttpMethod.GET, HttpMethod.HEAD, HttpMethod.OPTIONS})
+
+
+def _is_replayable(task: DownloadTask) -> bool:
+    """判断一个任务在结果未知时能否安全地换节点重投。"""
+    return task.method in _REPLAYABLE_METHODS
+
+
 class ClusterDownloader(ClientBase):
     """在多个直连节点间负载均衡并执行有限故障转移。"""
 
@@ -109,8 +118,15 @@ class ClusterDownloader(ClientBase):
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         self.close()
 
-    def _with_failover(self, operation: Callable[[Downloader], _T], description: str) -> _T:
-        """仅对传输层错误换节点，业务错误直接返回给调用方。"""
+    def _with_failover(
+        self, operation: Callable[[Downloader], _T], description: str, *, replayable: bool = True
+    ) -> _T:
+        """仅对传输层错误换节点，业务错误直接返回给调用方。
+
+        ``replayable=False`` 的调用**不换节点**：传输层错误意味着结果未知，下游可能
+        已经执行完了只是回复没赶上，重投一次就是重复下单。服务端转发那一侧早就按
+        方法白名单挡住了（只有 GET/HEAD/OPTIONS 会换），客户端分发这一侧口径要一致。
+        """
         tried: set[str] = set()
         attempts = self.cluster_config.max_failover + 1
         last_error: Exception | None = None
@@ -131,6 +147,12 @@ class ClusterDownloader(ClientBase):
                 last_error = e
                 state.record_request(success=False)
                 state.mark_unhealthy(str(e))
+                if not replayable:
+                    log.warning(
+                        f"节点 {state.node.id} 处理非幂等的「{description}」时结果未知，"
+                        f"为避免重复执行，不再换节点：{e}"
+                    )
+                    raise
                 log.warning(
                     f"节点 {state.node.id} 处理「{description}」失败（第 {attempt + 1}/{attempts} 次尝试）：{e}"
                 )
@@ -158,7 +180,9 @@ class ClusterDownloader(ClientBase):
 
     def download(self, task: DownloadTask) -> DownloadResponse:
         """下载单个已构造任务。"""
-        return self._with_failover(lambda c: c.download(task), f"下载 {task.url}")
+        return self._with_failover(
+            lambda c: c.download(task), f"下载 {task.url}", replayable=_is_replayable(task)
+        )
 
     def stream(self, url: str, **kwargs: Any) -> StreamedResponse:
         """建立流式响应；流开始后的中断不会跨节点续传。"""
@@ -167,8 +191,11 @@ class ClusterDownloader(ClientBase):
     def batch(self, tasks: Iterable[DownloadTask], timeout: float | None = None) -> Iterator[DownloadResponse]:
         """将一批任务固定派发到同一健康节点。"""
         materialized = list(tasks)
+        # 整批重投的话，批里任何一个写请求都会被重复执行一次。
         call = self._with_failover(
-            lambda c: list(c.batch(materialized, timeout=timeout)), f"批量 {len(materialized)} 个任务"
+            lambda c: list(c.batch(materialized, timeout=timeout)),
+            f"批量 {len(materialized)} 个任务",
+            replayable=all(_is_replayable(task) for task in materialized),
         )
         yield from call
 

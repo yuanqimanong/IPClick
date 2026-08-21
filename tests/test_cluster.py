@@ -198,3 +198,36 @@ def test_leased_stub_reuses_one_channel_per_node(monkeypatch: pytest.MonkeyPatch
         assert service._channels["n1"].users == 1
     assert service._channels["n1"].users == 0
     assert service._channels["n1"].channel.closed is False
+
+
+@pytest.mark.parametrize(
+    ("method", "replayable"),
+    [
+        ("GET", True),
+        ("HEAD", True),
+        ("OPTIONS", True),
+        ("POST", False),
+        ("PUT", False),
+        ("PATCH", False),
+        ("DELETE", False),
+    ],
+)
+def test_client_failover_only_replays_read_methods(method: str, replayable: bool) -> None:
+    """客户端分发的故障转移必须和服务端转发口径一致：只有读方法能换节点重投。
+
+    传输层错误意味着结果未知——下游可能已经把订单建好了、只是回复没赶上，
+    重投一次就是重复下单。
+    """
+    from ipclick.cluster.client import _is_replayable
+    from ipclick.dto.models import DownloadTask, HttpMethod
+
+    task = DownloadTask(url="https://api.example.com/orders", method=HttpMethod[method])
+    assert _is_replayable(task) is replayable
+
+
+def test_client_failover_matches_the_server_side_whitelist() -> None:
+    """两侧的白名单不该各自漂移。"""
+    from ipclick.cluster.client import _REPLAYABLE_METHODS
+    from ipclick.cluster.forwarder import _FAILOVER_SAFE_METHODS
+
+    assert {m.name for m in _REPLAYABLE_METHODS} == set(_FAILOVER_SAFE_METHODS)
