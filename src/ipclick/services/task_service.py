@@ -425,7 +425,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             header_sent = False
             try:
                 adapter = self.prepare(request, context, tr)
-                for event in self._open_stream(adapter, request):
+                for event in self._open_stream(adapter, request, context):
                     if not caller_still_waiting(context):
                         log.info(f"Stream request {request.uuid} cancelled by client")
                         break
@@ -468,7 +468,12 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         )
         log.debug("Stream request {} finished in {}ms, {} bytes", request.uuid, elapsed_ms, total_bytes)
 
-    def _open_stream(self, adapter: DownloaderAdapter, request: "task_pb2.ReqTask") -> Iterator[StreamEvent]:
+    def _open_stream(
+        self,
+        adapter: DownloaderAdapter,
+        request: "task_pb2.ReqTask",
+        context: ServicerContext | None = None,
+    ) -> Iterator[StreamEvent]:
         """打开响应流；重试参数按调用方要求原样透传。
 
         这里曾经把 ``max_retries`` / ``retry_delay`` 抹掉，理由写的是"避免已发送内容被
@@ -486,10 +491,45 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         就不能重投"，而不是靠这里抹参数——那样做只会让调用方的参数看起来生效实际不生效。
         """
         download_kwargs = self._build_download_kwargs(request)
-        return self._limited_stream(
-            request.url,
-            adapter.download_stream(request.url, chunk_size=self._chunk_size, **download_kwargs),
+        return self._caller_aware_stream(
+            context,
+            self._limited_stream(
+                request.url,
+                adapter.download_stream(request.url, chunk_size=self._chunk_size, **download_kwargs),
+            ),
         )
+
+    @staticmethod
+    def _caller_aware_stream(context: ServicerContext | None, stream: Iterator[StreamEvent]) -> Iterator[StreamEvent]:
+        """推进响应流时绑定 ``caller_alive_check``，让流式路径的重试也认调用方状态。
+
+        ``_open_stream`` 会把调用方的 ``max_retries`` 原样透传给 ``download_stream``，
+        而基类的兜底实现是"先 ``download()`` 整体下完再切块"、``download()`` 带
+        ``@retry()``。SendStream 循环里的 ``caller_still_waiting`` 只在分片之间生效，
+        管不到 ``download()`` 内部的重试——不绑定的话调用方断开后仍会对目标站点重投满
+        ``max_retries`` 次（上限 20，配上退避最坏能拖八分钟）。
+
+        绑定必须落在**每一次** ``next()`` 内部，不能在生成器外面 set 一次：``_open_stream``
+        返回的是生成器，外层 set 早在第一个字节之前就 reset 掉了；而 AsyncTaskService 把
+        同一个生成器交给线程池逐项推进，ContextVar 的 token 跨线程 reset 会抛 ValueError。
+        """
+        predicate = None if context is None else lambda: caller_still_waiting(context)
+        iterator = iter(stream)
+        try:
+            while True:
+                token = caller_alive_check.set(predicate)
+                try:
+                    event = next(iterator)
+                except StopIteration:
+                    return
+                finally:
+                    caller_alive_check.reset(token)
+                yield event
+        finally:
+            # _limited_stream 的 with 块持着 host 限流槽，必须确定性地还回去。
+            closer = getattr(iterator, "close", None)
+            if callable(closer):
+                closer()
 
     @staticmethod
     def _stream_header(request: "task_pb2.ReqTask", event: StreamHeader) -> "task_pb2.TaskRespChunk":

@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import json
 import math
-from typing import cast
+from typing import Any, cast
 
 import grpc
 from grpc import ServicerContext
 import pytest
+from typing_extensions import override
 
 from ipclick.adapters import registry
-from ipclick.adapters.base import StreamHeader
+from ipclick.adapters.base import DownloaderAdapter, StreamHeader
+from ipclick.adapters.retry import retry
 from ipclick.dto.proto import task_pb2
-from ipclick.exceptions import AdapterError, URLNotAllowedError, ValidationError
+from ipclick.dto.response import Response
+from ipclick.exceptions import AdapterError, TransportError, URLNotAllowedError, ValidationError
 from ipclick.limiter import HostLimitTimeout
+from ipclick.services.async_task_service import AsyncTaskService
 from ipclick.services.errors import CallerGone
 from ipclick.services.task_service import TaskService, caller_still_waiting, is_forwarded
 from ipclick.trace import RequestTrace
@@ -237,7 +241,7 @@ def test_stream_reports_a_blocked_url_in_the_header(settings: Settings, monkeypa
 def test_stream_body_error_uses_trailer_without_sending_a_second_header(
     service: TaskService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def broken_stream(_adapter: object, _request: task_pb2.ReqTask):
+    def broken_stream(_adapter: object, _request: task_pb2.ReqTask, _context: object = None):
         yield StreamHeader(url="https://example.com/final", status_code=200, headers={"x-test": "1"})
         yield b"partial"
         raise RuntimeError("connection lost")
@@ -335,3 +339,61 @@ def test_fetch_failure_documents_have_the_same_shape_as_successful_ones() -> Non
     assert set(shape) == expected
     assert shape["url"] == "http://example.com/"
     assert shape["status"] is None
+
+
+def _flaky_stream_adapter(calls: list[int], recording: RecordingContext) -> type[DownloaderAdapter]:
+    """构造一个"第一次尝试后调用方就断开"的适配器类。"""
+
+    class _FlakyOnce(DownloaderAdapter):
+        adapter_name: str = "curl_cffi"
+
+        @override
+        @retry()
+        def download(self, url: str, **kwargs: Any) -> Response:
+            _ = (url, kwargs)
+            calls.append(1)
+            recording.disconnect()
+            raise TransportError("boom")
+
+    return _FlakyOnce
+
+
+def test_stream_retries_stop_when_the_caller_walks_away(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """流式路径的重试也必须看调用方还在不在。
+
+    基类 download_stream 的兜底实现是"先 download() 整体下完再切块"，而 download()
+    带 @retry()；_open_stream 现在把调用方的 max_retries 原样透传下去。若不在这里绑定
+    caller_alive_check，调用方断开后仍会对目标站点重投 max_retries 次——SendStream 循环
+    里的 caller_still_waiting 只在分片之间生效，管不到 download() 内部的重试。
+    """
+    calls: list[int] = []
+    recording, context = _context()
+    monkeypatch.setitem(registry.ADAPTER_CLASSES, "curl_cffi", _flaky_stream_adapter(calls, recording))
+    service = TaskService(settings)
+
+    _ = list(
+        service.SendStream(
+            task_pb2.ReqTask(url="https://example.com/x", max_retries=3, retry_backoff_seconds=0.0),
+            context,
+        )
+    )
+
+    assert len(calls) == 1, f"调用方已断开，却仍重试了 {len(calls) - 1} 次"
+
+
+async def test_async_stream_retries_stop_when_the_caller_walks_away(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """异步服务把同步流交给线程池逐项推进，绑定必须在执行线程里生效。"""
+    calls: list[int] = []
+    recording, context = _context()
+    monkeypatch.setitem(registry.ADAPTER_CLASSES, "curl_cffi", _flaky_stream_adapter(calls, recording))
+    service = AsyncTaskService(settings)
+
+    async for _chunk in service.SendStream(
+        task_pb2.ReqTask(url="https://example.com/x", max_retries=3, retry_backoff_seconds=0.0),
+        context,
+    ):
+        pass
+
+    assert len(calls) == 1, f"调用方已断开，却仍重试了 {len(calls) - 1} 次"
