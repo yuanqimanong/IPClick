@@ -253,3 +253,37 @@ def test_stream_body_error_uses_trailer_without_sending_a_second_header(
     assert chunks[-1].trailer.total_bytes == len(b"partial")
     assert chunks[-1].trailer.error_message == "内部错误: RuntimeError"
     assert recording.code is None
+
+
+def test_default_adapter_also_gets_the_redirect_validator(service: TaskService) -> None:
+    """默认适配器必须和惰性创建的适配器一样带上逐跳校验器。
+
+    默认适配器是在 __init__ 里直接塞进 _adapter_cache 的，走不到
+    _get_cached_adapter 里注入 url_validator 那一支。漏了它，默认路径
+    （curl_cffi，也就是绝大多数请求走的那条）就完全不校验重定向目标：
+    max_redirects 形同虚设，一次 302 能跳到云元数据地址绕开整套 [SECURITY]。
+    """
+    validator = service.default_adapter.url_validator
+
+    assert validator is not None
+    with pytest.raises(URLNotAllowedError):
+        validator("http://169.254.169.254/latest/meta-data/")
+
+
+def test_raw_data_body_is_sent_verbatim(service: TaskService) -> None:
+    """data_is_raw 的请求体原样透传，不得被还原成结构化对象。
+
+    否则 data=b'{"a": 1}' 会被 json.loads 成 dict，再被适配器编码成
+    a=1 的 form-urlencoded body——调用方发的是 JSON，站点收到的是表单。
+    data=b'12345' 更糟：还原成 int 后适配器直接抛 "data must be dict/list/..."。
+    """
+    for body in (b'{"a": 1}', b"12345", b"true", b"plain-text"):
+        request = task_pb2.ReqTask(url="https://example.com/", data=body, data_is_raw=True)
+        assert service._build_download_kwargs(request)["data"] == body
+
+
+def test_structured_data_body_is_still_restored(service: TaskService) -> None:
+    """不带 data_is_raw 的旧客户端保持原来的猜测行为，线上不断。"""
+    request = task_pb2.ReqTask(url="https://example.com/", data=b'{"a": 1}')
+
+    assert service._build_download_kwargs(request)["data"] == {"a": 1}

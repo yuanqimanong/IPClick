@@ -180,3 +180,27 @@ def test_fetch_json_reports_downloader_construction_failure(monkeypatch: pytest.
     assert payload["ok"] is False
     assert payload["exit_code"] == 5
     assert "invalid client configuration" in payload["error"]
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "70000", "75064", "-1"])
+def test_health_rejects_out_of_range_ports(port: str) -> None:
+    """超范围端口必须在参数层被拒，不能交给 gRPC 去 mod 65536 回绕。
+
+    9528 + 65536 = 75064：回绕之后 health 连的其实是 9528，于是对着一个不可能
+    存在的端口回答 SERVING、退出码 0。这比直接报错危险得多——运维照着它判断
+    "服务在听"，而那台机器上根本没有这个端口。
+    """
+    result = CliRunner().invoke(main, ["health", "--port", port, "--timeout", "1"])
+
+    assert result.exit_code == 2, result.output
+    assert "1..65535" in result.output
+
+
+@pytest.mark.parametrize("port", ["1", "65535"])
+def test_health_accepts_the_boundary_ports(port: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    cli_main_module = import_module("ipclick.cli.main")
+    monkeypatch.setattr(cli_main_module, "check_health", lambda *_a, **_k: (True, "SERVING"))
+
+    result = CliRunner().invoke(main, ["health", "--port", port, "--timeout", "1"])
+
+    assert result.exit_code == 0, result.output

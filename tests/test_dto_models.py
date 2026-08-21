@@ -217,3 +217,16 @@ def test_response_error_paths() -> None:
 
 def test_response_is_not_success_when_error_is_set() -> None:
     assert not DownloadResponse(status_code=200, error="partial failure").is_success()
+
+
+def test_to_protobuf_marks_raw_bodies_but_not_structured_ones() -> None:
+    """str/bytes 的请求体要标成原始，dict/list 的不标。
+
+    服务端靠这一位区分「调用方给的是一段 JSON 文本」和「调用方给的是个 dict」。
+    不标的话前者会被还原成 dict 再编码成 form-urlencoded 发出去。
+    """
+    assert DownloadTask(url="http://example.com", data='{"a": 1}').to_protobuf().data_is_raw is True
+    assert DownloadTask(url="http://example.com", data=b"\x00\xff").to_protobuf().data_is_raw is True
+    assert DownloadTask(url="http://example.com", data={"k": 1}).to_protobuf().data_is_raw is False
+    assert DownloadTask(url="http://example.com", data=[1, 2]).to_protobuf().data_is_raw is False
+    assert DownloadTask(url="http://example.com").to_protobuf().HasField("data_is_raw") is False

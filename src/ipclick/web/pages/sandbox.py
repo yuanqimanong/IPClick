@@ -284,6 +284,9 @@ class SandboxPage:
             request.json = body
             return
         request.data = body.encode("utf-8")
+        # 「原样发送（data）」就得真的原样发：不标这一位的话，形似 JSON 的请求体
+        # 会在服务端被还原成 dict，最后以 form-urlencoded 发出去。
+        request.data_is_raw = True
 
     @staticmethod
     def _apply_maps(request: task_pb2.ReqTask, form: dict[str, str]) -> None:

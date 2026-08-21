@@ -217,7 +217,8 @@ def health(host: str, port: int | None, config: Path | None, service: str, timeo
     LogUtil.init(level="ERROR")
 
     config_data = load_config(str(config) if config else None)
-    resolved_port = port or int(section(config_data, "SERVER").get("port", DEFAULT_GRPC_PORT))
+    # 同 agent._server_port：--port 0 不能被真假值判断吞掉，0 是非法端口不是"没传"。
+    resolved_port = port if port is not None else int(section(config_data, "SERVER").get("port", DEFAULT_GRPC_PORT))
     target = format_grpc_target(host, resolved_port)
     tls = TLSSettings.from_config(section(config_data, "SECURITY"))
 
