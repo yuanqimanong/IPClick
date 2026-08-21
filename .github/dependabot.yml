@@ -71,6 +71,20 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # playwright 在这个项目里结构上就动不了，交给 Dependabot 只会让每次运行都红。
+      #
+      # camoufox>=0.5.4 传递依赖 playwright<1.61，而本项目自己的 [playwright] extra
+      # 要求 playwright>=1.62.0 —— 两者正是 pyproject 的 [tool.uv].conflicts 里声明为
+      # 互斥的那一对。uv 靠 conflicts 把它们分叉解析（CI 的 checks job 装 camoufox
+      # 那一支是能过的），但 Dependabot 表达不了这种分叉，一升就报
+      # dependency_file_not_resolvable：
+      #   Because camoufox>=0.5.4 depends on playwright<1.61 and playwright==1.62.0,
+      #   we can conclude that camoufox>=0.5.4 cannot be used.
+      #
+      # 等哪天 camoufox 放开这个上限，把这条删掉。
+      - dependency-name: "playwright"
+
     # 两个分组 PR + 偶尔几个大版本单开，5 够用（也是默认值，这里写出来是表明这是想过的）。
     open-pull-requests-limit: 5
     commit-message:
