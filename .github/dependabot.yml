@@ -8,6 +8,8 @@
 # 刻意只管 GitHub Actions，不管 Python 依赖：uv.lock 里几百个包，按周开 PR 会把
 # 这个仓库淹掉，而 CI 用的是 `uv sync --frozen`，锁文件本来就该由人决定什么时候动。
 # 需要的话再单独加一条 package-ecosystem: "uv"。
+#
+# 这个文件只驱动版本更新；安全更新要在仓库设置里单独开，见下面 schedule 处的说明。
 
 version: 2
 
@@ -16,8 +18,13 @@ updates:
     # github-actions 生态下 "/" 指的就是 .github/workflows/，不是仓库根目录下的某个清单文件。
     directory: "/"
     schedule:
-      # Action 的发布频率本来就低，按月足够。安全更新不受这里影响，Dependabot
-      # 发现漏洞时会立刻单独开 PR。
+      # Action 的发布频率本来就低，按月足够。
+      #
+      # ⚠️ 注意这里管的只是**版本更新**（跟着上游发新版走）。漏洞驱动的**安全更新**
+      # 是另一个开关，本仓库当前是**关的**（security_and_analysis.dependabot_security_updates
+      # = disabled），所以别指望"有漏洞会立刻单独开 PR"——现在不会。要的话去
+      # Settings → Advanced Security 里把 Dependabot alerts 和 security updates 打开，
+      # 那之后安全更新不受这里的 monthly 间隔约束。
       interval: "monthly"
     groups:
       # 全部合成一个 PR：不分组的话一次大版本潮能开五个，而它们要一起验证才有意义
