@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, final
 
 import pytest
 
 from ipclick.adapters import retry as retry_module
 from ipclick.adapters.base import mark_utf8_charset, normalize_js
-from ipclick.adapters.retry import RetryPolicy, aretry, retry
+from ipclick.adapters.retry import RetryPolicy, aretry, caller_alive_check, caller_gone, retry
 from ipclick.adapters.settings import HARD_MAX_RETRIES, AdapterSettings
 from ipclick.dto.response import Response
-from ipclick.exceptions import AdapterError, ValidationError
+from ipclick.exceptions import AdapterError, TransportError, ValidationError
 from ipclick.trace import get_recorder
 
 from .helpers import FakeAsyncClock, FakeClock
@@ -257,3 +257,45 @@ def test_mark_utf8_charset_rewrites_charset_but_keeps_media_type() -> None:
     # 原来没有 charset / 没有 content-type 的情况
     assert mark_utf8_charset({"content-type": "text/html"}) == {"content-type": "text/html; charset=utf-8"}
     assert mark_utf8_charset({}) == {"content-type": "text/html; charset=utf-8"}
+
+
+def test_retries_stop_once_the_caller_is_gone() -> None:
+    """调用方不再等待时必须放弃剩余重试。
+
+    重试把耗时按尝试次数放大（max_retries 上限 20，配上退避总和最坏能拖到八分钟以上）。
+    调用方的 deadline 早就过了还在对目标站点重投，等于凭空放大请求打到别人身上，
+    而且一直占着线程池不放。
+    """
+    calls: list[int] = []
+    alive = [True]
+
+    @final
+    class _Flaky:
+        adapter_name: str = "test"
+        settings: AdapterSettings = AdapterSettings()
+
+        @retry()
+        def download(self, _url: str, **_kwargs: Any) -> Response:
+            calls.append(1)
+            raise TransportError("boom")
+
+    token = caller_alive_check.set(lambda: alive[0])
+    try:
+        # 调用方还在：按 max_attempts 打满
+        result = _Flaky().download("https://example.com/", max_retries=3, retry_delay=0)
+        assert len(calls) == 4
+        assert result.status_code == -1
+
+        # 调用方走了：第一次失败后就不再重试
+        calls.clear()
+        alive[0] = False
+        result = _Flaky().download("https://example.com/", max_retries=3, retry_delay=0)
+        assert len(calls) == 1
+        assert result.status_code == -1
+    finally:
+        caller_alive_check.reset(token)
+
+
+def test_caller_gone_defaults_to_false_without_a_binding() -> None:
+    """没有绑定判定时（进程内直接用适配器）不得误判成"调用方走了"。"""
+    assert caller_gone() is False

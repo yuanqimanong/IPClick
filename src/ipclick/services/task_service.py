@@ -21,6 +21,7 @@ from ipclick.adapters.registry import (
     get_default_adapter,
     resolve_browser_adapter_name,
 )
+from ipclick.adapters.retry import caller_alive_check
 from ipclick.adapters.settings import HARD_MAX_RETRIES, AdapterSettings
 from ipclick.dto.models import METHOD_MAP, IPClickAdapter
 from ipclick.dto.proto import task_pb2, task_pb2_grpc
@@ -181,7 +182,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         with self.track(request, context) as tr:
             try:
                 adapter = self.prepare(request, context, tr)
-                response = self._execute_download(adapter, request, tr)
+                response = self._execute_download(adapter, request, tr, context)
                 grpc_response = self.accept(request, response, tr)
             except Exception as e:
                 grpc_response = self._response_for_exception(e, request, tr, context)
@@ -324,13 +325,23 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         return download_kwargs
 
     def _execute_download(
-        self, adapter: DownloaderAdapter, request: task_pb2.ReqTask, tr: RequestTrace | None = None
+        self,
+        adapter: DownloaderAdapter,
+        request: task_pb2.ReqTask,
+        tr: RequestTrace | None = None,
+        context: ServicerContext | None = None,
     ) -> Response:
         waiting_since = time.monotonic()
         with self.host_limiter.acquire(request.url):
             if tr is not None:
                 tr.queued_ms = int((time.monotonic() - waiting_since) * 1000)
-            return adapter.download(request.url, **self._build_download_kwargs(request))
+            # 把"调用方还在不在"带进重试循环：重试会把耗时按尝试次数放大，
+            # deadline 早过了还在对目标站点重投等于凭空放大请求、还占着线程。
+            token = caller_alive_check.set(None if context is None else lambda: caller_still_waiting(context))
+            try:
+                return adapter.download(request.url, **self._build_download_kwargs(request))
+            finally:
+                caller_alive_check.reset(token)
 
     def _limited_stream(self, url: str, stream: Iterator[StreamEvent]) -> Iterator[StreamEvent]:
         """在整个响应流生命周期内持有 host 限流槽并保证关闭流。"""

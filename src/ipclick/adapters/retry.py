@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass
 import functools
 import math
@@ -23,6 +24,12 @@ DEFAULT_MAX_RETRIES = 3
 DEFAULT_BASE_DELAY = 1.0
 
 JITTER_RANGE = (0.8, 1.2)
+
+# 由服务层在执行下载前绑定：返回 True 表示调用方还在等这个响应。
+# 用 ContextVar 而不是给适配器加属性——适配器实例是进程内共享的，
+# 而"调用方还在不在"是每个请求各自的事。
+caller_alive_check: ContextVar[Callable[[], bool] | None] = ContextVar("caller_alive_check", default=None)
+
 
 _UNKNOWN_URL = "unknown"
 
@@ -140,6 +147,9 @@ class RetryLoop:
         """处理可重试状态码，返回等待时间或 ``None``。"""
         if attempt >= self.policy.max_retries or not self.policy.retries_status(result.status_code):
             return None
+        if caller_gone():
+            log.info(f"调用方已不再等待 {self.url}，放弃剩余重试")
+            return None
         delay = self.policy.delay_for(attempt)
         get_recorder().record_retry(self.adapter_name, "status_code")
         log.warning(
@@ -153,6 +163,12 @@ class RetryLoop:
         self.last_error = error
         if attempt >= self.policy.max_retries:
             return None
+        if caller_gone():
+            # 重试把耗时按尝试次数放大：max_retries 上限是 20，配上退避总和最坏能拖到
+            # 八分钟以上。调用方的 deadline 早就过了还在对目标站点重投，纯粹是把请求
+            # 放大打到别人身上，而且占着线程池不放。
+            log.info(f"调用方已不再等待 {self.url}，放弃剩余重试（最后错误：{error}）")
+            return None
         delay = self.policy.delay_for(attempt)
         get_recorder().record_retry(self.adapter_name, "exception")
         log.warning(
@@ -165,6 +181,18 @@ class RetryLoop:
         """把最后异常转换成稳定的错误响应。"""
         error = self.last_error or Exception("Max retries exceeded")
         return Response.error_response(self.url, error, attempts=attempt + 1)
+
+
+def caller_gone() -> bool:
+    """当前请求的调用方是否已经不再等待。"""
+    predicate = caller_alive_check.get()
+    if predicate is None:
+        return False
+    try:
+        return not predicate()
+    except Exception:
+        # 判定本身出错不该影响重试决策，按"还在等"处理。
+        return False
 
 
 def _loop_for(host: object, args: tuple[Any, ...], kwargs: dict[str, Any]) -> RetryLoop:

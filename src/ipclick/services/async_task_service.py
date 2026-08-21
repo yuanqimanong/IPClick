@@ -12,12 +12,13 @@ from grpc import ServicerContext
 from typing_extensions import override
 
 from ipclick.adapters.base import DownloaderAdapter, StreamEvent
+from ipclick.adapters.retry import caller_alive_check
 from ipclick.async_limiter import AsyncHostLimiter, build_async_limiter
 from ipclick.dto.proto import task_pb2
 from ipclick.dto.response import Response
 from ipclick.protocols import ShardableLimiter
 from ipclick.services.detached import DetachedContext
-from ipclick.services.task_service import TaskService, batch_metadata
+from ipclick.services.task_service import TaskService, batch_metadata, caller_still_waiting
 from ipclick.trace import RequestTrace
 from ipclick.utils.config_util import Settings, section
 
@@ -66,7 +67,7 @@ class AsyncTaskService(TaskService):
         with self.track(request, context) as tr:
             try:
                 adapter = self.prepare(request, context, tr)
-                response = await self._aexecute_download(adapter, request, tr)
+                response = await self._aexecute_download(adapter, request, tr, context)
                 grpc_response = self.accept(request, response, tr)
             except Exception as e:
                 grpc_response = self._response_for_exception(e, request, tr, context)
@@ -74,13 +75,22 @@ class AsyncTaskService(TaskService):
         return self.stamp_elapsed(grpc_response, started, request)
 
     async def _aexecute_download(
-        self, adapter: DownloaderAdapter, request: task_pb2.ReqTask, tr: RequestTrace | None = None
+        self,
+        adapter: DownloaderAdapter,
+        request: task_pb2.ReqTask,
+        tr: RequestTrace | None = None,
+        context: ServicerContext | None = None,
     ) -> Response:
         waiting_since = time.monotonic()
         async with self.async_limiter.acquire(request.url):
             if tr is not None:
                 tr.queued_ms = int((time.monotonic() - waiting_since) * 1000)
-            return await adapter.adownload(request.url, **self._build_download_kwargs(request))
+            # 与同步版同理：deadline 过了就别再重投（ContextVar 在同一个 task 内传播）。
+            token = caller_alive_check.set(None if context is None else lambda: caller_still_waiting(context))
+            try:
+                return await adapter.adownload(request.url, **self._build_download_kwargs(request))
+            finally:
+                caller_alive_check.reset(token)
 
     @override
     def _limited_stream(self, url: str, stream: Iterator[StreamEvent]) -> Iterator[StreamEvent]:
