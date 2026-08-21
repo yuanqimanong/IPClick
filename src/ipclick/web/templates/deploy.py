@@ -73,7 +73,7 @@ def render_deploy(
         username,
         csrf,
         "/config",
-        title=f"部署 {node_id}",
+        title=f"部署 {esc(node_id)}",
         subtitle=f"复制到 <code>{esc(plan.get('address', ''))}</code> 那台机器上",
         actions=actions,
     )
