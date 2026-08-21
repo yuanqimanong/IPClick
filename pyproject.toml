@@ -85,7 +85,7 @@ proto = [
     "grpcio-tools>=1.83.0,<2.0.0",
 ]
 release = [
-    "twine>=6.2.0,<7.0.0",
+    "twine>=6.2.0,<8.0.0",
 ]
 dev = [
     { include-group = "test" },
