@@ -5,9 +5,9 @@
 # 会自己跟着走；setup-uv 不会——没人管就一直停在这个版本上，直到某天它连
 # 新版 uv 都装不了才被发现。让 Dependabot 替我们盯着。
 #
-# 刻意只管 GitHub Actions，不管 Python 依赖：uv.lock 里几百个包，按周开 PR 会把
-# 这个仓库淹掉，而 CI 用的是 `uv sync --frozen`，锁文件本来就该由人决定什么时候动。
-# 需要的话再单独加一条 package-ecosystem: "uv"。
+# 两条 ecosystem：github-actions 和 uv（Python 依赖，读 uv.lock）。
+# 数量上 uv 那条是大头——uv.lock 里几百个包，所以那边靠分组和按月把 PR 量压下来，
+# 具体取舍见下面各自的注释。
 #
 # 这个文件只驱动版本更新；安全更新要在仓库设置里单独开，见下面 schedule 处的说明。
 
@@ -37,3 +37,42 @@ updates:
     commit-message:
       # 跟仓库现有的提交前缀对齐（见 ac731f3）。
       prefix: "chore(ci)"
+
+  # ---------------------------------------------------------------- #
+  # Python 依赖。uv 是 Dependabot 正式支持的 ecosystem（不需要
+  # enable-beta-ecosystems），它直接改 uv.lock —— 正好对上 CI 里的
+  # `uv sync --frozen`：锁文件不动，CI 就装不到新版。
+  # ---------------------------------------------------------------- #
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      # 分成开发工具和运行时两组，而不是一股脑合成一个 PR。
+      #
+      # 因为这两类坏起来的样子完全不同：ruff 一个小版本带上新的格式规则，
+      # `ruff format --check` 当场就红（23c07ed 那次 CI 连红三次就是这个原因），
+      # 而 grpcio / curl-cffi 出问题是在运行时。混在一个 PR 里，CI 红了还得先
+      # 二分是谁的锅。
+      #
+      # 只收 minor 和 patch：大版本不进组，各自单独开 PR——跨大版本要逐个看
+      # release note，这一整轮 actions 升级就是例子。
+      dev-tooling:
+        dependency-type: "development"
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      runtime:
+        dependency-type: "production"
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    # 两个分组 PR + 偶尔几个大版本单开，5 够用（也是默认值，这里写出来是表明这是想过的）。
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
