@@ -33,6 +33,12 @@ class AsyncForwardingTaskService(AsyncTaskService, ForwardingTaskService):
             self._local_count += 1
             return await AsyncTaskService.Send(self, request, context)
 
+        # 与同步转发器同理：被转发的请求走不到 prepare()，入口节点的 SSRF 准入
+        # 必须在这里显式施加一次，否则它对所有转发流量都不生效。
+        rejected = self._reject_if_url_not_allowed(request, context)
+        if rejected is not None:
+            return rejected
+
         tried: set[str] = set()
         attempts = self.cluster.max_failover + 1
         last_error = ""

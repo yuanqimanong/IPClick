@@ -319,3 +319,48 @@ def test_hot_reload_reattaches_rate_sharding() -> None:
 
     assert server._attach_rate_sharding() is True
     assert limiter.set_cluster_size in pool.callbacks
+
+
+def _forwarding_service(policy_blocks_private: bool) -> Any:
+    """构造一个只装了准入策略与转发开关的转发服务。"""
+    import threading
+
+    from ipclick.trace import get_recorder
+    from ipclick.utils.url_util import URLPolicy
+
+    service: Any = object.__new__(ForwardingTaskService)
+    service.cluster = ClusterConfig.from_config(
+        {"forward": "on", "nodes": [{"id": "n1", "address": "10.0.0.9:9528"}]}
+    )
+    service.url_policy = URLPolicy(block_private_networks=policy_blocks_private)
+    service._recorder = get_recorder()
+    service._local_count = 0
+    service._reload_lock = threading.Lock()
+    service.node_id = "gw"
+    return service
+
+
+def test_entry_node_url_policy_applies_to_forwarded_requests() -> None:
+    """开了服务端转发后，入口节点的 SSRF 准入必须对被转发的请求也生效。
+
+    本地执行时准入在 prepare() 里，但被转发的请求走不到那里——于是"入口开了
+    block_private_networks、工作节点用默认配置"这个常见组合下，整套策略对所有转发
+    流量完全不生效。
+    """
+    service = _forwarding_service(policy_blocks_private=True)
+    request = task_pb2.ReqTask(uuid="u1", url="http://10.0.0.9:8080/admin/dump", method=task_pb2.GET)
+    context = RecordingContext()
+
+    rejected = service._reject_if_url_not_allowed(request, cast(ServicerContext, cast(object, context)))
+
+    assert rejected is not None
+    assert rejected.status_code == -1
+    assert "内网" in rejected.error_message
+
+
+def test_entry_node_lets_allowed_urls_through_to_forwarding() -> None:
+    """策略允许的 URL 不得被这道新增的门禁误伤。"""
+    service = _forwarding_service(policy_blocks_private=False)
+    request = task_pb2.ReqTask(uuid="u2", url="http://10.0.0.9:8080/ok", method=task_pb2.GET)
+
+    assert service._reject_if_url_not_allowed(request, cast(ServicerContext, cast(object, RecordingContext()))) is None

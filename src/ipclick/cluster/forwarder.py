@@ -27,6 +27,7 @@ from ipclick.services.task_service import FORWARD_HEADER, TaskService, is_forwar
 from ipclick.tls import TLSSettings
 from ipclick.utils.config_util import Settings, section
 from ipclick.utils.log_util import log
+from ipclick.utils.url_util import validate_url
 
 
 FORWARD_TIMEOUT_MARGIN = 15.0
@@ -117,6 +118,14 @@ class ForwardingTaskService(TaskService):
         if not self.cluster.forwarding_enabled or is_forwarded(context):
             self._local_count += 1
             return super().Send(request, context)
+
+        # 入口节点的 SSRF 准入必须先过一遍。本地执行时它在 prepare() 里，但被转发的
+        # 请求走不到那里——于是"入口开了 block_private_networks、工作节点用默认配置"
+        # 这个再常见不过的组合下，整套策略对所有被转发的请求完全不生效。
+        # 下游节点自己也会校验，但入口这一层是运维实际配置、也实际以为在起作用的那一层。
+        rejected = self._reject_if_url_not_allowed(request, context)
+        if rejected is not None:
+            return rejected
 
         tried: set[str] = set()
         attempts = self.cluster.max_failover + 1
@@ -250,6 +259,20 @@ class ForwardingTaskService(TaskService):
         summary = "；".join(parts) or "地址已更新"
         log.info(f"集群配置热更新：{summary}，当前 {len(updated.nodes)} 个节点")
         return True, f"已热更新并立即生效：{summary}"
+
+    def _reject_if_url_not_allowed(
+        self, request: task_pb2.ReqTask, context: ServicerContext
+    ) -> task_pb2.TaskResp | None:
+        """在转发之前施加入口节点的 URL 准入；被拒时返回标准错误响应。"""
+        try:
+            validate_url(request.url, self.url_policy)
+        except Exception as e:
+            with self.track(request, context) as tr:
+                tr.forwarded = True
+                response = self._response_for_exception(e, request, tr, context)
+                self.record_outcome(tr, response)
+            return response
+        return None
 
     def _close_channels(self, node_ids: set[str]) -> None:
         """关闭被删除或地址已变化节点的缓存 channel。"""
