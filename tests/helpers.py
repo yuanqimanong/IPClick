@@ -48,6 +48,10 @@ class RecordingContext:
     def is_active(self) -> bool:
         return self._active
 
+    def disconnect(self) -> None:
+        """模拟调用方中途断开（deadline 到了或客户端取消）。"""
+        self._active = False
+
     def invocation_metadata(self) -> tuple[tuple[str, str], ...]:
         return self._metadata
 
