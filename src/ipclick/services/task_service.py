@@ -34,6 +34,7 @@ from ipclick.services.detached import DetachedContext
 from ipclick.services.errors import CallerGone, classify, report
 from ipclick.trace import RequestTrace, TraceRecorder, get_recorder
 from ipclick.utils import json_hook
+from ipclick.utils.coerce import as_int
 from ipclick.utils.config_util import Settings, section
 from ipclick.utils.log_util import log
 from ipclick.utils.url_util import URLPolicy, validate_url
@@ -106,7 +107,16 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         self.node_id: str = str(section(self.config, "CLUSTER").get("self_id", "") or "") or (self._recorder.node_id)
 
         downloader_config = section(self.config, "DOWNLOADER")
-        self._chunk_size: int = int(downloader_config.get("chunk_size", DEFAULT_CHUNK_SIZE) or DEFAULT_CHUNK_SIZE)
+        # 走 as_int 而不是裸 int()：写成非数字会在**构造期**抛 ValueError（服务端起不来，
+        # 报错也不指向这一项），而负数或 0 更糟——流式响应会静默返回 0 字节且 status=200。
+        # as_int 越界即回落默认值，配合下面的告警让人知道自己写错了。
+        configured_chunk = downloader_config.get("chunk_size", DEFAULT_CHUNK_SIZE)
+        self._chunk_size: int = as_int(configured_chunk, DEFAULT_CHUNK_SIZE, minimum=1)
+        if configured_chunk is not None and self._chunk_size != configured_chunk:
+            log.warning(
+                f"[DOWNLOADER].chunk_size={configured_chunk!r} 不是 >= 1 的整数，"
+                f"改用默认值 {DEFAULT_CHUNK_SIZE}"
+            )
         self._batch_concurrency: int = ServerSettings.from_config(section(self.config, "SERVER")).max_workers
         self._batch_executor: ThreadPoolExecutor | None = None
         self._started_at: float = time.monotonic()

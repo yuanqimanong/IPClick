@@ -10,7 +10,7 @@ from typing import Any
 
 from typing_extensions import override
 
-from ipclick.adapters.base import DownloaderAdapter, raise_if_script_error
+from ipclick.adapters.base import DownloaderAdapter, mark_utf8_charset, raise_if_script_error
 from ipclick.adapters.browser_settings import BLOCKABLE_RESOURCES, BrowserSettings
 from ipclick.adapters.retry import retry
 from ipclick.adapters.settings import AdapterSettings
@@ -226,11 +226,22 @@ class DrissionPageAdapter(DownloaderAdapter):
             packet = tab.listen.wait(timeout=max(1.0, page_timeout), raise_err=False)
             tab.listen.stop()
 
-            if not ok and packet is None:
-                raise AdapterError(f"DrissionPage 打开 {url} 失败")
+            # 用 not packet 而不是 packet is None：listen.wait() 超时返回的是 False，
+            # 写成 `packet is None` 这个分支就永远进不来，于是打不开的页面会被当成
+            # 一条 status=0 的"正常响应"返回，调用方看不出请求根本没成功。
+            if not ok and not packet:
+                raise AdapterError(f"DrissionPage 打开 {url} 失败（页面未加载，且未捕获到响应）")
 
-            status = int(getattr(packet.response, "status", 0) or 0) if packet else 0
-            resp_headers = dict(packet.response.headers or {}) if packet else {}
+            # 网络级失败（域名解析不了、端口关闭、证书被拒）时 packet 在、
+            # packet.response 是 None。直接取 .headers 会抛 AttributeError，
+            # 被上层兜成 "'NoneType' object has no attribute ..."，
+            # 把真实的失败原因替换成一句看不懂的内部错误。
+            response = getattr(packet, "response", None) if packet else None
+            if not ok and response is None:
+                raise AdapterError(f"DrissionPage 打开 {url} 失败（未收到响应，多为 DNS / 连接 / 证书问题）")
+
+            status = int(getattr(response, "status", 0) or 0) if response is not None else 0
+            resp_headers = dict(getattr(response, "headers", None) or {}) if response is not None else {}
 
             selector = config.get("wait_for_selector")
             if selector:
@@ -254,6 +265,7 @@ class DrissionPageAdapter(DownloaderAdapter):
             else:
                 text = tab.html
                 body = text.encode("utf-8", errors="replace")
+                mark_utf8_charset(resp_headers)
 
             if script_result is not None:
                 resp_headers["x-ipclick-script-result"] = jsonlib.dumps(script_result, ensure_ascii=False, default=str)

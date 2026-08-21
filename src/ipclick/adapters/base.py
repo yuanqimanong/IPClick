@@ -62,6 +62,24 @@ _PERMANENT_NAV_ERRORS = (
 )
 
 
+def mark_utf8_charset(headers: dict[str, str]) -> dict[str, str]:
+    """把 headers 里的 charset 改写成 utf-8，保留原 media type。
+
+    浏览器适配器交出的是 ``page.content()`` 编码后的 UTF-8 字节，而 headers 是从
+    原响应原样抄来的。原站点声明 ``charset=gb2312`` 时两者就对不上了——客户端
+    ``DownloadResponse.text`` 只按 content-type 里的 charset 解码，于是必然乱码。
+    这里只换 charset 参数、不动 media type：xhtml / xml 页面丢了 media type 会影响下游判断。
+    """
+    for key, value in headers.items():
+        if key.lower() != "content-type":
+            continue
+        stripped = re.sub(r"(?i);\s*charset=[^;]*", "", value).rstrip("; ")
+        headers[key] = f"{stripped}; charset=utf-8" if stripped else "text/html; charset=utf-8"
+        return headers
+    headers["content-type"] = "text/html; charset=utf-8"
+    return headers
+
+
 def raise_if_permanent_navigation_error(error: Exception) -> None:
     """将无需重试的浏览器导航错误转换为参数校验错误。"""
     text = str(error)

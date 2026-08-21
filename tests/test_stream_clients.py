@@ -3,14 +3,23 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Generator, Iterator
 import threading
-from typing import Any, cast
+from typing import Any, cast, final
 
+import grpc
 import pytest
 from typing_extensions import override
 
 from ipclick.aio import _EOF, AsyncStreamedResponse
 from ipclick.dto.proto import task_pb2
-from ipclick.exceptions import ClientClosedError, TransportError
+from ipclick.exceptions import (
+    AdapterError,
+    AuthenticationError,
+    ClientClosedError,
+    TransportError,
+    URLNotAllowedError,
+    ValidationError,
+)
+from ipclick.limiter import HostLimitTimeout
 import ipclick.sdk as sdk_module
 from ipclick.sdk import Downloader, StreamedResponse
 
@@ -259,3 +268,53 @@ def test_client_target_formats_ipv6(host: str, target: str) -> None:
     downloader.host = host
     downloader.port = 8799
     assert downloader.target == target
+
+
+@final
+class _FakeRpcError(grpc.RpcError):
+    def __init__(self, code: grpc.StatusCode, details: str) -> None:
+        super().__init__()
+        self._code = code
+        self._details = details
+
+    @override
+    def code(self) -> grpc.StatusCode:
+        return self._code
+
+    @override
+    def details(self) -> str:
+        return self._details
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (grpc.StatusCode.PERMISSION_DENIED, URLNotAllowedError),
+        (grpc.StatusCode.UNAUTHENTICATED, AuthenticationError),
+        (grpc.StatusCode.INVALID_ARGUMENT, ValidationError),
+        (grpc.StatusCode.FAILED_PRECONDITION, AdapterError),
+        (grpc.StatusCode.RESOURCE_EXHAUSTED, HostLimitTimeout),
+        (grpc.StatusCode.UNAVAILABLE, TransportError),
+        (grpc.StatusCode.INTERNAL, TransportError),
+    ],
+)
+def test_rpc_error_maps_status_to_exception(code: grpc.StatusCode, expected: type[Exception]) -> None:
+    downloader: Any = object.__new__(Downloader)
+    downloader.port = 8799
+    downloader._metadata = ()
+    assert isinstance(downloader._rpc_error(_FakeRpcError(code, "denied")), expected)
+
+
+def test_ssrf_rejection_raises_instead_of_looking_like_a_network_failure() -> None:
+    """服务端 SSRF 拒绝必须抛异常，不能被 request() 吞成 status_code == -1。
+
+    只有 TransportError 会被 request() 转成 -1 的响应；URLNotAllowedError 不是
+    它的子类，所以这条断言同时钉住了"被策略拒绝"与"目标连不上"的可辨识性。
+    """
+    downloader: Any = object.__new__(Downloader)
+    downloader.port = 8799
+    downloader._metadata = ()
+    error = downloader._rpc_error(_FakeRpcError(grpc.StatusCode.PERMISSION_DENIED, "不允许的协议 'file'"))
+    assert isinstance(error, URLNotAllowedError)
+    assert not isinstance(error, TransportError)
+    assert "不允许的协议" in str(error)

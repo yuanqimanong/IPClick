@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from ipclick.adapters import retry as retry_module
-from ipclick.adapters.base import normalize_js
+from ipclick.adapters.base import mark_utf8_charset, normalize_js
 from ipclick.adapters.retry import RetryPolicy, aretry, retry
 from ipclick.adapters.settings import HARD_MAX_RETRIES, AdapterSettings
 from ipclick.dto.response import Response
@@ -236,3 +236,24 @@ def test_policy_backoff_is_capped_and_jittered() -> None:
     assert 8.0 <= policy.delay_for(0) <= 12.0
     assert 20.0 <= policy.delay_for(5) <= 30.0
     assert policy.total_attempts == 4
+
+def test_mark_utf8_charset_rewrites_charset_but_keeps_media_type() -> None:
+    """浏览器适配器把正文重编码成 UTF-8，headers 的 charset 必须跟着改。
+
+    不改的话客户端按原站点声明的 charset（如 gb2312）去解 UTF-8 字节，必然乱码，
+    而且 status 是 200、没有任何报错。
+    """
+    assert mark_utf8_charset({"content-type": "text/html; charset=gb2312"}) == {
+        "content-type": "text/html; charset=utf-8"
+    }
+    # media type 要保住：xhtml/xml 丢了它会影响下游判断
+    assert mark_utf8_charset({"content-type": "application/xhtml+xml; charset=big5"}) == {
+        "content-type": "application/xhtml+xml; charset=utf-8"
+    }
+    # 大小写不敏感，且其他参数保留
+    assert mark_utf8_charset({"Content-Type": "text/html; charset=gb2312; boundary=x"}) == {
+        "Content-Type": "text/html; boundary=x; charset=utf-8"
+    }
+    # 原来没有 charset / 没有 content-type 的情况
+    assert mark_utf8_charset({"content-type": "text/html"}) == {"content-type": "text/html; charset=utf-8"}
+    assert mark_utf8_charset({}) == {"content-type": "text/html; charset=utf-8"}

@@ -19,6 +19,7 @@ from ipclick.exceptions import (
     AuthenticationError,
     ClientClosedError,
     TransportError,
+    URLNotAllowedError,
     ValidationError,
 )
 from ipclick.limiter import HostLimitTimeout
@@ -233,6 +234,13 @@ class ClientBase:
             )
         if code is grpc.StatusCode.INVALID_ARGUMENT:
             return ValidationError(f"请求参数不被服务端接受：{details}")
+        if code is grpc.StatusCode.PERMISSION_DENIED:
+            # 下载路径上 PERMISSION_DENIED 只有一个来源：服务端 SSRF 准入拒绝
+            # （services/errors.py 的 URLNotAllowedError 规则）。不还原成
+            # URLNotAllowedError 的话，它会落到下面的 TransportError，被
+            # request() 吞成 status_code == -1，看起来和"目标站点连不上"一模一样——
+            # 而这两者的排查方向完全相反：一个要改 [SECURITY] 策略，一个要查网络。
+            return URLNotAllowedError(f"URL 被服务端策略拒绝：{details}")
         if code is grpc.StatusCode.FAILED_PRECONDITION:
             return AdapterError(f"服务端无法处理该请求：{details}")
         if code is grpc.StatusCode.RESOURCE_EXHAUSTED:

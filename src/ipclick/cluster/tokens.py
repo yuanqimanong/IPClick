@@ -48,6 +48,16 @@ def self_tokens(self_id: str, explicit: str = "", secret: str = "") -> tuple[str
         tokens.append(explicit.strip())
     if secret and self_id:
         tokens.append(derive_token(secret, self_id))
+    elif secret and not self_id:
+        # 配了共享密钥说明部署方**打算**启用节点间鉴权，但派生令牌需要本节点 id。
+        # 识别不出 id 时这里只能返回空，后果有两种，都很难自己看出来：
+        # 其他节点带着派生令牌打过来会被拒（集群转发全线 UNAUTHENTICATED）；
+        # 而如果 [SECURITY].auth_token 也没配，令牌集合整体为空，
+        # 拦截器按"未配置鉴权"处理——端口对谁都开着。
+        log.warning(
+            f"已配置 {CLUSTER_SECRET_ENV} 但未能识别本节点 id，无法派生内部令牌："
+            f"本节点将不接受任何集群内部令牌。请显式设置 [CLUSTER].self_id"
+        )
     return tuple(dict.fromkeys(tokens))
 
 

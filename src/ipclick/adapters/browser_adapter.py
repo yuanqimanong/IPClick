@@ -14,6 +14,7 @@ from typing_extensions import override
 from ipclick.adapters import browser_engines
 from ipclick.adapters.base import (
     DownloaderAdapter,
+    mark_utf8_charset,
     normalize_js,
     raise_if_permanent_navigation_error,
     raise_if_script_error,
@@ -269,6 +270,7 @@ class _BrowserWorker:
         else:
             text = await page.content()
             body = text.encode("utf-8", errors="replace")
+            mark_utf8_charset(headers)
 
         if script_result is not None:
             headers["x-ipclick-script-result"] = jsonlib.dumps(script_result, ensure_ascii=False, default=str)

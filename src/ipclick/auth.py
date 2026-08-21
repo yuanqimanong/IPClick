@@ -77,10 +77,17 @@ def token_matches(candidate: str | None, valid_tokens: Sequence[str]) -> bool:
     if not candidate:
         return False
 
+    # 先编码成 bytes 再比：hmac.compare_digest 对含非 ASCII 字符的 str 会抛
+    # TypeError，而令牌是人从文档或聊天窗口粘过来的，混进一个全角字符或中文
+    # 完全可能。抛异常的后果是整个端口失效——拦截器把 TypeError 变成 UNKNOWN，
+    # 连带着**正确**的令牌也进不来，而启动日志还显示鉴权已启用。
+    # bytes 之间比较没有这个限制，且长度不同也能安全返回 False。
+    probe = candidate.encode("utf-8", "surrogatepass")
+
     # 不在首个命中处提前退出，使多令牌轮换时的比较路径保持稳定。
     matched = False
     for token in valid_tokens:
-        if hmac.compare_digest(candidate, token):
+        if hmac.compare_digest(probe, token.encode("utf-8", "surrogatepass")):
             matched = True
     return matched
 

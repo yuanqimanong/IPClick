@@ -145,6 +145,13 @@ class CurlCffiAdapter(DownloaderAdapter):
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
             raise ValidationError(f"Unsupported HTTP method: {method}")
+        if files:
+            # gRPC 上没有 files 字段，所以这只可能来自进程内直接调用。
+            # 之前是静默丢掉——请求照样发出，body 是空的，调用方查不出原因。
+            raise ValidationError(
+                "curl_cffi 适配器不支持 files 参数：请自行拼好 multipart 请求体，"
+                "用 data=<bytes> 加上 Content-Type: multipart/form-data; boundary=... 发送"
+            )
 
         request_kwargs = self._build_request_kwargs(
             {
