@@ -34,12 +34,15 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        # 钉精确版本而不是 @v10：setup-uv 从 v8 起不再发布移动的 major/minor 标签
+        # （防 tj-actions 那类供应链攻击），@v10 这个 ref 根本不存在，写了会直接找不到 action。
+        # 升级要手动改这里。actions/* 那几个仍然发移动 major 标签，所以照旧写 @v7 / @v8。
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
 
@@ -146,7 +149,7 @@ jobs:
           print(f"{wheel} 校验通过")
           PY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
@@ -169,7 +172,10 @@ jobs:
     permissions:
       id-token: write # Trusted Publishing 需要，用于取 OIDC token
     steps:
-      - uses: actions/download-artifact@v4
+      # download-artifact v8 起，下载摘要对不上会**直接失败**（v7 及以前只打警告）。
+      # 这正是这条流水线要的：上面那句"被校验的字节和被上传的字节是同一份"，
+      # 靠的就是产物在传递过程中没被动过。别把 digest-mismatch 调回 warn。
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
@@ -188,9 +194,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
