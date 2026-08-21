@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 import threading
@@ -8,6 +9,23 @@ import time
 import pytest
 
 from ipclick.trace import SQLiteSink, TraceReader, TraceRecord, _matches, _status_clause, classify_status
+
+
+_GENEROUS = 30.0
+
+
+def _wait_until(predicate: Callable[[], bool], timeout: float = _GENEROUS) -> bool:
+    """轮询等待条件成立。
+
+    这里刻意不用 time.sleep(常数) 来给并发定序：那是在赌"这一步能在 X 毫秒内跑完"，
+    在负载高的 CI runner 上会随机翻车（本测试就这么红过一次）。等状态而不是等时间。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return predicate()
 
 
 def _record() -> TraceRecord:
@@ -59,21 +77,25 @@ def test_close_delivers_sentinel_when_queue_starts_full(tmp_path: Path, monkeypa
 
     def delayed_run(self: SQLiteSink) -> None:
         worker_started.set()
-        allow_worker.wait(timeout=1.0)
+        # 超时只是兜底，正常路径永远是被测试 set 唤醒的——所以给得宽松些。
+        allow_worker.wait(timeout=_GENEROUS)
         original_run(self)
 
     monkeypatch.setattr(SQLiteSink, "_run", delayed_run)
     sink = SQLiteSink(str(tmp_path / "trace.db"), queue_size=1)
-    assert worker_started.wait(timeout=1.0)
+    assert worker_started.wait(timeout=_GENEROUS)
     sink.submit(_record())
 
-    closer = threading.Thread(target=sink.close, kwargs={"timeout": 1.0})
+    closer = threading.Thread(target=sink.close, kwargs={"timeout": _GENEROUS})
     closer.start()
-    time.sleep(0.05)
+    # 等 close 把 stop 置上：它就在 put_nowait 之前，此刻队列必然还是满的，
+    # 哨兵一定入不了队——正是本用例要覆盖的那条路径。
+    assert _wait_until(sink._stop.is_set)
     allow_worker.set()
-    closer.join(timeout=1.0)
+    closer.join(timeout=_GENEROUS)
 
     assert not closer.is_alive()
+    sink._thread.join(timeout=_GENEROUS)
     assert not sink._thread.is_alive()
     assert sink.written == 1
 
@@ -87,18 +109,19 @@ def test_close_eventually_stops_after_timeout_with_a_full_queue(
 
     def delayed_run(self: SQLiteSink) -> None:
         worker_started.set()
-        allow_worker.wait(timeout=1.0)
+        allow_worker.wait(timeout=_GENEROUS)
         original_run(self)
 
     monkeypatch.setattr(SQLiteSink, "_run", delayed_run)
     sink = SQLiteSink(str(tmp_path / "late-trace.db"), queue_size=1)
-    assert worker_started.wait(timeout=1.0)
+    assert worker_started.wait(timeout=_GENEROUS)
     sink.submit(_record())
 
+    # 这里的 0.01 是被测行为本身（关闭超时），不是给并发定序用的，保持原样。
     sink.close(timeout=0.01)
     assert sink._thread.is_alive()
     allow_worker.set()
-    sink._thread.join(timeout=1.0)
+    sink._thread.join(timeout=_GENEROUS)
 
     assert not sink._thread.is_alive()
     assert sink.written == 1
