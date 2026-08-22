@@ -273,33 +273,26 @@ class AsyncDownloader(ClientBase):
                 call.cancel()
 
     async def get(self, url: str, params: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
-        """发送 GET 请求。"""
         return await self.request(method=HttpMethod.GET, url=url, params=params, **kwargs)
 
     async def post(
         self, url: str, data: Any = None, json: dict[str, Any] | None = None, **kwargs: Any
     ) -> DownloadResponse:
-        """发送 POST 请求。"""
         return await self.request(method=HttpMethod.POST, url=url, data=data, json=json, **kwargs)
 
     async def put(self, url: str, data: Any = None, **kwargs: Any) -> DownloadResponse:
-        """发送 PUT 请求。"""
         return await self.request(method=HttpMethod.PUT, url=url, data=data, **kwargs)
 
     async def patch(self, url: str, data: Any = None, **kwargs: Any) -> DownloadResponse:
-        """发送 PATCH 请求。"""
         return await self.request(method=HttpMethod.PATCH, url=url, data=data, **kwargs)
 
     async def delete(self, url: str, **kwargs: Any) -> DownloadResponse:
-        """发送 DELETE 请求。"""
         return await self.request(method=HttpMethod.DELETE, url=url, **kwargs)
 
     async def head(self, url: str, **kwargs: Any) -> DownloadResponse:
-        """发送 HEAD 请求。"""
         return await self.request(method=HttpMethod.HEAD, url=url, **kwargs)
 
     async def options(self, url: str, **kwargs: Any) -> DownloadResponse:
-        """发送 OPTIONS 请求。"""
         return await self.request(method=HttpMethod.OPTIONS, url=url, **kwargs)
 
 

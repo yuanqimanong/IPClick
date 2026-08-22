@@ -340,7 +340,7 @@ class SettingsPage:
     def _current_forward(self) -> str:
         """读 [CLUSTER].forward 的当前取值，归一成 on/off。
 
-        判定和渲染复选框时用的是同一条（见 ``cluster_context``），否则页面显示的状态
+        判定和渲染复选框时用的是同一条（见 ``_cluster_tab_data``），否则页面显示的状态
         和"算不算改动"会对不上。
         """
         return "on" if str(section(self.ctx.config, "CLUSTER").get("forward", "off")).strip().lower() == "on" else "off"

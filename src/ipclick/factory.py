@@ -127,31 +127,24 @@ class _LazyDownloader:
         return self.client.batch(tasks, timeout=timeout)
 
     def get(self, url: str, params: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
-        """发送 GET 请求。"""
         return self.client.get(url, params=params, **kwargs)
 
     def post(self, url: str, data: Any = None, json: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
-        """发送 POST 请求。"""
         return self.client.post(url, data=data, json=json, **kwargs)
 
     def put(self, url: str, data: Any = None, **kwargs: Any) -> DownloadResponse:
-        """发送 PUT 请求。"""
         return self.client.put(url, data=data, **kwargs)
 
     def patch(self, url: str, data: Any = None, **kwargs: Any) -> DownloadResponse:
-        """发送 PATCH 请求。"""
         return self.client.patch(url, data=data, **kwargs)
 
     def delete(self, url: str, **kwargs: Any) -> DownloadResponse:
-        """发送 DELETE 请求。"""
         return self.client.delete(url, **kwargs)
 
     def head(self, url: str, **kwargs: Any) -> DownloadResponse:
-        """发送 HEAD 请求。"""
         return self.client.head(url, **kwargs)
 
     def options(self, url: str, **kwargs: Any) -> DownloadResponse:
-        """发送 OPTIONS 请求。"""
         return self.client.options(url, **kwargs)
 
     def close(self) -> None:

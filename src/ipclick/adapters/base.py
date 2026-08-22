@@ -288,27 +288,21 @@ class DownloaderAdapter(ABC):
             return self._ua_pool_cache
 
     def get(self, url: str, **kwargs: Any) -> Response:
-        """发送 GET 请求。"""
         return self.download(url, method="GET", **kwargs)
 
     def post(self, url: str, **kwargs: Any) -> Response:
-        """发送 POST 请求。"""
         return self.download(url, method="POST", **kwargs)
 
     def put(self, url: str, **kwargs: Any) -> Response:
-        """发送 PUT 请求。"""
         return self.download(url, method="PUT", **kwargs)
 
     def delete(self, url: str, **kwargs: Any) -> Response:
-        """发送 DELETE 请求。"""
         return self.download(url, method="DELETE", **kwargs)
 
     def head(self, url: str, **kwargs: Any) -> Response:
-        """发送 HEAD 请求。"""
         return self.download(url, method="HEAD", **kwargs)
 
     def options(self, url: str, **kwargs: Any) -> Response:
-        """发送 OPTIONS 请求。"""
         return self.download(url, method="OPTIONS", **kwargs)
 
     def close(self) -> None:
