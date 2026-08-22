@@ -314,7 +314,13 @@ def iter_resumable(
             raise
         except TransportError as e:
             last_error = str(e)
-            if not range_ok or attempts >= max_attempts:
+            # 只有"已经 yield 过字节"才要求服务端支持 Range：那些字节收不回来，续传得靠
+            # 206 才能接上。一个字节都还没产出时重头再来是安全的。
+            #
+            # 原来的判据是 `not range_ok or ...`，而 range_ok 要等第一个响应到手才置位：
+            # 于是首个 client.stream() 就抛 TransportError（连接被拒之类）时，max_attempts
+            # 传多少都只试一次——调用方给的 5 次静默变成 1 次。
+            if (downloaded > 0 and not range_ok) or attempts >= max_attempts:
                 break
             log.warning(f"{url} 流中断（已 {downloaded} 字节），准备续传：{e}")
             time.sleep(_RETRY_BACKOFF * attempts)

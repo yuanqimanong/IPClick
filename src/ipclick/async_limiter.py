@@ -155,8 +155,9 @@ class AsyncHostLimiter:
             return slot
 
     def _sweep_locked(self) -> None:
-        if len(self._slots) < self.settings.max_tracked_hosts:
-            return
+        # 不再按"到了容量上限才扫"提前返回：那样 idle_ttl 在正常负载下永远不生效，
+        # 一个爬过 9000 个 host 的进程会把 9000 个 slot（各带 Semaphore 与 Lock）
+        # 一直留着。同步版（limiter._maybe_sweep_locked）本来就按 TTL 扫。
         cutoff = time.monotonic() - self.settings.idle_ttl
         idle = [(slot.last_used, host) for host, slot in self._slots.items() if slot.active == 0 and slot.waiting == 0]
         stale = [host for last_used, host in idle if last_used < cutoff]

@@ -298,3 +298,68 @@ def test_concurrent_resume_and_restart_on_one_target_cannot_interleave(
     content = target.read_bytes()
     assert content in (b"abcdef", b"BBBBBB"), f"文件被交错写坏：{content!r}"
     assert list(tmp_path.iterdir()) == [target], f"留下了临时文件：{list(tmp_path.iterdir())}"
+
+
+class _RaisingStreamer:
+    """前几次建流直接抛 TransportError，之后交出一条正常的流。"""
+
+    def __init__(self, failures: int, then: FakeResponse) -> None:
+        self.failures: int = failures
+        self.then: FakeResponse = then
+        self.attempts: int = 0
+
+    def stream(self, url: str, **kwargs: Any) -> FakeResponse:
+        _ = (url, kwargs)
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise TransportError("connection refused")
+        return self.then
+
+
+def test_a_failure_before_the_first_response_still_honours_max_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """一个字节都还没产出时，重试次数必须按 max_attempts 走。
+
+    range_ok 要等第一个响应到手才置位，而原来的退出判据是 `not range_ok or ...`：
+    首个 client.stream() 就抛 TransportError（连接被拒、DNS 失败）时，调用方传的
+    max_attempts=5 静默变成只试 1 次。已产出字节才需要服务端支持 Range——那些字节
+    收不回来，得靠 206 接上；还没产出时重头再来是安全的。
+    """
+    monkeypatch.setattr("ipclick.resume.time.sleep", lambda _: None)
+    body = FakeResponse(status_code=200, headers={"Content-Length": "3"}, content_length=3, chunks=[b"abc"])
+    client = _RaisingStreamer(failures=2, then=body)
+
+    chunks = list(iter_resumable(client, "https://example.com/f", max_attempts=5))
+
+    assert b"".join(chunks) == b"abc"
+    assert client.attempts == 3
+
+
+def test_max_attempts_is_still_an_upper_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """放宽退出条件不能变成无限重试。"""
+    monkeypatch.setattr("ipclick.resume.time.sleep", lambda _: None)
+    body = FakeResponse(status_code=200, headers={"Content-Length": "3"}, content_length=3, chunks=[b"abc"])
+    client = _RaisingStreamer(failures=99, then=body)
+
+    with pytest.raises(TransportError, match="在 3 次尝试后仍未读完"):
+        _ = list(iter_resumable(client, "https://example.com/f", max_attempts=3))
+
+    assert client.attempts == 3
+
+
+def test_a_server_without_range_support_is_not_resumed_after_yielding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """已经 yield 过字节、而服务端不支持 Range 时，仍然必须立刻放弃。"""
+    monkeypatch.setattr("ipclick.resume.time.sleep", lambda _: None)
+    no_range = FakeResponse(
+        status_code=200,
+        headers={"Content-Length": "6"},
+        content_length=6,
+        chunks=[b"abc"],
+        error_after_chunks="connection reset",
+    )
+    client = FakeStreamer([no_range])
+
+    with pytest.raises(TransportError):
+        _ = list(iter_resumable(client, "https://example.com/f", max_attempts=5))
+
+    # 只建了一次流：不能拿一个不支持 Range 的服务端反复重试
+    assert len(client.urls) == 1
