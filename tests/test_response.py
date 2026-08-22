@@ -76,3 +76,64 @@ def test_headers_assignment_replaces_the_other_spelling() -> None:
     assert headers.get("Content-Type") == "application/json"
     del headers["CONTENT-TYPE"]
     assert "content-type" not in headers
+
+
+def test_headers_stay_case_insensitive_after_inherited_mutations() -> None:
+    """update / pop / setdefault / |= 都是继承来的，原来会绕过小写索引。
+
+    这个类存在的意义就是"两种拼写都取得到"。而索引只在 __setitem__ / __delitem__ 里
+    维护，于是 h.update({"set-cookie": ...}) 之后 h.get("Set-Cookie") 又变回 None——
+    正是它要防的那个失败。
+    """
+    headers = Headers({"Content-Type": "text/html"})
+    headers.update({"set-cookie": "s=1"})
+
+    assert headers.get("Set-Cookie") == "s=1"
+    assert "SET-COOKIE" in headers
+
+    headers |= {"X-A": "1"}
+    assert headers.get("x-a") == "1"
+
+    assert headers.setdefault("x-a", "ignored") == "1"
+    assert headers.setdefault("X-B", "2") == "2"
+    assert headers.get("x-b") == "2"
+
+
+def test_headers_get_with_a_default_never_raises_after_pop() -> None:
+    """带默认值的 get 永远不该抛。
+
+    继承来的 dict.pop 把键删了却留下索引条目，于是 "content-type" in h 为真、
+    而 h.get("content-type", "X") 抛 KeyError。
+    """
+    headers = Headers({"Content-Type": "text/html"})
+
+    assert headers.pop("content-type") == "text/html"
+    assert "content-type" not in headers
+    assert headers.get("content-type", "fallback") == "fallback"
+
+    headers2 = Headers({"X-A": "1"})
+    headers2.clear()
+    assert headers2.get("x-a", "fallback") == "fallback"
+
+
+def test_headers_copy_keeps_the_type() -> None:
+    """继承 dict.copy 会退化成普通 dict，静默丢掉大小写不敏感。"""
+    copied = Headers({"Content-Type": "text/html"}).copy()
+
+    assert isinstance(copied, Headers)
+    assert copied.get("content-type") == "text/html"
+
+
+def test_one_field_written_in_two_spellings_collapses() -> None:
+    """同一字段的不同拼写不能并存，否则迭代出去会发两遍。"""
+    headers = Headers({"Set-Cookie": "a"})
+    headers["set-cookie"] = "b"
+
+    assert dict(headers) == {"set-cookie": "b"}
+
+
+def test_a_non_mapping_headers_value_still_yields_the_body_as_text() -> None:
+    """兜底分支要给出正文，而不是 b'...' 的 repr。"""
+    response = Response(url="https://example.com", status_code=200, content=b"hello", headers=["not", "a", "mapping"])  # pyright: ignore[reportArgumentType]
+
+    assert response.text == "hello"

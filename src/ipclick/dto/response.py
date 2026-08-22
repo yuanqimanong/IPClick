@@ -17,15 +17,32 @@ class Headers(dict[str, str]):
     niquests 保留原样。用普通 dict 装的话，照 curl_cffi 写好的
     ``headers.get("content-type")`` 换成 niquests 就返回 None——不报错、不告警，
     直接走进错误分支。这里让两种拼写都取得到，同时迭代和打印仍是原始拼写。
+
+    拼写映射是**每次从字典现状算出来的**，不再另存一份小写索引。原来那份索引只在
+    ``__setitem__`` / ``__delitem__`` 里维护，而 dict 的 ``update`` / ``pop`` /
+    ``setdefault`` / ``clear`` / ``|=`` 都是继承来的、绕过它们：
+
+    - ``h.update({"set-cookie": ...})`` 之后 ``h.get("Set-Cookie")`` 仍是 None——
+      正是这个类要防的那个失败又回来了；
+    - ``h.pop("Content-Type")`` 之后索引里还留着它，于是 ``"content-type" in h``
+      为真，而 ``h.get("content-type", "X")`` **抛 KeyError**——带默认值的 get
+      永远不该抛。
+
+    改成派生之后，这些继承方法自动保持一致，不必再逐个补override。头字段只有几十个，
+    线性扫描的代价可以忽略。
     """
 
     def __init__(self, data: Mapping[str, str] | None = None) -> None:
-        """按原始拼写存储，并另建一份小写索引。"""
-        super().__init__(data or {})
-        self._index: dict[str, str] = {k.lower(): k for k in self}
+        """按原始拼写存储；同一字段的多种拼写只保留最后一个。"""
+        super().__init__()
+        self.update(data or {})
 
     def _actual(self, key: str) -> str:
-        return self._index.get(key.lower(), key)
+        """把任意拼写映射到字典里实际在用的那个键。"""
+        if super().__contains__(key):
+            return key
+        lowered = key.lower()
+        return next((existing for existing in self if existing.lower() == lowered), key)
 
     @override
     def __getitem__(self, key: str) -> str:
@@ -33,26 +50,55 @@ class Headers(dict[str, str]):
 
     @override
     def __setitem__(self, key: str, value: str) -> None:
-        existing = self._index.get(key.lower())
-        if existing is not None and existing != key:
-            super().__delitem__(existing)
+        actual = self._actual(key)
+        if actual != key:
+            super().__delitem__(actual)
         super().__setitem__(key, value)
-        self._index[key.lower()] = key
 
     @override
     def __delitem__(self, key: str) -> None:
-        actual = self._actual(key)
-        super().__delitem__(actual)
-        _ = self._index.pop(actual.lower(), None)
+        super().__delitem__(self._actual(key))
 
     @override
     def __contains__(self, key: object) -> bool:
-        return isinstance(key, str) and key.lower() in self._index
+        return isinstance(key, str) and super().__contains__(self._actual(key))
 
     @override
     def get(self, key: str, default: str | None = None) -> str | None:
-        actual = self._index.get(key.lower())
-        return default if actual is None else super().__getitem__(actual)
+        actual = self._actual(key)
+        return super().__getitem__(actual) if super().__contains__(actual) else default
+
+    @override
+    def pop(self, key: str, *args: Any) -> Any:
+        return super().pop(self._actual(key), *args)
+
+    @override
+    def setdefault(self, key: str, default: str = "") -> str:
+        actual = self._actual(key)
+        if super().__contains__(actual):
+            return super().__getitem__(actual)
+        self[key] = default
+        return default
+
+    @override
+    def update(self, *args: Any, **kwargs: str) -> None:
+        """逐项走 __setitem__，让同一字段的不同拼写互相覆盖而不是并存。"""
+        for source in args:
+            items: Any = source.items() if isinstance(source, Mapping) else source
+            for key, value in items:
+                self[str(key)] = value
+        for key, value in kwargs.items():
+            self[key] = value
+
+    @override
+    def copy(self) -> "Headers":
+        """返回同类型副本；继承 dict.copy 会退化成普通 dict、丢掉大小写不敏感。"""
+        return Headers(self)
+
+    @override
+    def __ior__(self, other: Any) -> "Headers":
+        self.update(other)
+        return self
 
 
 def content_type_from_headers(headers: Mapping[str, str] | None) -> str | None:
@@ -102,7 +148,10 @@ class Response:
             try:
                 self.text = decode_content(self.content, self.headers)
             except AttributeError:
-                self.text = str(self.content)
+                # headers 不是映射时 encoding_from_headers 会抛 AttributeError。正文本身
+                # 仍要交出去，按 UTF-8 兜底解码即可——原来是 str(self.content)，那给出的是
+                # "b'...'" 这个 repr（带引号和转义的一整坨），当响应体是错的。
+                self.text = self.content.decode("utf-8", errors="replace")
 
         if self.headers is None:
             self.headers = {}

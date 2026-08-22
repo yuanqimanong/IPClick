@@ -59,3 +59,25 @@ def test_concurrent_initialization_does_not_leave_duplicate_handlers(monkeypatch
     assert all(not thread.is_alive() for thread in threads)
     assert peak_adds == 1
     assert active == set(LogUtil._configurations["race"]["handler_ids"])
+
+
+@pytest.mark.parametrize(
+    "rotation",
+    [
+        {"max_backups": "30 days"},
+        {"max_backups": "abc"},
+        {"max_size": "100MB"},
+        {"max_size": None},
+    ],
+)
+def test_bad_rotation_values_do_not_kill_startup(rotation: dict[str, object]) -> None:
+    """日志配置写错不该让服务起不来。
+
+    这两项原来是裸 int() 和裸 f"{...} MB"：max_backups = "30 days"（loguru 自己认的
+    保留期写法）会抛 ValueError，而调用点一个在 IPClickServer.__init__（启动直接死，
+    报错里还不提是哪个键），一个在 Web 端改日志级别时（500）。仓里其他配置读取一律
+    走 as_int 并告警回落。
+    """
+    LogUtil.init_from_config({"level": "INFO", "rotation": rotation}, debug=False)
+
+    logger.info("仍然可用")
