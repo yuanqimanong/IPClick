@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 import json as jsonlib
-import math
 import threading
 from typing import Any
 
@@ -16,7 +15,14 @@ from ipclick.adapters.base import (
     raise_if_script_error,
     reject_disallowed_urls,
 )
-from ipclick.adapters.browser_settings import BLOCKABLE_RESOURCES, BrowserSettings
+from ipclick.adapters.browser_settings import (
+    BLOCKABLE_RESOURCES,
+    DOCUMENT_HEIGHT_JS,
+    SCROLL_TO_BOTTOM_JS,
+    BrowserSettings,
+    parse_automation_config,
+    wait_for_timeout_ms,
+)
 from ipclick.adapters.retry import retry
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
@@ -47,8 +53,6 @@ def _load_drission() -> tuple[Any, Any]:
 _SUPPORTED_METHODS = frozenset({"GET"})
 
 _SHUTDOWN_TIMEOUT = 30.0
-
-_MAX_WAIT_FOR_TIMEOUT_MS = 60_000
 
 
 class DrissionPageAdapter(DownloaderAdapter):
@@ -114,30 +118,6 @@ class DrissionPageAdapter(DownloaderAdapter):
                 log.info(f"DrissionPage 浏览器已启动：headless={self.browser_settings.headless}")
             return self._browser
 
-    def _parse_automation_config(self, automation_config: str | None) -> dict[str, Any]:
-        if not automation_config:
-            return {}
-        try:
-            parsed = jsonlib.loads(automation_config)
-        except (TypeError, ValueError) as e:
-            raise ValidationError(f"automation_config 不是合法的 JSON: {e}") from e
-        if not isinstance(parsed, dict):
-            raise ValidationError(f"automation_config 必须是 JSON 对象，收到 {type(parsed).__name__}")
-        return parsed
-
-    @staticmethod
-    def _wait_timeout_ms(config: dict[str, Any]) -> int:
-        raw = config.get("wait_for_timeout")
-        if raw is None or raw == "":
-            return 0
-        try:
-            value = float(raw)
-        except (TypeError, ValueError) as e:
-            raise ValidationError(f"automation_config.wait_for_timeout 必须是数字，收到 {raw!r}") from e
-        if not math.isfinite(value):
-            raise ValidationError(f"automation_config.wait_for_timeout 必须是有限数字，收到 {raw!r}")
-        return min(_MAX_WAIT_FOR_TIMEOUT_MS, max(0, int(value)))
-
     @override
     @retry()
     def download(
@@ -177,7 +157,7 @@ class DrissionPageAdapter(DownloaderAdapter):
         if data is not None or json is not None or files is not None:
             raise ValidationError("浏览器渲染不能携带请求体（data / json / files），请改用 HTTP 适配器。")
 
-        config = self._parse_automation_config(automation_config)
+        config = parse_automation_config(automation_config)
         if automation_script and not self.browser_settings.allow_scripts:
             raise ValidationError(
                 "服务端未开启 automation_script（[BROWSER].allow_scripts = false）。"
@@ -298,7 +278,7 @@ class DrissionPageAdapter(DownloaderAdapter):
                 tab.wait.ele_displayed(str(selector), timeout=page_timeout)
             if config.get("scroll_to_bottom"):
                 _scroll_to_bottom(tab)
-            wait_ms = self._wait_timeout_ms(config)
+            wait_ms = wait_for_timeout_ms(config)
             if wait_ms > 0:
                 tab.wait(wait_ms / 1000)
 
@@ -371,7 +351,7 @@ def _blocked_patterns(resources: tuple[str, ...] | list[str]) -> list[str]:
 def _scroll_to_bottom(tab: Any) -> None:
     previous = -1
     for _ in range(20):
-        height = tab.run_js("return document.body ? document.body.scrollHeight : 0")
+        height = tab.run_js(f"return {DOCUMENT_HEIGHT_JS}")
         if height == previous:
             return
         previous = height
@@ -379,7 +359,7 @@ def _scroll_to_bottom(tab: Any) -> None:
         # 少了这层保护会抛 TypeError，被当成用户脚本错误报成 ValidationError。
         # 上一行的高度读取已经带守卫，于是无 body 的文档 height=0 != previous=-1，
         # 每次都会走到这里。
-        tab.run_js("if (document.body) window.scrollTo(0, document.body.scrollHeight);")
+        tab.run_js(SCROLL_TO_BOTTOM_JS)
         tab.wait(0.3)
 
 

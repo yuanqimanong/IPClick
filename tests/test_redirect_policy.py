@@ -540,3 +540,24 @@ def test_drissionpage_skips_the_check_without_a_validator() -> None:
     adapter = _drission_adapter(tab, None)
 
     assert adapter._render("http://attacker.example/", None, None, {}, None, 5.0).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["_hop_sender", "_request_following_policy", "_arequest_following_policy", "_stream_following_policy"],
+)
+def test_both_http_adapters_share_one_hop_following_implementation(method_name: str) -> None:
+    """两个 HTTP 适配器必须用同一份逐跳跟随实现，不能各存一份。
+
+    原来 curl_cffi 与 niquests 各有一份逐字相同的拷贝。那份复制已经付过代价：files 只在
+    同步路径上被拦、connect_timeout 只有 niquests 真的用上，两处都是"改了一边忘了另一边"。
+    这一层压着 SSRF 准入，一旦重新分叉，就会再次出现"某条路径不校验"的缺口。
+    """
+    from ipclick.adapters.curl_cffi_adapter import CurlCffiAdapter
+    from ipclick.adapters.niquests_adapter import NiquestsAdapter
+    from ipclick.adapters.redirects import HopFollowingMixin
+
+    shared = getattr(HopFollowingMixin, method_name)
+    for adapter_cls in (CurlCffiAdapter, NiquestsAdapter):
+        assert method_name not in vars(adapter_cls), f"{adapter_cls.__name__} 又自己实现了 {method_name}"
+        assert getattr(adapter_cls, method_name) is shared

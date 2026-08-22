@@ -1,10 +1,13 @@
 """浏览器渲染配置及基于可用内存的页面并发估算。"""
 
 from dataclasses import dataclass, field
+import json as jsonlib
+import math
 import os
 import sys
 from typing import Any
 
+from ipclick.exceptions import ValidationError
 from ipclick.utils.coerce import as_bool, as_float, as_int, as_optional_text, as_positive_float, as_text, as_text_tuple
 from ipclick.utils.config_util import section
 
@@ -114,13 +117,63 @@ class BrowserSettings:
         )
 
 
+# automation_config 里等待类字段的硬上限。放在这里而不是各适配器里：两个浏览器适配器
+# 原来各自定义了一份同值常量，改一处漏一处。
+MAX_WAIT_FOR_TIMEOUT_MS = 60_000
+
+# 滚到底的页内语句。必须带 document.body 判空：XML / 纯 SVG / text-plain 文档没有 body，
+# 少了它会抛 TypeError，被当成用户脚本错误报成 ValidationError。
+SCROLL_TO_BOTTOM_JS = "if (document.body) window.scrollTo(0, document.body.scrollHeight);"
+
+# 读文档高度的页内语句，同样要判空。
+DOCUMENT_HEIGHT_JS = "document.body ? document.body.scrollHeight : 0"
+
+
+def parse_automation_config(automation_config: str | None) -> dict[str, Any]:
+    """把 automation_config 的 JSON 文本解析成字典；两个浏览器适配器共用。"""
+    if not automation_config:
+        return {}
+    try:
+        parsed = jsonlib.loads(automation_config)
+    except (TypeError, ValueError) as e:
+        raise ValidationError(f"automation_config 不是合法的 JSON: {e}") from e
+    if not isinstance(parsed, dict):
+        raise ValidationError(f"automation_config 必须是 JSON 对象，收到 {type(parsed).__name__}")
+    return parsed
+
+
+def positive_number(config: dict[str, Any], key: str) -> int:
+    """读 automation_config 里的非负整数字段；非数字与非有限值明确报错。"""
+    raw = config.get(key)
+    if raw is None or raw == "":
+        return 0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as e:
+        raise ValidationError(f"automation_config.{key} 必须是数字，收到 {raw!r}") from e
+    if not math.isfinite(value):
+        raise ValidationError(f"automation_config.{key} 必须是有限数字，收到 {raw!r}")
+    return max(0, int(value))
+
+
+def wait_for_timeout_ms(config: dict[str, Any]) -> int:
+    """读 wait_for_timeout 并钳到上限；两个浏览器适配器共用同一口径。"""
+    return min(MAX_WAIT_FOR_TIMEOUT_MS, positive_number(config, "wait_for_timeout"))
+
+
 __all__ = [
     "BLOCKABLE_RESOURCES",
     "BROWSER_KINDS",
+    "DOCUMENT_HEIGHT_JS",
+    "MAX_WAIT_FOR_TIMEOUT_MS",
+    "SCROLL_TO_BOTTOM_JS",
     "WAIT_UNTIL_CHOICES",
     "BrowserSettings",
     "describe_max_pages",
+    "parse_automation_config",
+    "positive_number",
     "resolve_max_pages",
+    "wait_for_timeout_ms",
 ]
 
 

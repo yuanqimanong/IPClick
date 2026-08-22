@@ -8,7 +8,7 @@ from typing import Any
 from typing_extensions import override
 
 from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader
-from ipclick.adapters.redirects import afollow_with_policy, follow_with_policy
+from ipclick.adapters.redirects import HopFollowingMixin
 from ipclick.adapters.retry import aretry, retry
 from ipclick.adapters.sessions import AsyncSessionCache, SessionCache, reset_cookies
 from ipclick.adapters.settings import AdapterSettings
@@ -55,7 +55,7 @@ _PASSTHROUGH_KWARGS = frozenset({"auth", "cert", "hooks"})
 SessionKey = tuple[str | None, bool]
 
 
-class NiquestsAdapter(DownloaderAdapter):
+class NiquestsAdapter(HopFollowingMixin, DownloaderAdapter):
     """按代理和 TLS 校验设置复用 niquests 连接池。"""
 
     adapter_name: str = "niquests"
@@ -126,88 +126,6 @@ class NiquestsAdapter(DownloaderAdapter):
             if key in extra:
                 built[key] = extra[key]
         return {k: v for k, v in built.items() if v is not None}
-
-    def _request_following_policy(
-        self,
-        session: Any,
-        method: str,
-        url: str,
-        request_kwargs: dict[str, Any],
-        allow_redirects: bool,
-    ) -> Any:
-        """发一次请求；装了 url_validator 时逐跳跟随重定向并逐跳校验。
-
-        理由同 curl_cffi 适配器：SSRF 准入只校验入口 URL，让底层库自行跟随重定向的话，
-        一次 302 就能跳到云元数据或内网地址而完全绕过 [SECURITY] 策略。
-        """
-        validator = self.url_validator
-        if validator is None or not allow_redirects:
-            return session.request(method, url, **request_kwargs)
-
-        prepare, saved_body = self._hop_sender(request_kwargs)
-
-        def send(hop_url: str, hop_method: str, body: Any) -> Any:
-            return session.request(hop_method, hop_url, **prepare(body))
-
-        return follow_with_policy(send, url, method, saved_body, validator)
-
-    def _hop_sender(self, request_kwargs: dict[str, Any], *, stream: bool = False) -> tuple[Any, Any]:
-        """构造逐跳请求所需的 kwargs 与初始请求体快照（理由同 curl_cffi 适配器）。"""
-        hop_kwargs = dict(request_kwargs)
-        hop_kwargs["allow_redirects"] = False
-        if stream:
-            hop_kwargs["stream"] = True
-        body_keys = ("data", "json", "files")
-        saved_body = {key: hop_kwargs.get(key) for key in body_keys}
-
-        def prepare(body: Any) -> dict[str, Any]:
-            kw = dict(hop_kwargs)
-            if body is None:
-                for key in body_keys:
-                    _ = kw.pop(key, None)
-            return kw
-
-        return prepare, saved_body
-
-    async def _arequest_following_policy(
-        self,
-        session: Any,
-        method: str,
-        url: str,
-        request_kwargs: dict[str, Any],
-        allow_redirects: bool,
-    ) -> Any:
-        """异步版的逐跳跟随；原来这条路完全不过准入（见 curl_cffi 适配器同名方法）。"""
-        validator = self.url_validator
-        if validator is None or not allow_redirects:
-            return await session.request(method, url, **request_kwargs)
-
-        prepare, saved_body = self._hop_sender(request_kwargs)
-
-        async def send(hop_url: str, hop_method: str, body: Any) -> Any:
-            return await session.request(hop_method, hop_url, **prepare(body))
-
-        return await afollow_with_policy(send, url, method, saved_body, validator)
-
-    def _stream_following_policy(
-        self,
-        session: Any,
-        method: str,
-        url: str,
-        request_kwargs: dict[str, Any],
-        allow_redirects: bool,
-    ) -> Any:
-        """流式版的逐跳跟随，返回最后一跳那条流（见 curl_cffi 适配器同名方法）。"""
-        validator = self.url_validator
-        if validator is None or not allow_redirects:
-            return session.request(method, url, stream=True, **request_kwargs)
-
-        prepare, saved_body = self._hop_sender(request_kwargs, stream=True)
-
-        def send(hop_url: str, hop_method: str, body: Any) -> Any:
-            return session.request(hop_method, hop_url, **prepare(body))
-
-        return follow_with_policy(send, url, method, saved_body, validator)
 
     @override
     @retry()
