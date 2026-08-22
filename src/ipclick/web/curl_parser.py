@@ -259,12 +259,17 @@ def _split_flag(token: str) -> tuple[str, str, bool]:
     """把一个参数拆成（参数名，贴在后面的值，值是否给出）。
 
     三种写法都要认：``--flag=value``、``-Xvalue``（短参数贴值）、以及只有参数名。
+
+    短参数贴值必须先判：``-H'Cookie: sid=abc'`` 里的 ``=`` 属于值，先按 ``=`` 拆会得到
+    一个并不存在的参数名 ``-HCookie: sid``，请求头随之整条丢掉。同理 ``-d'a=1&b=2'``
+    会连请求体带方法一起丢。``=`` 拆分只对长参数成立。
     """
-    flag, sep, inline = token.partition("=")
-    if sep:
-        return flag, inline, True
     if len(token) > 2 and not token.startswith("--") and token[:2] in _SHORT_VALUE_FLAGS:
         return token[:2], token[2:], True
+    if token.startswith("--"):
+        flag, sep, inline = token.partition("=")
+        if sep:
+            return flag, inline, True
     return token, "", False
 
 
@@ -282,13 +287,19 @@ def _decode_ansi_c(text: str) -> str:
 
     def replace(match: re.Match[str]) -> str:
         raw = match.group(1)
+        # 先取 UTF-8 字节再走 unicode_escape：DevTools 输出的 \xNN 字节转义与值里原样
+        # 的非 ASCII 字符走同一条路都能还原。此前是按 latin-1 取字节，中文这类字符不在
+        # latin-1 里，被 "replace" 压成了 "?"——$'{"name":"张三"}' 静默变成 {"name":"??"}。
         try:
-            # DevTools 把非 ASCII 输出成 \xNN 的 UTF-8 字节转义，所以先按 latin-1
-            # 还原成字节再按 UTF-8 解码。
-            decoded = raw.encode("latin-1", "backslashreplace").decode("unicode_escape")
-            decoded = decoded.encode("latin-1", "replace").decode("utf-8", "replace")
+            unescaped = raw.encode("utf-8").decode("unicode_escape")
+        except UnicodeDecodeError:
+            return shlex.quote(raw)
+        try:
+            decoded = unescaped.encode("latin-1").decode("utf-8")
         except (UnicodeDecodeError, UnicodeEncodeError):
-            decoded = raw
+            # \uHHHH 这类转义已经直接产出目标字符，不必再过一次字节还原；
+            # 半截 UTF-8 序列也落在这里，保留 unicode_escape 的结果。
+            decoded = unescaped
         return shlex.quote(decoded)
 
     return _ANSI_C_QUOTED.sub(replace, text)
@@ -512,9 +523,13 @@ def _looks_like_url(token: str) -> bool:
         return True
     if not token or token.startswith(("-", "/", "@", ".")) or "." not in token:
         return False
-    if "=" in token or any(ch.isspace() for ch in token):
+    if any(ch.isspace() for ch in token):
         return False
-    host = token.split("/", 1)[0]
+    host = re.split(r"[/?#]", token, maxsplit=1)[0]
+    # "=" 只有出现在 host 段里才说明这不是网址（user=alice@evil.example）。此前对整个
+    # token 判，于是 example.com/api?q=1 这种 curl 能接受的写法被判成"没找到网址"。
+    if "=" in host:
+        return False
     if host.count(":") > 1:  # --resolve 的 host:port:addr 形式
         return False
     last_label = host.split(":", 1)[0].rsplit(".", 1)[-1].lower()

@@ -279,7 +279,10 @@ class WebServer:
                     body = pages.config_page(
                         session.username,
                         session.csrf_token,
-                        generated_token=query.get("g", ""),
+                        # 一次性凭据取一次就没了，所以不在 HEAD 上兑付：预取器、链接
+                        # 检查器、反向代理都可能先 HEAD 一遍生成后跳转的目标地址，那会
+                        # 把值烧掉，管理员随后用浏览器打开只剩一个不带凭据的页面。
+                        generated_token="" if self._head_only else query.get("g", ""),
                         tab=query.get("tab", "basic"),
                     )
                     return self._send(HTTPStatus.OK, body.encode())

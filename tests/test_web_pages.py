@@ -227,6 +227,31 @@ def test_saving_nothing_is_refused(pages: WebPages) -> None:
     assert "没有可保存的改动" in html
 
 
+def test_saving_the_cluster_tab_untouched_is_refused(pages: WebPages) -> None:
+    """集群页什么都不动直接按保存，不该报成一项改动。
+
+    ``CLUSTER.forward`` 原来是绕过"只报真正变了的项"那一层无条件写进 updates 的，
+    于是这一页每次保存都报"已写回（1 项）"外加"这些项要重启 ipclick 才生效"。
+    那句提示打多了就没人看了，而它在真需要重启时是唯一的信号。
+    """
+    html = pages.save_config({"tab": "cluster", "__present__CLUSTER.forward_on": "1"}, USER, CSRF)
+
+    assert "没有可保存的改动" in html
+    # 页面上有一句静态说明也含"要重启"，所以比对的是真正那条提示的措辞。
+    assert "这些项要重启" not in html
+
+
+def test_toggling_cluster_forwarding_is_still_reported(pages: WebPages, config_file: Path) -> None:
+    """真的把转发打开时，改动和重启提示都要照常给出。"""
+    html = pages.save_config(
+        {"tab": "cluster", "__present__CLUSTER.forward_on": "1", "CLUSTER.forward_on": "on"}, USER, CSRF
+    )
+
+    assert "已写回" in html
+    assert "服务端转发" in html
+    assert 'forward = "on"' in config_file.read_text(encoding="utf-8")
+
+
 def test_an_invalid_value_is_rejected_without_writing(pages: WebPages, config_file: Path) -> None:
     before = config_file.read_text(encoding="utf-8")
     html = pages.save_config(

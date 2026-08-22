@@ -231,12 +231,17 @@ class SettingsPage:
         from ipclick.config_loader.writer import save, set_nodes, set_values
 
         tab = form.get("tab", "basic")
-        updates, restart_needed, errors = parse_form(form)
-        updates, restart_needed = self._changed_only(updates, restart_needed)
+        updates, errors = parse_form(form)
+        updates, restart_needed = self._changed_only(updates)
 
         if "__present__CLUSTER.forward_on" in form:
-            updates.setdefault("CLUSTER", {})["forward"] = "on" if "CLUSTER.forward_on" in form else "off"
-            restart_needed.append("服务端转发")
+            desired = "on" if "CLUSTER.forward_on" in form else "off"
+            # 只有真的改了才记成一项改动。此前是无条件写入：在集群页什么都不动直接按
+            # 保存，也会报"已写回（1 项）"外加"这些项要重启"——那句提示被无谓地打多了，
+            # 真需要重启时就没人再看它了。顺带 `if not updates` 在这一页永远不成立。
+            if desired != self._current_forward():
+                updates.setdefault("CLUSTER", {})["forward"] = desired
+                restart_needed.append("服务端转发")
 
         has_node_grid = tab == "cluster" and any(k.startswith("node_address_") for k in form)
         nodes = parse_nodes(form) if has_node_grid else []
@@ -322,9 +327,16 @@ class SettingsPage:
         self.ctx.hot_reload_cluster()
         return self.config_page(username, csrf, tab="cluster")
 
-    def _changed_only(
-        self, updates: dict[str, dict[str, Any]], restart_needed: list[str]
-    ) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    def _current_forward(self) -> str:
+        """读 [CLUSTER].forward 的当前取值，归一成 on/off。
+
+        判定和渲染复选框时用的是同一条（见 ``cluster_context``），否则页面显示的状态
+        和"算不算改动"会对不上。
+        """
+        return "on" if str(section(self.ctx.config, "CLUSTER").get("forward", "off")).strip().lower() == "on" else "off"
+
+    def _changed_only(self, updates: dict[str, dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], list[str]]:
+        """筛掉与现有配置相同的项，并按真正变化的字段算出需要重启的标签。"""
         from ipclick.web.editable import FIELDS
 
         changed: dict[str, dict[str, Any]] = {}
@@ -338,9 +350,6 @@ class SettingsPage:
                 changed.setdefault(name, {})[key] = value
                 if field is not None and field.restart:
                     labels.append(field.label)
-        for label in restart_needed:
-            if label == "服务端转发" and "CLUSTER" in changed and "forward" in changed["CLUSTER"]:
-                labels.append(label)
         return changed, labels
 
     def remove_node(self, form: dict[str, str], username: str, csrf: str) -> str:

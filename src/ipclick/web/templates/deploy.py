@@ -73,7 +73,8 @@ def render_deploy(
         username,
         csrf,
         "/config",
-        title=f"部署 {esc(node_id)}",
+        # title 由 page() 自己转义（subtitle 不转义，所以那一行的 esc 是对的）。
+        title=f"部署 {node_id}",
         subtitle=f"复制到 <code>{esc(plan.get('address', ''))}</code> 那台机器上",
         actions=actions,
     )

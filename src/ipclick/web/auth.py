@@ -173,7 +173,7 @@ class SessionStore:
 
 
 def announce(credentials: WebCredentials, url: str) -> None:
-    """在启动日志中公布管理地址，并仅展示临时生成的密码。"""
+    """在控制台公布管理地址，并仅展示临时生成的密码。"""
     lines = ["", "=" * 62, f"  IPClick Web 管理端: {url}", f"  用户名: {credentials.username}"]
     if credentials.generated:
         lines += [
@@ -186,9 +186,11 @@ def announce(credentials: WebCredentials, url: str) -> None:
     else:
         lines.append("  密码:   （取自环境变量或配置文件，此处不再打印）")
     lines += ["=" * 62, ""]
-    for line in lines:
-        log.info(line) if line.strip() else print()
+    # 只往控制台打这一块。此前每行还各走一次 log.info：[LOG].output 指向文件时，随机
+    # 生成的 Web 密码会连同轮转副本一起长期留在磁盘上，而它只需要被看一眼；顺带也让
+    # 默认的 stdout 输出重复打印了两遍。
     print("\n".join(lines))
+    log.info(f"Web 管理端已启动：{url}（用户名与密码已打印到控制台）")
 
 
 __all__ = [
