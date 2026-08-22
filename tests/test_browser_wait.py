@@ -130,3 +130,27 @@ def test_a_missing_addon_directory_is_not_treated_as_broken(tmp_path: Path, monk
     monkeypatch.setitem(sys.modules, "camoufox.addons", _fake_addons_module(addons, ("UBO",)))
 
     assert browser_engines._broken_camoufox_addons() == ""
+
+
+def test_both_browser_adapters_share_the_automation_config_helpers() -> None:
+    """两个浏览器适配器不能各存一份 automation_config 解析与等待钳位。
+
+    原来 _parse_automation_config 在两边逐字重复，wait_for_timeout 的钳位一边写成
+    _positive_number + 调用点 min()、另一边写成 _wait_timeout_ms，上限常量
+    60_000 也各定义了一份。这份复制已经付过代价：_scroll_to_bottom 的
+    document.body 判空只补在了 playwright 那边，DrissionPage 那边漏了。
+    """
+    from ipclick.adapters.browser_adapter import BrowserAdapter
+    from ipclick.adapters.drission_adapter import DrissionPageAdapter
+
+    for adapter_cls in (BrowserAdapter, DrissionPageAdapter):
+        for gone in ("_parse_automation_config", "_positive_number", "_wait_timeout_ms"):
+            assert gone not in vars(adapter_cls), f"{adapter_cls.__name__} 又自己实现了 {gone}"
+
+
+def test_the_scroll_helpers_guard_document_body() -> None:
+    """两个引擎用的是同一份页内语句，判空不能只补一边。"""
+    from ipclick.adapters.browser_settings import DOCUMENT_HEIGHT_JS, SCROLL_TO_BOTTOM_JS
+
+    assert "document.body ?" in DOCUMENT_HEIGHT_JS
+    assert SCROLL_TO_BOTTOM_JS.startswith("if (document.body)")

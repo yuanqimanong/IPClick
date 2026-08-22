@@ -9,7 +9,9 @@ import time
 
 import pytest
 
-from ipclick.trace import SQLiteSink, TraceReader, TraceRecord, _matches, _status_clause, classify_status
+from ipclick.trace import SQLiteSink, TraceReader, TraceRecord, classify_status
+from ipclick.trace.records import matches
+from ipclick.trace.store import _status_clause
 
 
 _GENEROUS = 30.0
@@ -49,9 +51,9 @@ def test_error_status_alias_matches_all_failed_records() -> None:
     transport_error = replace(success, status_code=-1)
 
     assert _status_clause("error") == _status_clause("failed")
-    assert not _matches(success, "error", "", "")
-    assert _matches(http_error, "error", "", "")
-    assert _matches(transport_error, "error", "", "")
+    assert not matches(success, "error", "", "")
+    assert matches(http_error, "error", "", "")
+    assert matches(transport_error, "error", "", "")
 
 
 @pytest.mark.parametrize(
@@ -67,7 +69,7 @@ def test_informational_status_is_failed_in_memory_and_sql_filters() -> None:
 
     assert not informational.ok
     assert informational.status_class == "failure"
-    assert _matches(informational, "failed", "", "")
+    assert matches(informational, "failed", "", "")
     assert _status_clause("failure") == "status_code < 200"
 
 

@@ -23,8 +23,13 @@ from ipclick.adapters.base import (
 )
 from ipclick.adapters.browser_settings import (
     BLOCKABLE_RESOURCES,
+    DOCUMENT_HEIGHT_JS,
+    MAX_WAIT_FOR_TIMEOUT_MS,
+    SCROLL_TO_BOTTOM_JS,
     WAIT_UNTIL_CHOICES,
     BrowserSettings,
+    parse_automation_config,
+    positive_number,
     resolve_max_pages,
 )
 from ipclick.adapters.retry import retry
@@ -42,8 +47,6 @@ _SHUTDOWN_TIMEOUT = 30.0
 _COLD_START_ALLOWANCE = 60.0
 
 _OVERHEAD_ALLOWANCE = 15.0
-
-_MAX_WAIT_FOR_TIMEOUT_MS = 60_000
 
 NETWORK_IDLE = "networkidle"
 
@@ -292,13 +295,13 @@ class _BrowserWorker:
     async def _scroll_to_bottom(page: Any) -> None:
         previous = -1
         for _ in range(20):
-            height = await page.evaluate("() => document.body ? document.body.scrollHeight : 0")
+            height = await page.evaluate(f"() => {DOCUMENT_HEIGHT_JS}")
             if height == previous:
                 return
             previous = height
             # 与上一行同样要防 document.body 为空：XML / 纯 SVG 文档没有 body，
             # 少了这层保护会抛 TypeError，被当成用户脚本错误报成 ValidationError。
-            await page.evaluate("() => { if (document.body) window.scrollTo(0, document.body.scrollHeight); }")
+            await page.evaluate(f"() => {{ {SCROLL_TO_BOTTOM_JS} }}")
             await page.wait_for_timeout(300)
 
 
@@ -372,30 +375,6 @@ class BrowserAdapter(DownloaderAdapter):
         self.resolved_engine: str = engine
         self._worker: _BrowserWorker = _BrowserWorker(self.browser_settings, engine)
 
-    @staticmethod
-    def _positive_number(config: dict[str, Any], key: str) -> int:
-        raw = config.get(key)
-        if raw is None or raw == "":
-            return 0
-        try:
-            value = float(raw)
-        except (TypeError, ValueError) as e:
-            raise ValidationError(f"automation_config.{key} 必须是数字，收到 {raw!r}") from e
-        if value != value or value == float("inf") or value == float("-inf"):
-            raise ValidationError(f"automation_config.{key} 必须是有限数字，收到 {raw!r}")
-        return max(0, int(value))
-
-    def _parse_automation_config(self, automation_config: str | None) -> dict[str, Any]:
-        if not automation_config:
-            return {}
-        try:
-            parsed = jsonlib.loads(automation_config)
-        except (TypeError, ValueError) as e:
-            raise ValidationError(f"automation_config 不是合法的 JSON: {e}") from e
-        if not isinstance(parsed, dict):
-            raise ValidationError(f"automation_config 必须是 JSON 对象，收到 {type(parsed).__name__}")
-        return parsed
-
     def _budget_for(self, plan: _RenderPlan) -> float:
         budget = plan.page_timeout_ms / 1000
         if plan.wait_for_selector:
@@ -427,7 +406,7 @@ class BrowserAdapter(DownloaderAdapter):
         automation_script: str | None,
     ) -> _RenderPlan:
         s = self.browser_settings
-        config = self._parse_automation_config(automation_config)
+        config = parse_automation_config(automation_config)
 
         wait_until = str(config.get("wait_until", s.wait_until)).strip().lower()
         if wait_until not in WAIT_UNTIL_CHOICES:
@@ -478,7 +457,7 @@ class BrowserAdapter(DownloaderAdapter):
             page_timeout_ms=int(page_timeout * 1000),
             settle_timeout_ms=int(s.settle_timeout * 1000),
             wait_for_selector=(str(config["wait_for_selector"]) if config.get("wait_for_selector") else None),
-            wait_for_timeout_ms=min(_MAX_WAIT_FOR_TIMEOUT_MS, self._positive_number(config, "wait_for_timeout")),
+            wait_for_timeout_ms=min(MAX_WAIT_FOR_TIMEOUT_MS, positive_number(config, "wait_for_timeout")),
             scroll_to_bottom=bool(config.get("scroll_to_bottom")),
             screenshot=bool(config.get("screenshot")),
             script=automation_script or None,

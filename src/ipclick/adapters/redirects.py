@@ -159,4 +159,116 @@ async def afollow_with_policy(
     raise ValidationError(f"重定向处理异常：{url}")
 
 
-__all__ = ["DEFAULT_MAX_REDIRECTS", "REDIRECT_CODES", "afollow_with_policy", "follow_with_policy"]
+class HopFollowingMixin:
+    """把"逐跳跟随重定向并逐跳校验"从各 HTTP 适配器里抽出来共用。
+
+    curl_cffi 与 niquests 原来各有一份逐字相同的实现（``_hop_sender`` 加三个
+    ``*_following_policy``）。能共用是因为差异在更下层就已经收敛：两个库的调用形态都是
+    ``session.request(method, url, **kwargs)``。
+
+    合并的直接理由是那份复制已经付过代价——``files`` 只在同步路径上被拦、
+    ``connect_timeout`` 只有 niquests 那边真的用上，两处都是"改了一边忘了另一边"。
+    这一层压着 SSRF 准入，只写一遍才谈得上"三条路径行为一致"。
+
+    使用方需要提供 ``url_validator``（由 ``DownloaderAdapter`` 声明）。
+    """
+
+    url_validator: Callable[[str], None] | None = None
+
+    @staticmethod
+    def _hop_sender(request_kwargs: dict[str, Any], *, stream: bool = False) -> tuple[Any, Any]:
+        """构造逐跳请求所需的 kwargs 与初始请求体快照。
+
+        每跳都必须关掉底层库自己的跟随（``allow_redirects=False``），否则第一跳就被它
+        一路跟到底，校验器再也插不进去。
+        """
+        hop_kwargs = dict(request_kwargs)
+        hop_kwargs["allow_redirects"] = False
+        if stream:
+            hop_kwargs["stream"] = True
+        body_keys = ("data", "json", "files")
+        saved_body = {key: hop_kwargs.get(key) for key in body_keys}
+
+        def prepare(body: Any) -> dict[str, Any]:
+            kw = dict(hop_kwargs)
+            if body is None:
+                for key in body_keys:
+                    _ = kw.pop(key, None)
+            return kw
+
+        return prepare, saved_body
+
+    def _request_following_policy(
+        self,
+        session: Any,
+        method: str,
+        url: str,
+        request_kwargs: dict[str, Any],
+        allow_redirects: bool,
+    ) -> Any:
+        """同步：装了 url_validator 时自己逐跳跟随，每跳发出之前校验一次。"""
+        validator = self.url_validator
+        if validator is None or not allow_redirects:
+            return session.request(method, url, **request_kwargs)
+
+        prepare, saved_body = self._hop_sender(request_kwargs)
+
+        def send(hop_url: str, hop_method: str, body: Any) -> Any:
+            return session.request(hop_method, hop_url, **prepare(body))
+
+        return follow_with_policy(send, url, method, saved_body, validator)
+
+    async def _arequest_following_policy(
+        self,
+        session: Any,
+        method: str,
+        url: str,
+        request_kwargs: dict[str, Any],
+        allow_redirects: bool,
+    ) -> Any:
+        """协程版。这条路曾经把 allow_redirects 直接交给底层库、一次校验都不做：
+        ``[SERVER].async_mode = true`` 一开，整套逐跳准入就等于不存在。
+        """
+        validator = self.url_validator
+        if validator is None or not allow_redirects:
+            return await session.request(method, url, **request_kwargs)
+
+        prepare, saved_body = self._hop_sender(request_kwargs)
+
+        async def send(hop_url: str, hop_method: str, body: Any) -> Any:
+            return await session.request(hop_method, hop_url, **prepare(body))
+
+        return await afollow_with_policy(send, url, method, saved_body, validator)
+
+    def _stream_following_policy(
+        self,
+        session: Any,
+        method: str,
+        url: str,
+        request_kwargs: dict[str, Any],
+        allow_redirects: bool,
+    ) -> Any:
+        """流式版，返回的是**最后一跳**那条流。
+
+        中间跳也用 ``stream=True`` 发：重定向响应的正文本来就是空的或极小，读完
+        ``Location`` 立刻由 ``_release`` 关掉还连接。这条路同样曾经完全不校验。
+        """
+        validator = self.url_validator
+        if validator is None or not allow_redirects:
+            return session.request(method, url, stream=True, **request_kwargs)
+
+        prepare, saved_body = self._hop_sender(request_kwargs, stream=True)
+
+        def send(hop_url: str, hop_method: str, body: Any) -> Any:
+            return session.request(hop_method, hop_url, **prepare(body))
+
+        return follow_with_policy(send, url, method, saved_body, validator)
+
+
+__all__ = [
+    "DEFAULT_MAX_REDIRECTS",
+    "REDIRECT_CODES",
+    "HopFollowingMixin",
+    "afollow_with_policy",
+    "follow_with_policy",
+]
