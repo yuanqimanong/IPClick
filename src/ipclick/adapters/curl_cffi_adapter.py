@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from typing_extensions import override
 
 from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader
-from ipclick.adapters.redirects import follow_with_policy
+from ipclick.adapters.redirects import afollow_with_policy, follow_with_policy
 from ipclick.adapters.retry import aretry, retry
 from ipclick.adapters.sessions import AsyncSessionCache, SessionCache, reset_cookies
 from ipclick.adapters.settings import AdapterSettings
@@ -116,6 +116,28 @@ class CurlCffiAdapter(DownloaderAdapter):
                 built[key] = extra[key]
         return {k: v for k, v in built.items() if v is not None}
 
+    def _hop_sender(self, request_kwargs: dict[str, Any], *, stream: bool = False) -> tuple[Any, Any]:
+        """构造逐跳请求所需的 kwargs 与初始请求体快照。
+
+        每跳都必须关掉底层库自己的跟随（``allow_redirects=False``），否则第一跳就
+        被它一路跟到底，校验器再也插不进去。
+        """
+        hop_kwargs = dict(request_kwargs)
+        hop_kwargs["allow_redirects"] = False
+        if stream:
+            hop_kwargs["stream"] = True
+        body_keys = ("data", "json", "files")
+        saved_body = {key: hop_kwargs.get(key) for key in body_keys}
+
+        def prepare(body: Any) -> dict[str, Any]:
+            kw = dict(hop_kwargs)
+            if body is None:
+                for key in body_keys:
+                    _ = kw.pop(key, None)
+            return kw
+
+        return prepare, saved_body
+
     def _request_following_policy(
         self,
         session: Any,
@@ -134,17 +156,61 @@ class CurlCffiAdapter(DownloaderAdapter):
         if validator is None or not allow_redirects:
             return session.request(method, url, **request_kwargs)
 
-        hop_kwargs = dict(request_kwargs)
-        hop_kwargs["allow_redirects"] = False
-        body_keys = ("data", "json", "files")
-        saved_body = {key: hop_kwargs.get(key) for key in body_keys}
+        prepare, saved_body = self._hop_sender(request_kwargs)
 
         def send(hop_url: str, hop_method: str, body: Any) -> Any:
-            kw = dict(hop_kwargs)
-            if body is None:
-                for key in body_keys:
-                    _ = kw.pop(key, None)
-            return session.request(hop_method, hop_url, **kw)
+            return session.request(hop_method, hop_url, **prepare(body))
+
+        return follow_with_policy(send, url, method, saved_body, validator)
+
+    async def _arequest_following_policy(
+        self,
+        session: Any,
+        method: str,
+        url: str,
+        request_kwargs: dict[str, Any],
+        allow_redirects: bool,
+    ) -> Any:
+        """异步版的逐跳跟随。
+
+        这条路原来直接把 allow_redirects 交给底层库，跟随时一次校验都不做——
+        实测：装了校验器的适配器走 adownload 时校验器被调用 0 次，一次 302 就把
+        目标取回来了。也就是说 [SERVER].async_mode = true 一开，整套逐跳 SSRF
+        准入就等于不存在。
+        """
+        validator = self.url_validator
+        if validator is None or not allow_redirects:
+            return await session.request(method, url, **request_kwargs)
+
+        prepare, saved_body = self._hop_sender(request_kwargs)
+
+        async def send(hop_url: str, hop_method: str, body: Any) -> Any:
+            return await session.request(hop_method, hop_url, **prepare(body))
+
+        return await afollow_with_policy(send, url, method, saved_body, validator)
+
+    def _stream_following_policy(
+        self,
+        session: Any,
+        method: str,
+        url: str,
+        request_kwargs: dict[str, Any],
+        allow_redirects: bool,
+    ) -> Any:
+        """流式版的逐跳跟随；返回的是**最后一跳**那条流。
+
+        流式这条路同样一次校验都不做（实测校验器调用 0 次）。中间跳也用 stream=True
+        发：重定向响应的正文本来就是空的或极小，读完 Location 立刻由 redirects._release
+        关掉还连接。
+        """
+        validator = self.url_validator
+        if validator is None or not allow_redirects:
+            return session.request(method, url, stream=True, **request_kwargs)
+
+        prepare, saved_body = self._hop_sender(request_kwargs, stream=True)
+
+        def send(hop_url: str, hop_method: str, body: Any) -> Any:
+            return session.request(hop_method, hop_url, **prepare(body))
 
         return follow_with_policy(send, url, method, saved_body, validator)
 
@@ -233,7 +299,9 @@ class CurlCffiAdapter(DownloaderAdapter):
         with self._async_sessions.lease(key) as session:
             reset_cookies(session)
             try:
-                resp = await session.request(method, url, **request_kwargs)
+                resp = await self._arequest_following_policy(
+                    session, method, url, request_kwargs, bool(request_kwargs.get("allow_redirects", True))
+                )
                 return Response(
                     url=str(resp.url),
                     status_code=resp.status_code,
@@ -271,7 +339,9 @@ class CurlCffiAdapter(DownloaderAdapter):
             request_kwargs = self._build_request_kwargs(kwargs)
 
             try:
-                response = session.request(method, url, stream=True, **request_kwargs)
+                response = self._stream_following_policy(
+                    session, method, url, request_kwargs, bool(request_kwargs.get("allow_redirects", True))
+                )
             except Exception as e:
                 log.warning(f"curl_cffi stream failed for {url}: {e}")
                 yield StreamHeader(url=url, status_code=-1, error=str(e))
