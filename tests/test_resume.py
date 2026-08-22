@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+import threading
+from typing import Any, final
 
 import pytest
+from typing_extensions import override
 
 from ipclick.exceptions import TransportError
 from ipclick.resume import download_to_file, iter_resumable
@@ -109,11 +111,18 @@ def test_download_to_file_rejects_invalid_range_before_append(
     monkeypatch.setattr("ipclick.resume.time.sleep", lambda _: None)
     client = FakeStreamer([_initial_partial(), _partial_response(content_range)])
     target = tmp_path / "file.bin"
+    written: list[int] = []
 
     with pytest.raises(TransportError, match="续传"):
-        download_to_file(client, "https://example.com/file", target)
+        _ = download_to_file(
+            client, "https://example.com/file", target, chunk_callback=lambda done, _t: written.append(done)
+        )
 
-    assert target.read_bytes() == b"abc"
+    # 核心不变量：不一致的区间一个字节都没落盘——写入量停在第一次那 3 字节
+    assert written == [3]
+    # 半成品也不再留在最终路径上（改成先写临时文件、完整才原子改名），临时文件已清掉
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
     assert len(client.calls) == 2
 
 
@@ -136,7 +145,156 @@ def test_download_to_file_rejects_changed_validator_before_append(
     client = FakeStreamer([_initial_partial(), _partial_response("bytes 3-5/6", etag='"v2"')])
     target = tmp_path / "file.bin"
 
-    with pytest.raises(TransportError, match="校验器"):
-        download_to_file(client, "https://example.com/file", target)
+    written: list[int] = []
 
-    assert target.read_bytes() == b"abc"
+    with pytest.raises(TransportError, match="校验器"):
+        _ = download_to_file(
+            client, "https://example.com/file", target, chunk_callback=lambda done, _t: written.append(done)
+        )
+
+    # 校验器变了就不能拼接：第二段一个字节都没落盘，最终路径上也没有半成品
+    assert written == [3]
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def _failing_stream(chunks: list[bytes], declared: int) -> FakeResponse:
+    return FakeResponse(
+        status_code=200,
+        headers={"Content-Length": str(declared)},
+        content_length=declared,
+        chunks=chunks,
+        error_after_chunks="connection reset",
+    )
+
+
+def test_a_failed_download_leaves_the_target_untouched(tmp_path: Path) -> None:
+    """下载失败不能在最终路径上留下半成品，也不能把原有的完整文件截断。
+
+    原来直接写最终路径，于是：失败后 target 存在且是截断的（按"文件存在即已下载"
+    判断的消费者读到的是坏数据），而且第一个字节到达之前就把旧文件截断掉了。
+    异常文本里的字节数也和磁盘对不上——downloaded 在不可续传时被重置成 0。
+    """
+    target = tmp_path / "file.bin"
+    _ = target.write_bytes(b"OLD-COMPLETE-CONTENT")
+    client = FakeStreamer([_failing_stream([b"x" * 300], 1000), _failing_stream([b"x" * 300], 1000)])
+
+    with pytest.raises(TransportError) as excinfo:
+        _ = download_to_file(client, "https://example.com/f", target, max_attempts=2)
+
+    assert target.read_bytes() == b"OLD-COMPLETE-CONTENT", "失败却改动了目标文件"
+    assert list(tmp_path.iterdir()) == [target], f"留下了临时文件：{list(tmp_path.iterdir())}"
+    assert "目标文件未改动" in str(excinfo.value)
+
+
+def test_a_non_2xx_response_leaves_no_temp_file_behind(tmp_path: Path) -> None:
+    """4xx/5xx 直接返回，同样不能留下临时文件。"""
+    target = tmp_path / "file.bin"
+    client = FakeStreamer([FakeResponse(status_code=404, headers={}, content_length=0, chunks=[])])
+
+    result = download_to_file(client, "https://example.com/f", target, max_attempts=2)
+
+    assert result.status_code == 404
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_the_target_is_not_touched_until_the_download_completes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """下载期间最终路径不得出现——这是"两个并发下载不会互相截断"的充分条件。
+
+    原来整个过程都直接写最终路径，所以两个并发下载必然互相干扰：A 断线后以 "ab"
+    续传，B 同时以 "wb" 从头重下，双方都返回 total_bytes 正确的成功结果，磁盘上的
+    文件却既不是 A 也不是 B。
+    """
+    monkeypatch.setattr("ipclick.resume.time.sleep", lambda _: None)
+    client = FakeStreamer([_initial_partial(), _partial_response("bytes 3-5/6")])
+    target = tmp_path / "file.bin"
+    existed_during: list[bool] = []
+
+    result = download_to_file(
+        client,
+        "https://example.com/file",
+        target,
+        chunk_callback=lambda _done, _total: existed_during.append(target.exists()),
+    )
+
+    assert existed_during, "chunk_callback 一次都没被调用，这条用例没测到东西"
+    assert not any(existed_during), "下载还没完成，最终路径就已经被写了"
+    assert result.total_bytes == 6
+    assert target.read_bytes() == b"abcdef"
+
+
+def test_concurrent_resume_and_restart_on_one_target_cannot_interleave(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """确定性地把两个下载排成最坏顺序：A 续传的追加写必须发生在 B 整体写完之后。
+
+    时序由事件锁死，不赌调度：A 写完前半 -> B 整体写完 -> A 追加后半。
+    共用最终路径时这必然产出 A、B 交错的 9 字节文件，且两边都报成功。
+    """
+    monkeypatch.setattr("ipclick.resume.time.sleep", lambda _: None)
+    target = tmp_path / "shared.bin"
+    a_has_partial = threading.Event()
+    b_finished = threading.Event()
+    results: dict[str, Any] = {}
+    errors: list[BaseException] = []
+
+    @final
+    class _GatedResume(FakeResponse):
+        """A 的续传响应：等 B 彻底写完之后才吐字节。"""
+
+        @override
+        def __iter__(self) -> Iterator[bytes]:
+            _ = b_finished.wait(timeout=10)
+            yield from super().__iter__()
+
+    def run_a() -> None:
+        gated = _GatedResume(
+            status_code=206,
+            headers={"Content-Range": "bytes 3-5/6", "Content-Length": "3"},
+            content_length=3,
+            chunks=[b"def"],
+        )
+        client = FakeStreamer([_initial_partial(), gated])
+        try:
+            results["a"] = download_to_file(
+                client,
+                "https://example.com/file",
+                target,
+                chunk_callback=lambda _d, _t: a_has_partial.set(),
+            )
+        except BaseException as e:
+            errors.append(e)
+
+    def run_b() -> None:
+        _ = a_has_partial.wait(timeout=10)
+        client = FakeStreamer(
+            [
+                FakeResponse(
+                    status_code=200,
+                    headers={"Content-Length": "6"},
+                    content_length=6,
+                    chunks=[b"BBBBBB"],
+                )
+            ]
+        )
+        try:
+            results["b"] = download_to_file(client, "https://example.com/file", target)
+        except BaseException as e:
+            errors.append(e)
+        finally:
+            b_finished.set()
+
+    threads = [threading.Thread(target=run_a), threading.Thread(target=run_b)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert errors == []
+    assert set(results) == {"a", "b"}
+    content = target.read_bytes()
+    assert content in (b"abcdef", b"BBBBBB"), f"文件被交错写坏：{content!r}"
+    assert list(tmp_path.iterdir()) == [target], f"留下了临时文件：{list(tmp_path.iterdir())}"

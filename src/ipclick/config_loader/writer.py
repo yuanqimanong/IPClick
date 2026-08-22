@@ -19,6 +19,10 @@ from ipclick.utils.log_util import log
 Scalar = str | int | float | bool
 
 
+# TOML 基本字符串里禁止出现的裸控制字符（除了已经有专门转义的 \n \r \t）。
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
 def format_value(value: Any) -> str:
     """把受支持的 Python 标量或序列编码为 TOML 字面量。"""
     if isinstance(value, bool):
@@ -30,7 +34,32 @@ def format_value(value: Any) -> str:
     text = str(value)
     escaped = text.replace("\\", "\\\\").replace('"', '\\"')
     escaped = escaped.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    # 其余控制字符也必须转义。只转 \n \r \t 的话，值里带一个 \x00 / \x1b 就会产出
+    # 非法 TOML，然后被 save() 报成"这是 IPClick 自己的 bug，请提 issue"——而那其实
+    # 只是用户输入里有个控制字符。
+    escaped = _CONTROL_CHARS.sub(lambda m: f"\\u{ord(m.group()):04X}", escaped)
     return f'"{escaped}"'
+
+
+_BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
+
+_SECTION_PATH = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*")
+
+
+def _check_name(name: str, kind: str) -> None:
+    """键名与节名是**原样**拼进输出的，必须在拼之前挡住。
+
+    值有转义（关不掉自己的字符串、也换不了行），键名和节名一个都没有；而 ``save()``
+    只用 ``tomllib.loads`` 兜底，注入出来的东西恰好是**合法** TOML 时它拦不住。实测
+    ``{"SERVER": {'x = 1\n[SECURITY]\nauth_token': 'pwned'}}`` 会把调用方原有的
+    port/host 整体搬进新造出来的 [SECURITY] 表，并且顺利写进文件。
+
+    现在的唯一调用方（Web 配置页）用的是代码里写死的字段白名单，够不到这里；
+    但 ``set_values`` 是导出的公开函数，这道校验是给下一个调用方留的。
+    """
+    pattern = _SECTION_PATH if kind == "节名" else _BARE_KEY
+    if not name or pattern.fullmatch(name) is None:
+        raise ConfigError(f"非法的 TOML {kind} {name!r}：只允许字母、数字、下划线和连字符")
 
 
 def _section_bounds(lines: list[str], section: str) -> tuple[int, int] | None:
@@ -159,13 +188,31 @@ def _split_comment(text: str) -> tuple[str, str]:
     return text, ""
 
 
+def _reject_multiline(section: str, key: str, old_value: str) -> None:
+    """跨行的旧值不能按"一个键一行"改掉。
+
+    原来直接重写那一行，于是数组换行写的时候剩下的 ``"old-b",`` 和 ``]`` 留在原地
+    变成孤儿，产出非法 TOML，再被 save() 报成"IPClick 自己的 bug"。
+    [SECURITY].auth_token 的令牌轮换写法正是多行数组。
+    """
+    try:
+        _ = tomllib.loads(f"probe = {old_value.strip()}")
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(
+            f"改不了 [{section}].{key}：它现在的值是跨行写的（多行数组或多行 inline table），"
+            f"就地替换会破坏文件结构。请手工编辑这个文件（{e}）"
+        ) from e
+
+
 def set_values(text: str, updates: dict[str, dict[str, Any]]) -> tuple[str, list[str]]:
     """定点更新 TOML 文本并返回新文本及可展示的变更摘要。"""
     lines = text.splitlines(keepends=True)
     changes: list[str] = []
 
     for section, entries in updates.items():
+        _check_name(section, "节名")
         for key, value in entries.items():
+            _check_name(key, "键名")
             literal = format_value(value)
             bounds = _section_bounds(lines, section)
 
@@ -174,7 +221,12 @@ def set_values(text: str, updates: dict[str, dict[str, Any]]) -> tuple[str, list
                 if parent and _set_in_inline_table(lines, parent, table, key, literal):
                     changes.append(f"[{parent}].{table}.{key} = {literal}")
                     continue
-                if parent and _section_bounds(lines, parent) is not None:
+                # 只有"子表确实存在、但不是可就地编辑的形式"才拒绝。父节存在而子表
+                # 根本没写过时，补一个 [parent.table] 节就行——原来在这里一律抛异常，
+                # 而且是在循环中途抛的，同一次提交里其它已算好的修改全部跟着丢掉。
+                # Web 配置页有 21 个字段落在点分节里，手写的精简 ipclick.toml 必然踩到。
+                parent_bounds = _section_bounds(lines, parent) if parent else None
+                if parent_bounds is not None and _find_key(lines, parent_bounds[0] + 1, parent_bounds[1], table):
                     raise ConfigError(
                         f"改不了 [{section}].{key}：配置文件里 [{parent}] 下的 {table} "
                         f"不是可以就地编辑的形式。请手工编辑这个文件"
@@ -195,7 +247,8 @@ def set_values(text: str, updates: dict[str, dict[str, Any]]) -> tuple[str, list
 
             line = lines[index]
             prefix, _, remainder = line.partition("=")
-            _old_value, comment = _split_comment(remainder)
+            old_value, comment = _split_comment(remainder)
+            _reject_multiline(section, key, old_value)
             newline = "\n" if line.endswith("\n") else ""
             stripped_comment = comment.rstrip("\r\n")
             suffix = f"  {stripped_comment}" if stripped_comment else ""

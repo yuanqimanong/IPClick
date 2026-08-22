@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import os
 from typing import Any
 
+from ipclick.utils.coerce import as_bool
 from ipclick.utils.log_util import log
 
 
@@ -58,12 +59,21 @@ SUPPRESS_KEY = "allow_secrets_in_config"
 
 
 def _dig(config: Any, path: str) -> dict[str, Any]:
+    """按点分路径取一个配置子表；取不到或类型不对时返回空字典。
+
+    原来对每一层都做 ``dict(node or {})``，于是配置里把一个节写成了标量或数组
+    （``SECURITY = "oops"`` 这种手误，而且是合法 TOML）就会抛出 stdlib 的
+    ``ValueError: dictionary update sequence element #0 has length 1``。
+    这个模块的 warn_secrets_in_config 在服务启动路径上（server.py），于是服务在
+    启动时带着一个看不懂的 ValueError 直接死掉，还不告诉你是哪个节写错了。
+    同一个仓库里 utils.config_util.section 早就是这么容错的，这里跟上。
+    """
     node: Any = config
     for part in path.split("."):
         if not isinstance(node, dict):
-            node = dict(node or {})
-        node = dict(node or {}).get(part) or {}
-    return dict(node or {})
+            return {}
+        node = node.get(part)
+    return node if isinstance(node, dict) else {}
 
 
 def config_value(config: Any, spec: SecretSpec) -> Any:
@@ -118,7 +128,10 @@ def warn_secrets_in_config(config: Any) -> list[SecretSpec]:
     if not found:
         return []
 
-    suppressed = bool(_dig(config, "SECURITY").get(SUPPRESS_KEY, False))
+    # 用 as_bool 而不是 bool()：allow_secrets_in_config = "false"（带引号，TOML 里
+    # 很容易手滑写成字符串）在 bool() 下是 True，于是拿到的是与所求完全相反的结果
+    # ——机密照样进 git，而那条提醒被自己关掉了。
+    suppressed = as_bool(_dig(config, "SECURITY").get(SUPPRESS_KEY), False)
     if suppressed:
         log.debug(f"配置文件中有 {len(found)} 项机密，已按 {SUPPRESS_KEY} 抑制警告")
         return found

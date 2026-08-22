@@ -29,6 +29,9 @@ _BATCH_SIZE = 200
 
 _FLUSH_INTERVAL = 0.5
 
+# 超过这个大小就不做启动时的一次性 VACUUM 转换，避免阻塞启动。
+_VACUUM_CONVERT_LIMIT = 256 * 1024 * 1024
+
 _RETENTION_INTERVAL = 3600.0
 
 WINDOW_CACHE_TTL = 10.0
@@ -602,15 +605,46 @@ class SQLiteSink(TraceReader):
             os.makedirs(parent, exist_ok=True)
         conn = self._connect()
         try:
+            # auto_vacuum 必须在数据库文件被初始化**之前**设置：journal_mode=WAL 已经
+            # 把文件建起来了，之后再设 auto_vacuum 会被静默忽略（读回来是 0），于是
+            # _purge() 里那句 incremental_vacuum 永远是空操作——保留期删了记录，文件
+            # 却永远停在历史最高水位（实测删空 20000 条后文件仍是 21 MB，freelist 5257 页）。
+            _ = conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
             _ = conn.execute("PRAGMA journal_mode=WAL")
             _ = conn.execute("PRAGMA synchronous=NORMAL")
-            _ = conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            self._ensure_incremental_vacuum(conn)
             _ = conn.executescript(_SCHEMA_TABLE)
             self._migrate(conn)
             _ = conn.executescript(_SCHEMA_INDEXES)
             conn.commit()
         finally:
             conn.close()
+
+    @staticmethod
+    def _ensure_incremental_vacuum(conn: sqlite3.Connection) -> None:
+        """已经建好的库如果 auto_vacuum 还是 0，用一次 VACUUM 把它转过来。
+
+        auto_vacuum 只能在库为空时直接设置，对已有数据的库必须跟一次完整 VACUUM
+        才会生效。不转的话 incremental_vacuum 永远回收不到空间。
+        """
+        try:
+            row = conn.execute("PRAGMA auto_vacuum").fetchone()
+            current = int(row[0]) if row else 0
+            if current == 2:
+                return
+            page_count = int((conn.execute("PRAGMA page_count").fetchone() or (0,))[0])
+            page_size = int((conn.execute("PRAGMA page_size").fetchone() or (0,))[0])
+            size = page_count * page_size
+            if size > _VACUUM_CONVERT_LIMIT:
+                log.warning(
+                    f"链路记录库 {size / 1048576:.0f} MB 且未开启 auto_vacuum，跳过一次性转换"
+                    f"（会阻塞启动）。保留期清理不会缩小文件，需要时请手工执行 VACUUM"
+                )
+                return
+            _ = conn.execute("VACUUM")
+            log.info("链路记录库已转为 auto_vacuum=INCREMENTAL，保留期清理从此可回收空间")
+        except sqlite3.Error as e:
+            log.debug(f"转换链路记录库的 auto_vacuum 失败（不影响写入）：{e}")
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -634,7 +668,12 @@ class SQLiteSink(TraceReader):
         should_log = False
         dropped = 0
         with self._lock:
-            if self._closed or self.failed:
+            if self._closed:
+                return
+            if self.failed:
+                # 已经退化到内存模式：这条记录确实被扔了，必须计入 dropped。
+                # 不计的话面板上"丢弃 0 条"和"100% 没落盘"同时成立，看不出问题。
+                self.dropped += 1
                 return
             try:
                 self._queue.put_nowait(record)
@@ -665,8 +704,10 @@ class SQLiteSink(TraceReader):
                     next_retention = now + _RETENTION_INTERVAL
                     self._purge()
         finally:
-            # 即使写线程异常退出，也不能留下误导其他实例的活跃占用标记。
-            _release_database(self._claim_marker)
+            # 只有真正停机（收到哨兵）才摘占用标记。因 failed 提前 break 时进程还活着、
+            # 还在用这个库，摘掉标记会让后启动的实例以为没人占用，多实例告警就此失效。
+            if self._closed:
+                _release_database(self._claim_marker)
 
     def _drain(self) -> list[TraceRecord] | None:
         """等待首条记录后，在时间和条数上限内拼出一个批次。"""
