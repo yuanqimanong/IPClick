@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+import sqlite3
 import threading
 import time
 
@@ -138,3 +139,85 @@ def test_readonly_trace_uri_escapes_fragment_characters(tmp_path: Path) -> None:
 
     assert len(records) == 1
     assert records[0].uuid == "request-1"
+
+
+def test_retention_purge_actually_reclaims_disk_space(tmp_path: Path) -> None:
+    """保留期清理必须真的把文件缩回去。
+
+    ``PRAGMA auto_vacuum=INCREMENTAL`` 原来排在 ``journal_mode=WAL`` **之后**，而 WAL
+    那句已经把库文件初始化了——auto_vacuum 于是被静默忽略（读回来是 0），``_purge()``
+    里那句 ``incremental_vacuum`` 永远是空操作。结果是：保留期到了、记录删掉了，
+    文件却永远停在历史最高水位，``status()["db_bytes"]`` 也永远不降。
+    """
+    path = tmp_path / "trace.db"
+    sink = SQLiteSink(str(path), retention_days=1)
+    try:
+        with sqlite3.connect(str(path)) as probe:
+            assert probe.execute("PRAGMA auto_vacuum").fetchone()[0] == 2, "auto_vacuum 没生效"
+
+        stale = time.time() - 10 * 86400
+        with sqlite3.connect(str(path)) as writer:
+            _ = writer.executemany(
+                "INSERT INTO traces (ts, uuid, adapter, method, url, host, status_code, size, duration_ms)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        stale,
+                        f"u{i}",
+                        "curl_cffi",
+                        "GET",
+                        f"https://example.com/{'x' * 200}/{i}",
+                        "example.com",
+                        200,
+                        0,
+                        1,
+                    )
+                    for i in range(4000)
+                ],
+            )
+            writer.commit()
+
+        # WAL 模式下新数据先落在 -wal 里，量文件大小前必须先 checkpoint
+        def _size() -> int:
+            with sqlite3.connect(str(path)) as conn:
+                _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return path.stat().st_size
+
+        grown = _size()
+        sink._purge()
+        shrunk = _size()
+
+        with sqlite3.connect(str(path)) as probe:
+            assert probe.execute("SELECT count(*) FROM traces").fetchone()[0] == 0
+        assert shrunk < grown, f"清理后文件没缩小：{grown} -> {shrunk}"
+    finally:
+        sink.close()
+
+
+def test_records_dropped_after_falling_back_to_memory_are_counted(tmp_path: Path) -> None:
+    """退化到内存模式之后被扔掉的记录也要计入 dropped。
+
+    原来 failed 之后 submit 直接 return，dropped 一直是 0——面板上"丢弃 0 条"和
+    "100% 没落盘"同时成立，运维看不出任何异常。
+    """
+    sink = SQLiteSink(str(tmp_path / "trace.db"))
+    try:
+        sink.failed = True
+        before = sink.dropped
+        for i in range(5):
+            sink.submit(
+                TraceRecord(
+                    ts=time.time(),
+                    uuid=f"u{i}",
+                    node_id="n1",
+                    adapter="curl_cffi",
+                    method="GET",
+                    url="https://e/",
+                    status_code=200,
+                    duration_ms=1,
+                    size=0,
+                )
+            )
+        assert sink.dropped == before + 5
+    finally:
+        sink.close()

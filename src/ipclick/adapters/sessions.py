@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Generator, Hashable
+from contextlib import contextmanager
+from dataclasses import dataclass
 import threading
 from typing import Any, Generic, TypeVar, final
 
@@ -48,6 +50,24 @@ def reset_cookies(session: Any) -> None:
 
 
 @final
+@dataclass
+class _SessionEntry:
+    """一个缓存 session 及其在途使用者计数。
+
+    LRU 淘汰会 close 掉 session，而在途请求可能正拿着它——流式下载尤其明显：整条流的
+    生命周期里都持着同一个 session，而它的"最近使用时间"停在请求开始那一刻，很容易先
+    变成 LRU。在别人用着的时候关掉，传输就在中途断了，而调用方看到的是一个莫名的
+    连接错误。所以 close 必须推迟到最后一个使用者放手之后——与 cluster 的
+    ``_ChannelEntry`` 同一套口径。
+    """
+
+    session: Any
+    users: int = 0
+    retired: bool = False
+    closed: bool = False
+
+
+@final
 class SessionCache(Generic[_K]):
     """线程安全地按键惰性创建并复用同步 session，带 LRU 上限。
 
@@ -59,41 +79,61 @@ class SessionCache(Generic[_K]):
         """保存诊断标签、session 工厂与缓存上限。"""
         self._label: str = label
         self._factory: Callable[[_K], Any] = factory
-        self._sessions: OrderedDict[_K, Any] = OrderedDict()
+        self._sessions: OrderedDict[_K, _SessionEntry] = OrderedDict()
         self._max_sessions: int = max(1, max_sessions)
         self._lock: threading.Lock = threading.Lock()
         self._evicted: int = 0
 
-    def get(self, key: _K) -> Any:
-        """返回缓存 session，不存在时只创建一次；超过上限按 LRU 淘汰。"""
-        session = self._sessions.get(key)
-        if session is not None:
-            with self._lock:
-                if key in self._sessions:
-                    self._sessions.move_to_end(key)
-            return session
-        with self._lock:
-            # 工厂调用也在锁内，避免相同键产生一个未被关闭的竞态实例。
-            if key not in self._sessions:
-                self._sessions[key] = self._factory(key)
-            self._sessions.move_to_end(key)
-            created = self._sessions[key]
-            stale = self._evict_locked()
-        # 关闭放在锁外：session.close() 会做网络 IO，占着锁会把其他请求全堵住。
-        for victim in stale:
-            try:
-                victim.close()
-            except Exception as e:
-                log.debug(f"淘汰 {self._label} session 时关闭失败: {e}")
-        return created
+    @contextmanager
+    def lease(self, key: _K) -> Generator[Any]:
+        """租借一个 session，并在使用期间阻止它被 LRU 淘汰关闭。
 
-    def _evict_locked(self) -> list[Any]:
-        """把超出上限的最久未用 session 摘出来交给调用方关闭。"""
-        stale: list[Any] = []
+        请求期间持有 session 的调用方必须走这里，不能用 ``get()``：LRU 会在别的线程
+        淘汰并 close 掉正在用的那一个（见 ``_SessionEntry``）。
+        """
+        with self._lock:
+            entry = self._sessions.get(key)
+            if entry is None:
+                # 工厂调用也在锁内，避免相同键产生一个未被关闭的竞态实例。
+                entry = _SessionEntry(self._factory(key))
+                self._sessions[key] = entry
+            self._sessions.move_to_end(key)
+            stale = self._evict_locked()
+            # 计数放在锁块最后一句：它后面再有任何可能抛异常的语句，异常都会从锁块
+            # 逃出而不进 try，finally 不执行、users 永久 +1，这个 session 就再也关不掉。
+            entry.users += 1
+        self._close_all(stale)
+        try:
+            yield entry.session
+        finally:
+            with self._lock:
+                entry.users -= 1
+                victim = entry if entry.retired and entry.users == 0 and not entry.closed else None
+                if victim is not None:
+                    victim.closed = True
+            if victim is not None:
+                self._close_one(victim.session)
+
+    def get(self, key: _K) -> Any:
+        """返回缓存 session，不存在时只创建一次；超过上限按 LRU 淘汰。
+
+        **不保证返回后它还活着**——调用方一放手它就可能被淘汰关闭。请求期间要持有
+        请用 ``lease()``。
+        """
+        with self.lease(key) as session:
+            return session
+
+    def _evict_locked(self) -> list[_SessionEntry]:
+        """摘掉超出上限的最久未用 session；只把没人用的交给调用方关闭。"""
+        stale: list[_SessionEntry] = []
         while len(self._sessions) > self._max_sessions:
             _, victim = self._sessions.popitem(last=False)
-            stale.append(victim)
+            victim.retired = True
             self._evicted += 1
+            # 还有在途使用者的只做标记，由最后一个使用者退出时收尾。
+            if victim.users == 0 and not victim.closed:
+                victim.closed = True
+                stale.append(victim)
         if stale:
             log.debug(
                 f"{self._label} session 缓存超过上限 {self._max_sessions}，"
@@ -101,19 +141,45 @@ class SessionCache(Generic[_K]):
             )
         return stale
 
-    def close(self) -> None:
-        """从缓存移除并尽力关闭全部同步 session。"""
-        for session in self._drain():
-            try:
-                session.close()
-            except Exception as e:
-                log.debug(f"关闭 {self._label} session 失败: {e}")
+    def _close_one(self, session: Any) -> None:
+        try:
+            session.close()
+        except Exception as e:
+            log.debug(f"关闭 {self._label} session 失败: {e}")
 
-    def _drain(self) -> list[Any]:
+    def _close_all(self, entries: list[_SessionEntry]) -> None:
+        # 关闭放在锁外：session.close() 会做网络 IO，占着锁会把其他请求全堵住。
+        for entry in entries:
+            self._close_one(entry.session)
+
+    def close(self) -> None:
+        """从缓存移除并尽力关闭全部同步 session。
+
+        这是停机路径，优雅停机的 grace 期已经过了，所以在途的也一并关掉；打上
+        ``closed`` 标记，避免租借退出时重复 close。
+        """
+        self._close_all(self._drain())
+
+    def _drain(self) -> list[_SessionEntry]:
         with self._lock:
-            sessions = list(self._sessions.values())
+            entries = [entry for entry in self._sessions.values() if not entry.closed]
+            for entry in entries:
+                entry.retired = True
+                entry.closed = True
             self._sessions.clear()
-        return sessions
+        return entries
+
+
+@final
+@dataclass
+class _AsyncSessionEntry:
+    """异步版的缓存条目，额外记住 session 所属的事件循环。"""
+
+    session: Any
+    loop: asyncio.AbstractEventLoop
+    users: int = 0
+    retired: bool = False
+    closed: bool = False
 
 
 @final
@@ -124,54 +190,88 @@ class AsyncSessionCache(Generic[_K]):
         """初始化跨线程可管理的异步 session 表。"""
         self._label: str = label
         self._factory: Callable[[_K], Any] = factory
-        self._sessions: OrderedDict[tuple[int, _K], tuple[asyncio.AbstractEventLoop, Any]] = OrderedDict()
+        self._sessions: OrderedDict[tuple[int, _K], _AsyncSessionEntry] = OrderedDict()
         self._max_sessions: int = max(1, max_sessions)
         self._lock: threading.Lock = threading.Lock()
 
-    def get(self, key: _K) -> Any:
-        """返回当前事件循环专属的缓存 session。"""
+    @contextmanager
+    def lease(self, key: _K) -> Generator[Any]:
+        """租借当前事件循环专属的 session，使用期间不会被淘汰关闭。
+
+        用同步 contextmanager 而不是 ``asynccontextmanager``：整段没有一个 await，
+        换成异步版只会逼调用点多一个 ``async with``，没有任何好处。
+        """
         loop = asyncio.get_running_loop()
         composite = (id(loop), key)
-        existing = self._sessions.get(composite)
-        if existing is not None:
-            with self._lock:
-                if composite in self._sessions:
-                    self._sessions.move_to_end(composite)
-            return existing[1]
         with self._lock:
-            if composite not in self._sessions:
-                self._sessions[composite] = (loop, self._factory(key))
+            entry = self._sessions.get(composite)
+            if entry is None:
+                entry = _AsyncSessionEntry(self._factory(key), loop)
+                self._sessions[composite] = entry
             self._sessions.move_to_end(composite)
-            created = self._sessions[composite][1]
-            stale: list[tuple[asyncio.AbstractEventLoop, Any]] = []
-            # 上限同步版一致：proxy 每请求可变时不淘汰就会无界增长。
-            while len(self._sessions) > self._max_sessions:
-                _, victim = self._sessions.popitem(last=False)
+            stale = self._evict_locked()
+            entry.users += 1  # 与同步版同理，必须是锁块最后一句
+        self._close_all(stale)
+        try:
+            yield entry.session
+        finally:
+            with self._lock:
+                entry.users -= 1
+                victim = entry if entry.retired and entry.users == 0 and not entry.closed else None
+                if victim is not None:
+                    victim.closed = True
+            if victim is not None:
+                self._close_from_other_loop(victim.loop, victim.session)
+
+    def get(self, key: _K) -> Any:
+        """返回当前事件循环专属的缓存 session。
+
+        **不保证返回后它还活着**——请求期间要持有请用 ``lease()``。
+        """
+        with self.lease(key) as session:
+            return session
+
+    def _evict_locked(self) -> list[_AsyncSessionEntry]:
+        """摘掉超出上限的最久未用 session；只把没人用的交给调用方关闭。
+
+        上限与同步版一致：proxy 每请求可变时不淘汰就会无界增长。
+        """
+        stale: list[_AsyncSessionEntry] = []
+        while len(self._sessions) > self._max_sessions:
+            _, victim = self._sessions.popitem(last=False)
+            victim.retired = True
+            if victim.users == 0 and not victim.closed:
+                victim.closed = True
                 stale.append(victim)
-        for victim_loop, session in stale:
-            self._close_from_other_loop(victim_loop, session)
         if stale:
             log.debug(f"{self._label} 协程 session 缓存超过上限 {self._max_sessions}，已淘汰 {len(stale)} 个")
-        return created
+        return stale
+
+    def _close_all(self, entries: list[_AsyncSessionEntry]) -> None:
+        for entry in entries:
+            self._close_from_other_loop(entry.loop, entry.session)
 
     async def aclose(self) -> None:
         """在所属事件循环中关闭全部 session。"""
-        for loop, session in self._drain():
-            if loop is asyncio.get_running_loop():
-                await self._close_one(session)
+        for entry in self._drain():
+            if entry.loop is asyncio.get_running_loop():
+                await self._close_one(entry.session)
             else:
-                self._close_from_other_loop(loop, session)
+                self._close_from_other_loop(entry.loop, entry.session)
 
     def close(self) -> None:
         """从同步上下文调度关闭全部异步 session。"""
-        for loop, session in self._drain():
-            self._close_from_other_loop(loop, session)
+        for entry in self._drain():
+            self._close_from_other_loop(entry.loop, entry.session)
 
-    def _drain(self) -> list[tuple[asyncio.AbstractEventLoop, Any]]:
+    def _drain(self) -> list[_AsyncSessionEntry]:
         with self._lock:
-            sessions = list(self._sessions.values())
+            entries = [entry for entry in self._sessions.values() if not entry.closed]
+            for entry in entries:
+                entry.retired = True
+                entry.closed = True
             self._sessions.clear()
-        return sessions
+        return entries
 
     async def _close_one(self, session: Any) -> None:
         try:

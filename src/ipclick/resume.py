@@ -1,9 +1,12 @@
 """基于 HTTP Range 和校验器的可恢复流式下载工具。"""
 
 from collections.abc import Callable, Iterator
+import contextlib
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 import re
+import tempfile
 import time
 from typing import Any, Protocol
 
@@ -101,6 +104,21 @@ def download_to_file(
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
 
+    # 写到同目录下一个**每次调用独占**的临时文件，完整之后才原子改名到最终路径。
+    # 直接写最终路径有三个问题，都实测过：
+    #   - 两个并发下载互相写坏：A 断线后以 "ab" 续传、B 同时以 "wb" 从头重下，
+    #     双方都返回 total_bytes 正确的成功结果，而磁盘上那个文件既不是 A 也不是 B
+    #     （6 字节的资源产出 9 字节，内容是两边交错的）；
+    #   - 下载失败会在最终路径留下一个截断的半成品，按"文件存在即已下载"判断的
+    #     消费者读到坏数据，而异常里报的字节数还和磁盘对不上；
+    #   - 第一个字节到达之前就把一份原本完整的旧文件截断掉。
+    # mkstemp 用 O_EXCL 建同目录随机文件，天然避开并发同名与 symlink 跟随。
+    temp_fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".part", dir=target.parent)
+    os.close(temp_fd)
+    temp = Path(temp_name)
+    committed = False
+    written_total = 0
+
     downloaded = 0
     expected = -1
     validator: str | None = None
@@ -113,105 +131,119 @@ def download_to_file(
 
     mode = "wb"
 
-    while attempts < max_attempts:
-        attempts += 1
-        requested_offset = downloaded
-        request_kwargs = dict(kwargs)
-        if downloaded > 0 and range_ok:
-            # If-Range 可防止远端内容变化后把不同版本拼进同一个文件。
-            request_headers = dict(request_kwargs.get("headers") or {})
-            request_headers["Range"] = f"bytes={downloaded}-"
-            if validator:
-                request_headers["If-Range"] = validator
-            request_kwargs["headers"] = request_headers
+    try:
+        while attempts < max_attempts:
+            attempts += 1
+            requested_offset = downloaded
+            request_kwargs = dict(kwargs)
+            if downloaded > 0 and range_ok:
+                # If-Range 可防止远端内容变化后把不同版本拼进同一个文件。
+                request_headers = dict(request_kwargs.get("headers") or {})
+                request_headers["Range"] = f"bytes={downloaded}-"
+                if validator:
+                    request_headers["If-Range"] = validator
+                request_kwargs["headers"] = request_headers
 
-        try:
-            with client.stream(url, **request_kwargs) as response:
-                status_code = response.status_code
-                headers = dict(response.headers)
+            try:
+                with client.stream(url, **request_kwargs) as response:
+                    status_code = response.status_code
+                    headers = dict(response.headers)
 
-                if not (200 <= status_code < 300):
-                    return ResumeResult(
-                        path=target,
-                        total_bytes=downloaded,
-                        status_code=status_code,
-                        attempts=attempts,
-                        restarts=restarts,
-                        headers=headers,
-                    )
+                    if not (200 <= status_code < 300):
+                        return ResumeResult(
+                            path=target,
+                            total_bytes=downloaded,
+                            status_code=status_code,
+                            attempts=attempts,
+                            restarts=restarts,
+                            headers=headers,
+                        )
 
-                if downloaded > 0 and status_code != 206:
-                    log.info(f"{url} 无法从 {downloaded} 字节处续传（状态码 {status_code}），从头重下")
+                    if downloaded > 0 and status_code != 206:
+                        log.info(f"{url} 无法从 {downloaded} 字节处续传（状态码 {status_code}），从头重下")
+                        downloaded = 0
+                        restarts += 1
+                        mode = "wb"
+
+                    if requested_offset > 0 and status_code == 206:
+                        # 任何不一致都必须在打开追加文件前拒绝，避免把错误区间写入磁盘。
+                        expected = _validate_content_range(headers, requested_offset, expected, validator)
+
+                    if attempts == 1 or status_code == 200:
+                        validator = _validator(headers)
+                        range_ok = _supports_range(headers)
+                        expected = response.content_length
+                        if not range_ok:
+                            log.debug(f"{url} 未声明 Accept-Ranges，中断后只能整体重下")
+
+                    with temp.open(mode) as handle:
+                        for chunk in response:
+                            _ = handle.write(chunk)
+                            downloaded += len(chunk)
+                            written_total += len(chunk)
+                            if chunk_callback is not None:
+                                chunk_callback(downloaded, expected)
+                    mode = "ab"
+
+                    if response.trailer_error:
+                        last_error = response.trailer_error
+                        raise TransportError(response.trailer_error)
+
+            except _InvalidRangeError:
+                raise
+            except TransportError as e:
+                last_error = str(e)
+                mode = "ab" if downloaded > 0 and range_ok else "wb"
+                if not range_ok and downloaded > 0:
                     downloaded = 0
                     restarts += 1
-                    mode = "wb"
+                if attempts >= max_attempts:
+                    break
+                sleep_for = _RETRY_BACKOFF * attempts
+                log.warning(
+                    f"{url} 下载中断（已 {downloaded} 字节，第 {attempts}/{max_attempts} 次）：{e}，"
+                    f"{sleep_for:.1f} 秒后{'续传' if range_ok and downloaded else '重下'}"
+                )
+                time.sleep(sleep_for)
+                continue
 
-                if requested_offset > 0 and status_code == 206:
-                    # 任何不一致都必须在打开追加文件前拒绝，避免把错误区间写入磁盘。
-                    expected = _validate_content_range(headers, requested_offset, expected, validator)
+            if expected >= 0 and downloaded > expected:
+                raise TransportError(f"响应体超出声明长度：已收到 {downloaded} / {expected} 字节")
+            if expected >= 0 and downloaded < expected:
+                last_error = f"响应体不完整：已收到 {downloaded} / {expected} 字节"
+                if attempts >= max_attempts:
+                    break
+                log.warning(f"{url} {last_error}，准备续传")
+                mode = "ab" if range_ok else "wb"
+                if not range_ok:
+                    downloaded = 0
+                    restarts += 1
+                continue
 
-                if attempts == 1 or status_code == 200:
-                    validator = _validator(headers)
-                    range_ok = _supports_range(headers)
-                    expected = response.content_length
-                    if not range_ok:
-                        log.debug(f"{url} 未声明 Accept-Ranges，中断后只能整体重下")
-
-                with target.open(mode) as handle:
-                    for chunk in response:
-                        handle.write(chunk)
-                        downloaded += len(chunk)
-                        if chunk_callback is not None:
-                            chunk_callback(downloaded, expected)
-                mode = "ab"
-
-                if response.trailer_error:
-                    last_error = response.trailer_error
-                    raise TransportError(response.trailer_error)
-
-        except _InvalidRangeError:
-            raise
-        except TransportError as e:
-            last_error = str(e)
-            mode = "ab" if downloaded > 0 and range_ok else "wb"
-            if not range_ok and downloaded > 0:
-                downloaded = 0
-                restarts += 1
-            if attempts >= max_attempts:
-                break
-            sleep_for = _RETRY_BACKOFF * attempts
-            log.warning(
-                f"{url} 下载中断（已 {downloaded} 字节，第 {attempts}/{max_attempts} 次）：{e}，"
-                f"{sleep_for:.1f} 秒后{'续传' if range_ok and downloaded else '重下'}"
+            # 完整了才落到最终路径；改名是原子的，读到的永远是完整文件。
+            os.replace(temp, target)
+            committed = True
+            return ResumeResult(
+                path=target,
+                total_bytes=downloaded,
+                status_code=status_code,
+                attempts=attempts,
+                restarts=restarts,
+                headers=headers,
             )
-            time.sleep(sleep_for)
-            continue
 
-        if expected >= 0 and downloaded > expected:
-            raise TransportError(f"响应体超出声明长度：已收到 {downloaded} / {expected} 字节")
-        if expected >= 0 and downloaded < expected:
-            last_error = f"响应体不完整：已收到 {downloaded} / {expected} 字节"
-            if attempts >= max_attempts:
-                break
-            log.warning(f"{url} {last_error}，准备续传")
-            mode = "ab" if range_ok else "wb"
-            if not range_ok:
-                downloaded = 0
-                restarts += 1
-            continue
-
-        return ResumeResult(
-            path=target,
-            total_bytes=downloaded,
-            status_code=status_code,
-            attempts=attempts,
-            restarts=restarts,
-            headers=headers,
+        # downloaded 在"不可续传、从头重下"时会被重置成 0，直接拿它报数会和实际写入量
+        # 对不上（实测写了 300 字节却报"已 0 字节"）。累计写入量和重下次数一起报。
+        raise TransportError(
+            f"{url} 在 {attempts} 次尝试后仍未下载完整"
+            f"（累计写入 {written_total} 字节，当前进度 {downloaded} 字节，重下 {restarts} 次）。"
+            f"目标文件未改动。最后一次错误：{last_error}"
         )
-
-    raise TransportError(
-        f"{url} 在 {attempts} 次尝试后仍未下载完整（已 {downloaded} 字节）。最后一次错误：{last_error}"
-    )
+    finally:
+        # 没走到原子改名就说明这次下载没成功——临时文件必须清掉，最终路径保持原样。
+        if not committed:
+            with contextlib.suppress(OSError):
+                temp.unlink()
 
 
 def iter_resumable(

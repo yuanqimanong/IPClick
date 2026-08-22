@@ -43,8 +43,10 @@ def normalize_mode(value: Any, default: str = "auto") -> str:
     if mode in ("false", "no", "0", "off"):
         return "none"
     if mode not in MODES:
-        log.warning(f"未知的压缩模式 {mode!r}，改用 {default}。可选：{'、'.join(sorted(MODES))}")
-        return default
+        # 兜底的 default 自己也得是合法模式，否则会把一个非法值当成"可选项"告诉用户
+        fallback = default if default in MODES else "auto"
+        log.warning(f"未知的压缩模式 {mode!r}，改用 {fallback}。可选：{'、'.join(sorted(MODES))}")
+        return fallback
     return mode
 
 
@@ -77,10 +79,16 @@ def _decodes_as_utf8(sample: bytes, *, truncated: bool) -> bool:
 
 
 def choose(pb_request: Any, mode: str = "auto", threshold: int = DEFAULT_THRESHOLD) -> grpc.Compression | None:
-    """根据模式、消息大小和请求体内容选择单次调用的 gRPC 压缩。"""
-    if mode == "none":
+    """根据模式、消息大小和请求体内容选择单次调用的 gRPC 压缩。
+
+    先过一遍 ``normalize_mode``：直接比字符串的话，本模块自己认可的"关闭"写法
+    （``"None"``、``"NONE"``、``" none"``、``"off"``、``"false"``、``"0"``）会全部
+    落到 auto 分支上悄悄开 gzip——也就是明确关掉压缩的人反而被压了。
+    """
+    resolved = normalize_mode(mode)
+    if resolved == "none":
         return None
-    if mode == "gzip":
+    if resolved == "gzip":
         return grpc.Compression.Gzip
 
     try:

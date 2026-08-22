@@ -37,7 +37,7 @@ IPClick 是一个基于 gRPC 的分布式 HTTP 请求代理。你把请求交给
 - **轻量安装**：`pip install ipclick` 只带 curl_cffi，其余走 extras
 - **浏览器渲染**：起真实浏览器执行 JS，camoufox / patchright / playwright /
   DrissionPage 四选一，默认按平台挑
-- **集群与故障转移**：轮询 / 随机 / 加权均衡、健康探测、自动换节点；服务端转发与
+- **集群与故障转移**：轮询 / 随机 / 加权均衡、健康探测、自动换节点（仅 GET/HEAD/OPTIONS）；服务端转发与
   客户端分发两种形态
 - **按 host 限流**：按目标域名限制并发与 QPS，不会把单个站点打爆
 - **流式下载 · 断点续传 · 批量 · 异步客户端**
@@ -92,8 +92,13 @@ ipclick run --port 9628 --web-port 9531 -w
 
 ### 吞吐上不去？先加进程，不是加线程
 
+> **这几个数字的来龙去脉**：都是在一台 16 核 Linux 机器上、对本机目标、单客户端压出来的，
+> 对应 IPClick **1.0.0 时期**的代码。此后重试、按 host 限流、session 缓存、集群转发这几条
+> 热路径上都加了锁与 ContextVar，**绝对值没有重测**。结构性结论（加线程没用、加进程有用）
+> 仍然成立；具体 QPS 请在你自己的环境上复测。
+
 服务端默认是一请求一线程的 CPython 进程，**GIL 才是吞吐天花板**。实测 16 核机器上
-单进程只能用出 1.5 个核，把 `[SERVER].max_workers` 从 32 调到 256 对吞吐
+单进程只能用出 1.45 个核，把 `[SERVER].max_workers` 从 32 调到 256 对吞吐
 **没有任何影响**（279.8 / 275.9 / 277.9 QPS）。
 
 要用满多核就起多个工作进程，靠 SO_REUSEPORT 共享同一个端口——分发由内核做，
@@ -205,8 +210,15 @@ with Downloader() as downloader:
         print(f"请求失败: {response.error}")
 ```
 
-`request()` 及各便捷方法不会因为网络问题抛异常，失败时返回 `status_code == -1`
-且 `error` 非空的 `DownloadResponse`。参数本身非法（如 URL 为空）会抛 `ValidationError`。
+`request()` 及各便捷方法不会因为网络问题抛异常——传输失败和 DNS 解析失败都返回
+`status_code == -1` 且 `error` 非空的 `DownloadResponse`。会抛出来的是这几类：
+
+| 异常 | 什么时候 |
+|---|---|
+| `ValidationError` | 参数不合法（URL 为空、方法不支持…），**以及重定向超过 10 跳** |
+| `URLNotAllowedError` | 入口 URL **或任何一跳重定向目标**被 `[SECURITY]` 拒绝 |
+| `AdapterError` | 适配器/浏览器没准备好 |
+| `HostLimitTimeout` | 等 per-host 配额超时
 
 更多用法——代理、流式、断点续传、批量、异步、指定适配器——见
 [SDK 用法](https://github.com/yuanqimanong/IPClick/wiki/SDK-Usage)。
@@ -369,10 +381,11 @@ ipclick config  show --json         # 生效配置（机密脱敏）
 加 `--json` 后，**stdout 上有且只有一个 JSON 文档**，成功失败都是；日志与进度走
 stderr。所以 `ipclick ... --json | jq` 永远安全。
 
-每个文档都带 `ok`。`fetch` / `status` / `node probe` 还额外带 `exit_code`，与进程退出码
-一致；**其余命令的成功输出里没有这个键**（`trace list`、`node list`、`component list`、
-`config show/get`、`skill *`），请读进程退出码——`jq -e .exit_code` 在那些命令上会空手
-而归。所有失败路径都带 `exit_code`。
+每个文档都带 `ok` 和 `exit_code`，与进程退出码一致——成功失败、所有命令都一样，
+`jq -e .exit_code` 在哪个命令上都取得到。
+
+注意 `--json` 只在结构化命令上有：`fetch` / `status` / `trace` / `node` / `component` /
+`config` / `skill`。`init` / `run` / `health` / `config-info` 是给人看的，没有这个选项。
 
 | 退出码 | 含义 | 往哪儿查 |
 |---|---|---|
@@ -383,8 +396,10 @@ stderr。所以 `ipclick ... --json | jq` 永远安全。
 | 4 | 鉴权失败 | 令牌（`IPCLICK_AUTH_TOKEN`） |
 | 5 | 参数被服务端拒绝，或本地配置不合法 | 调用参数或 `ipclick.toml` |
 
-`status: -1` 表示没拿到 HTTP 响应，这时看 `reached_server`：`false` 是没连上 IPClick
-本身（退出码 3），`true` 是 IPClick 正常、连不上**目标站点**（退出码 1，原因在 `error`）。
+`status` 为 `-1` **或 `null`** 都表示没拿到 HTTP 响应（鉴权失败和参数被拒时是 `null`），
+所以别拿 `d["status"] == -1` 当判据，先读 `exit_code` / `ok`。要区分方向再看
+`reached_server`：`false` 是没连上 IPClick 本身（退出码 3），`true` 是 IPClick 正常、
+连不上**目标站点**（退出码 1，原因在 `error`）。
 
 ### 响应体
 
@@ -421,7 +436,7 @@ Web 端的 `/skill` 页也能看全文、复制命令、下载 `SKILL.md`。
 IPClick/
 ├── src/
 │   └── ipclick/
-│       ├── __init__.py          # 包入口，导出公共 API（24 个名字）
+│       ├── __init__.py          # 包入口，导出公共 API（25 个名字）
 │       ├── __main__.py          # 模块入口
 │       ├── sdk.py               # 同步 SDK 客户端
 │       ├── aio.py               # 异步 SDK 客户端（grpc.aio）
@@ -551,12 +566,20 @@ docker build -f docker/Dockerfile --build-arg ENGINE=none -t ipclick:slim .
 - **集群流式只有建流这一步会故障转移**。流建立之后中途断掉不会自动重连——那需要
   Range 请求才能不重复数据。批量请求整批发给同一个节点，不跨节点拆分。
 - **没有文件上传字段**。要发 multipart 就自己拼好请求体，用 `data=<bytes>` 加上
-  `Content-Type: multipart/form-data; boundary=...` 发出去。
-- **cookie 按 session 复用，不按调用方隔离。** `curl_cffi` / `niquests` 适配器按
-  （代理, 证书校验, 指纹）缓存 Session，同一组合的请求**共用一个 cookie jar**，
-  缓存活到进程结束——A 的 `Set-Cookie` 会跟着 B 的请求发出去，链路记录里也看不出来。
-  要隔离就换代理或指纹组合，或者走浏览器适配器（每请求独立 context，DrissionPage
-  每次清 cookie）。目前**没有**"每次请求干净开始"这个开关。
+  `Content-Type: multipart/form-data; boundary=...` 发出去。`files=` 不在协议里，
+  进程内直接传给适配器时会**抛 `ValidationError`**（2.0 之前是静默忽略——请求照发，
+  只是没带文件，而调用方看不出来）。
+- **查询参数原样传递。** `params={"start": "2024-01-01"}` 发出去就是
+  `start=2024-01-01`。2.0 之前服务端会把形似 ISO 的字符串还原成 `datetime` 再
+  `str()` 拼进 URL，于是变成 `start=2024-01-01+00%3A00%3A00`，目标 API 的日期过滤
+  直接失效或返回 400——而调用方从自己传的值里完全看不出问题。请求体仍然按原来的
+  规则解析。
+
+- **两次请求之间不保持会话。** `curl_cffi` / `niquests` 适配器按（代理, 证书校验,
+  指纹）缓存 Session，但**每次请求前都会清空这个 session 的 cookie jar**——服务端
+  没有调用方会话的概念，共用 session 却保留 cookie 等于跨调用方串号。单次请求内部
+  （含重定向链）的 cookie 传递照常由底层库处理，变的只是"两次调用之间不再自动带上
+  上一次的 Set-Cookie"。需要保持会话请在请求里显式传 `cookies=`。
 
 ## 🛠️ 开发
 

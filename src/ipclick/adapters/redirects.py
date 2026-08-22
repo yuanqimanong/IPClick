@@ -10,7 +10,8 @@ SSRF 准入原本只在请求发出**之前**校验调用方给的那一个 URL�
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+import contextlib
 from typing import Any, Protocol
 from urllib.parse import urljoin
 
@@ -49,6 +50,49 @@ def _location(response: _Response) -> str:
     return ""
 
 
+def _release(response: Any) -> None:
+    """关掉一条已经用不上的中间响应，把连接还给连接池。
+
+    流式跟随时这条很重要：每一跳都是一个真的 ``stream=True`` 响应，只读了它的
+    Location 就不再需要，不关就一路占着连接直到 GC。
+    """
+    closer = getattr(response, "close", None)
+    if callable(closer):
+        with contextlib.suppress(Exception):
+            closer()
+
+
+def _next_hop(response: Any, current_url: str, hop: int, max_redirects: int) -> tuple[str, int] | None:
+    """判断是否还有下一跳；有则返回（目标绝对地址，状态码）。
+
+    ``None`` 表示"这条响应就是最终结果"。不做校验也不发请求，只负责解析——
+    同步与异步两条跟随循环共用这一份逻辑，避免两边跑偏。
+    """
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status not in REDIRECT_CODES:
+        return None
+
+    target = _location(response)
+    if not target:
+        # 声明了重定向却没给 Location，没有下一跳可走，原样返回让调用方看到。
+        return None
+
+    # Location 可以是相对路径，必须按当前 URL 解析成绝对地址再校验，
+    # 否则 "/latest/meta-data" 这种相对跳转会绕过基于主机名的策略。
+    next_url = urljoin(current_url, target)
+    _release(response)
+    if hop >= max_redirects:
+        raise ValidationError(f"重定向次数超过上限 {max_redirects}：最后停在 {current_url}")
+    return next_url, status
+
+
+def _rewrite(status: int, method: str, body: Any) -> tuple[str, Any]:
+    """按状态码决定下一跳的方法与请求体。"""
+    if status in _METHOD_REWRITING_CODES and method not in ("GET", "HEAD"):
+        return "GET", None
+    return method, body
+
+
 def follow_with_policy(
     send: Callable[[str, str, Any], Any],
     url: str,
@@ -70,26 +114,12 @@ def follow_with_policy(
 
     for hop in range(max_redirects + 1):
         response = send(current_url, current_method, current_body)
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status not in REDIRECT_CODES:
+        hop_target = _next_hop(response, current_url, hop, max_redirects)
+        if hop_target is None:
             return response
-
-        target = _location(response)
-        if not target:
-            # 声明了重定向却没给 Location，没有下一跳可走，原样返回让调用方看到。
-            return response
-
-        if hop >= max_redirects:
-            raise ValidationError(f"重定向次数超过上限 {max_redirects}：最后停在 {current_url}")
-
-        # Location 可以是相对路径，必须按当前 URL 解析成绝对地址再校验，
-        # 否则 "/latest/meta-data" 这种相对跳转会绕过基于主机名的策略。
-        next_url = urljoin(current_url, target)
+        next_url, status = hop_target
         validate(next_url)
-
-        if status in _METHOD_REWRITING_CODES and current_method not in ("GET", "HEAD"):
-            current_method = "GET"
-            current_body = None
+        current_method, current_body = _rewrite(status, current_method, current_body)
         log.debug(f"重定向 {status}：{current_url} -> {next_url}（已通过 URL 准入）")
         current_url = next_url
 
@@ -97,4 +127,36 @@ def follow_with_policy(
     raise ValidationError(f"重定向处理异常：{url}")
 
 
-__all__ = ["DEFAULT_MAX_REDIRECTS", "REDIRECT_CODES", "follow_with_policy"]
+async def afollow_with_policy(
+    send: Callable[[str, str, Any], Awaitable[Any]],
+    url: str,
+    method: str,
+    body: Any,
+    validate: Callable[[str], None],
+    *,
+    max_redirects: int = DEFAULT_MAX_REDIRECTS,
+) -> Any:
+    """``follow_with_policy`` 的异步版本。
+
+    异步路径原来直接把 ``allow_redirects=True`` 交给底层库，跟随时完全不过准入——
+    也就是说 ``[SERVER].async_mode = true`` 一开，整套逐跳 SSRF 校验就不存在了。
+    """
+    current_url = url
+    current_method = method
+    current_body = body
+
+    for hop in range(max_redirects + 1):
+        response = await send(current_url, current_method, current_body)
+        hop_target = _next_hop(response, current_url, hop, max_redirects)
+        if hop_target is None:
+            return response
+        next_url, status = hop_target
+        validate(next_url)
+        current_method, current_body = _rewrite(status, current_method, current_body)
+        log.debug(f"重定向 {status}：{current_url} -> {next_url}（已通过 URL 准入）")
+        current_url = next_url
+
+    raise ValidationError(f"重定向处理异常：{url}")
+
+
+__all__ = ["DEFAULT_MAX_REDIRECTS", "REDIRECT_CODES", "afollow_with_policy", "follow_with_policy"]

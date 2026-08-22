@@ -38,6 +38,41 @@ def test_private_addresses_are_refused_when_enabled() -> None:
             validate_url(url, policy)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        # AWS ECS/Fargate 的任务元数据端点，就是发任务角色临时凭据的地方
+        "http://169.254.170.2/v2/credentials/abc",
+        "http://169.254.170.23/latest/meta-data/iam/security-credentials/",
+        # 同段里其余厂商/用途的端点
+        "http://169.254.169.253/",
+        # IPv4-mapped 写法不能绕过
+        "http://[::ffff:169.254.170.2]/v2/credentials/abc",
+        # 链路本地的 IPv6 侧
+        "http://[fe80::1]/",
+    ],
+)
+def test_metadata_blocking_covers_the_whole_link_local_range(url: str) -> None:
+    """``block_metadata_endpoints`` 不能只认 169.254.169.254 一个字面量。
+
+    默认配置是 ``block_private_networks = false`` + ``block_metadata_endpoints = true``。
+    只列举字面量的话，一次 302 跳到 ``http://169.254.170.2/v2/credentials/...`` 就是放行的
+    ——那是 AWS ECS/Fargate 发任务角色临时凭据的端点，正是这个开关要防的东西。
+    云厂商的端点全在链路本地段里，而链路本地地址对下载服务从来不是合法目标，整段拒掉。
+    """
+    policy = URLPolicy.from_config({"block_metadata_endpoints": True, "block_private_networks": False})
+    with pytest.raises(URLNotAllowedError):
+        validate_url(url, policy)
+
+
+def test_non_link_local_metadata_endpoints_are_still_listed_literally() -> None:
+    """阿里云在 CGNAT 段、AWS 的 IPv6 IMDS 在 ULA 段，都不在链路本地里。"""
+    policy = URLPolicy.from_config({"block_metadata_endpoints": True, "block_private_networks": False})
+    for url in ("http://100.100.100.200/latest/meta-data/", "http://[fd00:ec2::254]/latest/meta-data/"):
+        with pytest.raises(URLNotAllowedError):
+            validate_url(url, policy)
+
+
 def test_allowlist_wins_over_every_other_rule() -> None:
     policy = URLPolicy.from_config(
         {"block_private_networks": True, "block_metadata_endpoints": True, "allowlist": ["169.254.169.254"]}

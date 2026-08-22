@@ -8,7 +8,7 @@ from typing import Any
 from typing_extensions import override
 
 from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader
-from ipclick.adapters.redirects import follow_with_policy
+from ipclick.adapters.redirects import afollow_with_policy, follow_with_policy
 from ipclick.adapters.retry import aretry, retry
 from ipclick.adapters.sessions import AsyncSessionCache, SessionCache, reset_cookies
 from ipclick.adapters.settings import AdapterSettings
@@ -142,17 +142,68 @@ class NiquestsAdapter(DownloaderAdapter):
         if validator is None or not allow_redirects:
             return session.request(method, url, **request_kwargs)
 
+        prepare, saved_body = self._hop_sender(request_kwargs)
+
+        def send(hop_url: str, hop_method: str, body: Any) -> Any:
+            return session.request(hop_method, hop_url, **prepare(body))
+
+        return follow_with_policy(send, url, method, saved_body, validator)
+
+    def _hop_sender(self, request_kwargs: dict[str, Any], *, stream: bool = False) -> tuple[Any, Any]:
+        """构造逐跳请求所需的 kwargs 与初始请求体快照（理由同 curl_cffi 适配器）。"""
         hop_kwargs = dict(request_kwargs)
         hop_kwargs["allow_redirects"] = False
+        if stream:
+            hop_kwargs["stream"] = True
         body_keys = ("data", "json", "files")
         saved_body = {key: hop_kwargs.get(key) for key in body_keys}
 
-        def send(hop_url: str, hop_method: str, body: Any) -> Any:
+        def prepare(body: Any) -> dict[str, Any]:
             kw = dict(hop_kwargs)
             if body is None:
                 for key in body_keys:
                     _ = kw.pop(key, None)
-            return session.request(hop_method, hop_url, **kw)
+            return kw
+
+        return prepare, saved_body
+
+    async def _arequest_following_policy(
+        self,
+        session: Any,
+        method: str,
+        url: str,
+        request_kwargs: dict[str, Any],
+        allow_redirects: bool,
+    ) -> Any:
+        """异步版的逐跳跟随；原来这条路完全不过准入（见 curl_cffi 适配器同名方法）。"""
+        validator = self.url_validator
+        if validator is None or not allow_redirects:
+            return await session.request(method, url, **request_kwargs)
+
+        prepare, saved_body = self._hop_sender(request_kwargs)
+
+        async def send(hop_url: str, hop_method: str, body: Any) -> Any:
+            return await session.request(hop_method, hop_url, **prepare(body))
+
+        return await afollow_with_policy(send, url, method, saved_body, validator)
+
+    def _stream_following_policy(
+        self,
+        session: Any,
+        method: str,
+        url: str,
+        request_kwargs: dict[str, Any],
+        allow_redirects: bool,
+    ) -> Any:
+        """流式版的逐跳跟随，返回最后一跳那条流（见 curl_cffi 适配器同名方法）。"""
+        validator = self.url_validator
+        if validator is None or not allow_redirects:
+            return session.request(method, url, stream=True, **request_kwargs)
+
+        prepare, saved_body = self._hop_sender(request_kwargs, stream=True)
+
+        def send(hop_url: str, hop_method: str, body: Any) -> Any:
+            return session.request(hop_method, hop_url, **prepare(body))
 
         return follow_with_policy(send, url, method, saved_body, validator)
 
@@ -189,8 +240,6 @@ class NiquestsAdapter(DownloaderAdapter):
             raise ValidationError(f"Unsupported HTTP method: {method}")
 
         extra = self.parse_extra_kwargs(kwargs)
-        session = self._sessions.get((proxy, verify))
-        reset_cookies(session)
         request_kwargs = self._request_kwargs(
             {
                 "headers": headers,
@@ -205,19 +254,23 @@ class NiquestsAdapter(DownloaderAdapter):
             extra,
         )
 
-        try:
-            resp = self._request_following_policy(session, method, url, request_kwargs, allow_redirects)
-            return Response(
-                url=str(resp.url),
-                status_code=resp.status_code,
-                content=resp.content,
-                text=resp.text,
-                headers=dict(resp.headers),
-                raw_response=resp,
-            )
-        except Exception as e:
-            log.warning(f"niquests request failed for {url}: {e}")
-            raise
+        # 用 lease 而不是 get：整个请求期间都持着这个 session，而 LRU 会在别的线程
+        # 把它淘汰并 close 掉（见 sessions._SessionEntry）。
+        with self._sessions.lease((proxy, verify)) as session:
+            reset_cookies(session)
+            try:
+                resp = self._request_following_policy(session, method, url, request_kwargs, allow_redirects)
+                return Response(
+                    url=str(resp.url),
+                    status_code=resp.status_code,
+                    content=resp.content,
+                    text=resp.text,
+                    headers=dict(resp.headers),
+                    raw_response=resp,
+                )
+            except Exception as e:
+                log.warning(f"niquests request failed for {url}: {e}")
+                raise
 
     @override
     @aretry()
@@ -229,21 +282,23 @@ class NiquestsAdapter(DownloaderAdapter):
             raise ValidationError(f"Unsupported HTTP method: {method}")
 
         request_kwargs = self._request_kwargs(kwargs, self.parse_extra_kwargs(kwargs.get("kwargs")))
-        session = self._async_sessions.get((kwargs.get("proxy"), bool(kwargs.get("verify", True))))
-        reset_cookies(session)
-        try:
-            resp = await session.request(method, url, **request_kwargs)
-            return Response(
-                url=str(resp.url),
-                status_code=resp.status_code,
-                content=resp.content,
-                text=resp.text,
-                headers=dict(resp.headers),
-                raw_response=resp,
-            )
-        except Exception as e:
-            log.warning(f"niquests async request failed for {url}: {e}")
-            raise
+        with self._async_sessions.lease((kwargs.get("proxy"), bool(kwargs.get("verify", True)))) as session:
+            reset_cookies(session)
+            try:
+                resp = await self._arequest_following_policy(
+                    session, method, url, request_kwargs, bool(request_kwargs.get("allow_redirects", True))
+                )
+                return Response(
+                    url=str(resp.url),
+                    status_code=resp.status_code,
+                    content=resp.content,
+                    text=resp.text,
+                    headers=dict(resp.headers),
+                    raw_response=resp,
+                )
+            except Exception as e:
+                log.warning(f"niquests async request failed for {url}: {e}")
+                raise
 
     @override
     def download_stream(
@@ -260,28 +315,32 @@ class NiquestsAdapter(DownloaderAdapter):
             yield StreamHeader(url=url, status_code=-1, error=f"Unsupported HTTP method: {method}")
             return
 
-        session = self._sessions.get((kwargs.get("proxy"), bool(kwargs.get("verify", True))))
-        reset_cookies(session)
-        request_kwargs = self._request_kwargs(kwargs, self.parse_extra_kwargs(kwargs.get("kwargs")))
+        # 租借必须覆盖**整条流**的生命周期：流式请求持有 session 的时间最长，而它的
+        # "最近使用时间"停在开流那一刻，最容易先变成 LRU 被淘汰关掉。
+        with self._sessions.lease((kwargs.get("proxy"), bool(kwargs.get("verify", True)))) as session:
+            reset_cookies(session)
+            request_kwargs = self._request_kwargs(kwargs, self.parse_extra_kwargs(kwargs.get("kwargs")))
 
-        try:
-            resp = session.request(method, url, stream=True, **request_kwargs)
-        except Exception as e:
-            log.warning(f"niquests stream failed for {url}: {e}")
-            yield StreamHeader(url=url, status_code=-1, error=str(e))
-            return
+            try:
+                resp = self._stream_following_policy(
+                    session, method, url, request_kwargs, bool(request_kwargs.get("allow_redirects", True))
+                )
+            except Exception as e:
+                log.warning(f"niquests stream failed for {url}: {e}")
+                yield StreamHeader(url=url, status_code=-1, error=str(e))
+                return
 
-        try:
-            yield StreamHeader(
-                url=str(resp.url),
-                status_code=resp.status_code,
-                headers=dict(resp.headers),
-                content_length=int(resp.headers.get("content-length") or -1),
-            )
-            yield from resp.iter_content(chunk_size=chunk_size)
-        finally:
-            # 即使调用方提前停止迭代，也要归还连接池资源。
-            resp.close()
+            try:
+                yield StreamHeader(
+                    url=str(resp.url),
+                    status_code=resp.status_code,
+                    headers=dict(resp.headers),
+                    content_length=int(resp.headers.get("content-length") or -1),
+                )
+                yield from resp.iter_content(chunk_size=chunk_size)
+            finally:
+                # 即使调用方提前停止迭代，也要归还连接池资源。
+                resp.close()
 
     @override
     def close(self) -> None:

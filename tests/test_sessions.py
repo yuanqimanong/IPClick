@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Generator
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -169,9 +171,16 @@ def test_curl_cffi_stream_preserves_whitelisted_request_kwargs() -> None:
     class StreamCache:
         def __init__(self, session: StreamSession) -> None:
             self.session: StreamSession = session
+            self.leases: int = 0
+            self.released: int = 0
 
-        def get(self, _key: object) -> StreamSession:
-            return self.session
+        @contextmanager
+        def lease(self, _key: object) -> Generator[StreamSession]:
+            self.leases += 1
+            try:
+                yield self.session
+            finally:
+                self.released += 1
 
     session = StreamSession()
     adapter: Any = object.__new__(CurlCffiAdapter)
@@ -188,6 +197,9 @@ def test_curl_cffi_stream_preserves_whitelisted_request_kwargs() -> None:
     )
 
     assert events[1] == b"abc"
+    # 租借覆盖整条流：生成器耗尽之后才归还
+    assert adapter._sessions.leases == 1
+    assert adapter._sessions.released == 1
     assert session.request_kwargs["stream"] is True
     assert session.request_kwargs["allow_redirects"] is False
     assert session.request_kwargs["ja3"] == "fingerprint"
@@ -232,3 +244,44 @@ def test_session_cache_lru_order_follows_use_not_creation() -> None:
     _ = cache.get("c")  # 该淘汰 b
 
     assert a.closed is False
+
+
+def test_lru_eviction_waits_for_the_last_user_before_closing() -> None:
+    """LRU 淘汰不能关掉别人正在用的 session。
+
+    流式下载在整条流的生命周期里都持着同一个 session，而它的"最近使用时间"停在
+    请求开始那一刻——很容易先变成 LRU。在别人用着的时候 close 掉，传输就在中途
+    断了。与 cluster 的 ``_ChannelEntry`` 同一套口径：close 推迟到最后一个使用者
+    放手之后。
+    """
+    cache: Any = SessionCache("test", FakeSession, max_sessions=2)
+
+    with cache.lease("a") as a:
+        with cache.lease("b"):
+            pass
+        with cache.lease("c"):
+            pass
+        assert a.closed is False, "a 还有在途使用者，不能关"
+
+    assert a.closed is True, "最后一个使用者放手后应当关掉"
+
+
+async def test_async_lru_eviction_waits_for_the_last_user_before_closing() -> None:
+    """异步缓存同理：淘汰不能关掉在途协程正在用的 session。"""
+    cache: Any = AsyncSessionCache("test", FakeAsyncSession, max_sessions=2)
+
+    with cache.lease("a") as a:
+        with cache.lease("b"):
+            pass
+        with cache.lease("c"):
+            pass
+        # 必须先把循环让出去：同一个循环里的 close 是 create_task 异步收尾的，
+        # 不 await 一下就断言 closed is False，无论有没有引用计数都会通过——
+        # 那样这条用例就是名不副实的。
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert a.closed is False, "a 还有在途使用者，不能关"
+
+    await asyncio.sleep(0)  # 归还所属事件循环收尾
+    await asyncio.sleep(0)
+    assert a.closed is True, "最后一个使用者放手后应当关掉"

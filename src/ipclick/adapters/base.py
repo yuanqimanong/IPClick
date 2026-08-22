@@ -41,6 +41,34 @@ _JS_AUTHOR_ERRORS = ("SyntaxError", "ReferenceError", "TypeError: ")
 _JS_FUNCTION_PREFIXES = ("function", "async", "(", "=>")
 
 
+# 字符串字面量与注释——判断有没有 return 语句之前先把它们抹掉。
+_JS_NOISE = re.compile(
+    r"'(?:\\.|[^'\\\n])*'"  # 单引号字符串
+    r"|\"(?:\\.|[^\"\\\n])*\""  # 双引号字符串
+    r"|`(?:\\.|[^`\\])*`"  # 模板字面量（可跨行）
+    r"|//[^\n]*"  # 行注释
+    r"|/\*[\s\S]*?\*/"  # 块注释
+)
+
+
+def _has_return_statement(text: str) -> bool:
+    """判断脚本里是否含真正的 return 语句。
+
+    先抹掉字符串字面量和注释再找 ``\breturn\b``。两种朴素写法都不行：
+
+    - 直接全文搜 ``\breturn\b``：``document.title + ' return '`` 这种表达式里
+      只要字符串中出现这个单词就被包成函数体 ``() => { ... }``——没有 return 语句，
+      返回值静默变成 undefined，而请求本身是成功的、不报任何错。
+    - 只认**行首**的 return：假阳性挡住了，但 ``if (x) return 1;``、
+      ``const t = ...; return t;``、``for (...) return e.href;`` 这些再普通不过的
+      函数体全被判成表达式，包成 ``() => (...)`` 之后是 SyntaxError，整个脚本跑不起来。
+
+    抹掉噪声之后按词边界搜，两类都对：位置不再有要求，字符串和注释里的不算。
+    ``o.returnValue`` 靠 ``\b`` 本身就排除掉了。
+    """
+    return bool(re.search(r"\breturn\b", _JS_NOISE.sub(" ", text)))
+
+
 def normalize_js(script: str) -> str:
     """将表达式或函数体规范化为页面 ``evaluate`` 可执行的函数。"""
     text = script.strip()
@@ -48,10 +76,7 @@ def normalize_js(script: str) -> str:
         return text
     if text.startswith(_JS_FUNCTION_PREFIXES):
         return text
-    # 只认**行首**的 return（允许前面有缩进）：原来用 \breturn\b 全文搜，
-    # 于是 "document.title + ' return '" 这种表达式里只要出现这个单词，就会被包成
-    # 函数体 () => { ... }——没有 return 语句，返回值静默变成 undefined。
-    if re.search(r"(?m)^\s*return\b", text):
+    if _has_return_statement(text):
         return f"() => {{ {text} }}"
     return f"() => ({text})"
 

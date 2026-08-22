@@ -10,7 +10,9 @@ IPClick 是一个 gRPC 服务端，代你发 HTTP 请求。相比直接 curl，�
 Playwright / DrissionPage）、统一的代理与重试策略、按 host 限流、SSRF 准入，
 以及一份可查的链路记录。集群模式下还能把请求分发到别的出口 IP。
 
-版本 {{VERSION}}。所有命令都是 `ipclick <资源> <动作>`，全部支持 `--json`。
+版本 {{VERSION}}。所有命令都是 `ipclick <资源> <动作>`。结构化命令（`fetch` /
+`status` / `trace` / `node` / `component` / `config` / `skill`）支持 `--json`；
+`init` / `run` / `health` / `config-info` 是给人看的，没有这个选项。
 
 ## 先做这一步
 
@@ -59,7 +61,7 @@ ipclick fetch https://api.example.com/v1/items \
   -X POST -H 'Content-Type: application/json' \
   --json-body '{"name":"x"}' --json
 
-# 指定适配器（先在 status 的 adapters.ready 里确认它可用）
+# 指定适配器（先在 status 的 adapters.ready 里确认引擎已装；browser 是别名，不在那份列表里）
 ipclick fetch https://example.com -a browser --json     # 真实浏览器渲染
 ipclick fetch https://example.com -a niquests --json    # HTTP/2、HTTP/3
 
@@ -70,8 +72,9 @@ ipclick fetch https://example.com --proxy config --json   # 用 ipclick.toml 里
 
 响应体的处理规则，**这条最容易踩**：
 
-- 加 `--json` 时，`body` 字段默认截断到 64 KiB，并给出 `body_truncated: true` 和
-  `body_note`。别把截断的 HTML 当完整页面用。
+- 加 `--json` 时，`body` 字段默认截断到 **65536 个字符**（是字符不是字节——抓中文页面
+  时实际字节数会大出两三倍），并给出 `body_truncated: true` 和 `body_note`。
+  别把截断的 HTML 当完整页面用。
 - 要完整内容：`-o page.html`（写文件，不截断），或 `--max-body 0`。
 - 不加 `--json` 时，响应体原样进 stdout、元信息进 stderr，所以
   `ipclick fetch URL > page.html` 拿到的是干净的页面。
@@ -80,10 +83,18 @@ ipclick fetch https://example.com --proxy config --json   # 用 ipclick.toml 里
   不发；`body_note` 会告诉你去用 `-o` 存文件。
 
 其他常用选项：`--timeout`、`--retries`、`--impersonate chrome124`、`--no-verify`、
-`--no-redirects`、`--ignore-status`（4xx/5xx 也退出 0）、`-d @文件`（请求体从文件读，
-`@-` 从 stdin 读）。
+`--no-redirects`、`--param`、`--cookie`、`--ignore-status`（4xx/5xx 也退出 0）、
+`-d @文件`（请求体从文件读，`@-` 从 stdin 读）。
 
-`status: -1` 表示没拿到 HTTP 响应。这时看 `reached_server`：
+`--no-verify` 在 DrissionPage 适配器上会**被拒绝**（退出码 5）——那是浏览器进程级的
+开关，没法按请求关。需要跳过证书校验请用 `curl_cffi` 或 `niquests`。
+
+重定向：默认适配器最多跟 **10 跳**，每一跳在**发出之前**都过一遍 `[SECURITY]` 准入；
+超过上限是错误（退出码 5）而不是返回一个响应。这个上限不可配置。
+
+`status` 为 `-1` **或 `null`** 都表示没拿到 HTTP 响应（鉴权失败和参数被拒时是
+`null`），所以别拿 `status == -1` 当判据——先读 `exit_code` / `ok`。要区分方向看
+`reached_server`：
 
 - `false` → 没连上 IPClick 服务端本身，退出码 3。
 - `true` → IPClick 正常，是它连不上**目标站点**（DNS、超时、对方拒绝），退出码 1，
@@ -148,7 +159,9 @@ ipclick config get SERVER.port             # 取一项
 ipclick config-info                        # 给人看的一屏摘要
 ```
 
-机密（token / secret / password / auth_key）一律显示为 `<已配置>`，不会回显真值。
+机密（键名含 token / secret / password / auth_key / passwd / credential）显示为
+`<已配置>`，不会回显真值。注意只涂字符串——布尔和数字原样输出，所以
+`allow_secrets_in_config = false` 显示的就是 `false`。
 需要改配置就直接编辑 `ipclick.toml`，或用 Web 端的「配置」页——CLI 刻意不提供写入口。
 
 ## 起服务
@@ -177,7 +190,9 @@ ipclick run  --port 8001           # 自动读它
   普通的本机 HTTP 调用用 curl。
 - **别在 `--json` 的输出里指望有日志。** 日志在 stderr。
 - **别忽略 `body_truncated`。** 截断的页面拿去做解析会得到无声的错误结果。
-- **别猜适配器名。** 以 `ipclick status --json` 的 `adapters.ready` 为准。
+- **别猜适配器名。** 以 `ipclick status --json` 的 `adapters.ready` 为准。注意
+  `browser` 是服务端解析的别名，**不会**出现在 `adapters.ready` 里；那里列的是具体
+  引擎名（`camoufox` / `patchright` / `playwright` / `DrissionPage`，注意大小写）。
 - **别把令牌写进命令行。** 用 `IPCLICK_AUTH_TOKEN` 环境变量或 `.env`——命令行参数会
   进 shell 历史和进程列表。
 - **别用 `ipclick fetch` 打内网地址**再去抱怨被拦。`[SECURITY].block_private_networks`

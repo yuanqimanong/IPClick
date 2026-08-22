@@ -7,11 +7,15 @@ SSRF 准入原本只校验调用方给的那一个 URL，适配器默认让底�
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from contextlib import contextmanager
+import threading
 from typing import Any, final
 
 import pytest
+from typing_extensions import override
 
-from ipclick.adapters.redirects import DEFAULT_MAX_REDIRECTS, follow_with_policy
+from ipclick.adapters.redirects import DEFAULT_MAX_REDIRECTS, afollow_with_policy, follow_with_policy
 from ipclick.exceptions import URLNotAllowedError, ValidationError
 
 
@@ -205,3 +209,217 @@ def test_browser_skips_the_check_without_a_validator() -> None:
 
     response = _FakeBrowserResponse("http://169.254.169.254/", _FakeRequest("http://169.254.169.254/"))
     _reject_disallowed_redirects(response, _plan("http://attacker.example/", None))
+
+
+async def test_async_follow_validates_before_each_hop() -> None:
+    """异步跟随循环与同步版共用同一套判定，行为必须一致。"""
+    sent: list[str] = []
+
+    async def send(url: str, _method: str, _body: Any) -> Any:
+        sent.append(url)
+        if url == "http://attacker.example/r":
+            return _Resp(302, "http://169.254.169.254/latest/meta-data/")
+        return _Resp(200)
+
+    def validate(url: str) -> None:
+        if "169.254.169.254" in url:
+            raise URLNotAllowedError(f"禁止访问云元数据地址: {url}")
+
+    with pytest.raises(URLNotAllowedError):
+        _ = await afollow_with_policy(send, "http://attacker.example/r", "GET", None, validate)
+
+    assert sent == ["http://attacker.example/r"]
+
+
+async def test_async_follow_enforces_the_hop_cap() -> None:
+    """异步版同样受 max_redirects 约束，不能无限跟随。"""
+    hops: list[str] = []
+
+    async def send(url: str, _method: str, _body: Any) -> Any:
+        hops.append(url)
+        return _Resp(302, f"/next{len(hops)}")
+
+    with pytest.raises(ValidationError):
+        _ = await afollow_with_policy(send, "http://a.example/0", "GET", None, lambda _u: None)
+
+    assert len(hops) == DEFAULT_MAX_REDIRECTS + 1
+
+
+# ---------------------------------------------------------------------------
+# 适配器接线：逐跳校验必须在**三条**路径上都生效
+#
+# 实测过的绕过：装了 url_validator 的适配器走 adownload 或 download_stream 时，
+# 校验器被调用 0 次，一次 302 就把目标取回来了——也就是说
+# [SERVER].async_mode = true 一开、或者任何流式请求，整套逐跳 SSRF 准入都不存在。
+# ---------------------------------------------------------------------------
+
+
+@final
+class _StubResp:
+    def __init__(self, url: str, status_code: int, location: str = "", body: bytes = b"") -> None:
+        self.url: str = url
+        self.status_code: int = status_code
+        self.headers: dict[str, str] = {"Location": location} if location else {}
+        self.content: bytes = body
+        self.text: str = body.decode()
+        self.closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    def iter_content(self, chunk_size: int = 1024) -> Any:
+        _ = chunk_size
+        return iter([self.content] if self.content else [])
+
+
+class _HopSession:
+    """按 URL 表作答的假 session，记录实际发出的每一跳。"""
+
+    def __init__(self, routes: dict[str, _StubResp]) -> None:
+        self.routes: dict[str, _StubResp] = routes
+        self.sent: list[str] = []
+        self.saw_allow_redirects: list[Any] = []
+
+    def _answer(self, url: str, kw: dict[str, Any]) -> _StubResp:
+        self.sent.append(url)
+        self.saw_allow_redirects.append(kw.get("allow_redirects"))
+        return self.routes[url]
+
+    def request(self, _method: str, url: str, **kw: Any) -> _StubResp:
+        return self._answer(url, kw)
+
+
+@final
+class _AsyncHopSession(_HopSession):
+    @override
+    async def request(self, _method: str, url: str, **kw: Any) -> _StubResp:
+        return self._answer(url, kw)
+
+
+@final
+class _LeaseCache:
+    """只提供 lease() 的假 session 缓存。"""
+
+    def __init__(self, session: Any) -> None:
+        self.session: Any = session
+
+    @contextmanager
+    def lease(self, _key: object) -> Generator[Any]:
+        yield self.session
+
+
+_ENTRY = "http://target.example/start"
+_BLOCKED = "http://169.254.169.254/latest/meta-data/"
+
+
+def _blocking_validator(seen: list[str]) -> Any:
+    def validate(url: str) -> None:
+        seen.append(url)
+        if "169.254.169.254" in url:
+            raise URLNotAllowedError(f"禁止访问云元数据地址: {url}")
+
+    return validate
+
+
+def _adapter(kind: str, session: Any, seen: list[str], *, is_async: bool) -> Any:
+    """装一个只有 url_validator 与假 session 缓存的适配器；不碰网络也不建真 session。"""
+    from ipclick.adapters.settings import AdapterSettings
+
+    if kind == "curl_cffi":
+        from ipclick.adapters.curl_cffi_adapter import CurlCffiAdapter
+
+        adapter: Any = object.__new__(CurlCffiAdapter)
+    else:
+        from ipclick.adapters.niquests_adapter import NiquestsAdapter
+
+        adapter = object.__new__(NiquestsAdapter)
+    adapter.timeout = 60
+    adapter.settings = AdapterSettings()
+    # 只补 UA 池那几个字段：niquests 的 _request_kwargs 会取默认 User-Agent
+    adapter._ua_pool_cache = ("ipclick-test-agent",)
+    adapter._ua_lock = threading.Lock()
+    adapter.url_validator = _blocking_validator(seen)
+    cache = _LeaseCache(session)
+    adapter._async_sessions = cache if is_async else _LeaseCache(None)
+    adapter._sessions = _LeaseCache(None) if is_async else cache
+    return adapter
+
+
+ADAPTERS = ("curl_cffi", "niquests")
+
+
+@pytest.mark.parametrize("kind", ADAPTERS)
+async def test_async_download_validates_every_redirect_hop(kind: str) -> None:
+    """adownload 必须逐跳校验；被拒的那一跳一个字节都不能发出去。"""
+    seen: list[str] = []
+    session = _AsyncHopSession(
+        {
+            _ENTRY: _StubResp(_ENTRY, 302, location=_BLOCKED),
+            _BLOCKED: _StubResp(_BLOCKED, 200, body=b"CREDENTIALS"),
+        }
+    )
+    adapter = _adapter(kind, session, seen, is_async=True)
+
+    with pytest.raises(URLNotAllowedError):
+        _ = await adapter.adownload(_ENTRY, method="GET", allow_redirects=True)
+
+    assert session.sent == [_ENTRY], "元数据地址一次都不该被请求"
+    assert seen == [_BLOCKED]
+    # 逐跳跟随的前提：底层库自己的跟随必须关掉
+    assert session.saw_allow_redirects == [False]
+
+
+@pytest.mark.parametrize("kind", ADAPTERS)
+async def test_async_download_still_follows_allowed_redirects(kind: str) -> None:
+    """修复不能把正常的重定向跟随弄坏。"""
+    final = "http://target.example/final"
+    session = _AsyncHopSession(
+        {
+            _ENTRY: _StubResp(_ENTRY, 302, location="/final"),
+            final: _StubResp(final, 200, body=b"OK"),
+        }
+    )
+    adapter = _adapter(kind, session, [], is_async=True)
+
+    response = await adapter.adownload(_ENTRY, method="GET", allow_redirects=True)
+
+    assert response.status_code == 200
+    assert response.content == b"OK"
+    assert session.sent == [_ENTRY, final]
+
+
+@pytest.mark.parametrize("kind", ADAPTERS)
+def test_stream_validates_every_redirect_hop(kind: str) -> None:
+    """download_stream 同理；被拒时以错误 header 收场，机密不得回传。"""
+    seen: list[str] = []
+    session = _HopSession(
+        {
+            _ENTRY: _StubResp(_ENTRY, 302, location=_BLOCKED),
+            _BLOCKED: _StubResp(_BLOCKED, 200, body=b"CREDENTIALS"),
+        }
+    )
+    adapter = _adapter(kind, session, seen, is_async=False)
+
+    events = list(adapter.download_stream(_ENTRY, chunk_size=8, method="GET", allow_redirects=True))
+
+    assert session.sent == [_ENTRY], "元数据地址一次都不该被请求"
+    assert b"CREDENTIALS" not in b"".join(e for e in events if isinstance(e, bytes))
+    header = events[0]
+    assert not isinstance(header, bytes)
+    assert header.status_code == -1
+    assert "169.254.169.254" in (header.error or "")
+
+
+@pytest.mark.parametrize("kind", ADAPTERS)
+def test_stream_releases_the_intermediate_hop_and_returns_the_last_one(kind: str) -> None:
+    """中间跳只用来读 Location，必须当场关掉还连接；返回的是最后一跳那条流。"""
+    final = "http://target.example/final"
+    hop = _StubResp(_ENTRY, 302, location="/final")
+    last = _StubResp(final, 200, body=b"payload")
+    adapter = _adapter(kind, _HopSession({_ENTRY: hop, final: last}), [], is_async=False)
+
+    events = list(adapter.download_stream(_ENTRY, chunk_size=1024, method="GET", allow_redirects=True))
+
+    assert b"".join(e for e in events if isinstance(e, bytes)) == b"payload"
+    assert hop.closed is True, "中间跳没关，连接会一路占着直到 GC"
+    assert last.closed is True, "生成器结束时最终响应也要关"

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from typing_extensions import override
 
 from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamEvent, StreamHeader
-from ipclick.adapters.redirects import follow_with_policy
+from ipclick.adapters.redirects import afollow_with_policy, follow_with_policy
 from ipclick.adapters.retry import aretry, retry
 from ipclick.adapters.sessions import AsyncSessionCache, SessionCache, reset_cookies
 from ipclick.adapters.settings import AdapterSettings
@@ -116,6 +116,28 @@ class CurlCffiAdapter(DownloaderAdapter):
                 built[key] = extra[key]
         return {k: v for k, v in built.items() if v is not None}
 
+    def _hop_sender(self, request_kwargs: dict[str, Any], *, stream: bool = False) -> tuple[Any, Any]:
+        """构造逐跳请求所需的 kwargs 与初始请求体快照。
+
+        每跳都必须关掉底层库自己的跟随（``allow_redirects=False``），否则第一跳就
+        被它一路跟到底，校验器再也插不进去。
+        """
+        hop_kwargs = dict(request_kwargs)
+        hop_kwargs["allow_redirects"] = False
+        if stream:
+            hop_kwargs["stream"] = True
+        body_keys = ("data", "json", "files")
+        saved_body = {key: hop_kwargs.get(key) for key in body_keys}
+
+        def prepare(body: Any) -> dict[str, Any]:
+            kw = dict(hop_kwargs)
+            if body is None:
+                for key in body_keys:
+                    _ = kw.pop(key, None)
+            return kw
+
+        return prepare, saved_body
+
     def _request_following_policy(
         self,
         session: Any,
@@ -134,17 +156,61 @@ class CurlCffiAdapter(DownloaderAdapter):
         if validator is None or not allow_redirects:
             return session.request(method, url, **request_kwargs)
 
-        hop_kwargs = dict(request_kwargs)
-        hop_kwargs["allow_redirects"] = False
-        body_keys = ("data", "json", "files")
-        saved_body = {key: hop_kwargs.get(key) for key in body_keys}
+        prepare, saved_body = self._hop_sender(request_kwargs)
 
         def send(hop_url: str, hop_method: str, body: Any) -> Any:
-            kw = dict(hop_kwargs)
-            if body is None:
-                for key in body_keys:
-                    _ = kw.pop(key, None)
-            return session.request(hop_method, hop_url, **kw)
+            return session.request(hop_method, hop_url, **prepare(body))
+
+        return follow_with_policy(send, url, method, saved_body, validator)
+
+    async def _arequest_following_policy(
+        self,
+        session: Any,
+        method: str,
+        url: str,
+        request_kwargs: dict[str, Any],
+        allow_redirects: bool,
+    ) -> Any:
+        """异步版的逐跳跟随。
+
+        这条路原来直接把 allow_redirects 交给底层库，跟随时一次校验都不做——
+        实测：装了校验器的适配器走 adownload 时校验器被调用 0 次，一次 302 就把
+        目标取回来了。也就是说 [SERVER].async_mode = true 一开，整套逐跳 SSRF
+        准入就等于不存在。
+        """
+        validator = self.url_validator
+        if validator is None or not allow_redirects:
+            return await session.request(method, url, **request_kwargs)
+
+        prepare, saved_body = self._hop_sender(request_kwargs)
+
+        async def send(hop_url: str, hop_method: str, body: Any) -> Any:
+            return await session.request(hop_method, hop_url, **prepare(body))
+
+        return await afollow_with_policy(send, url, method, saved_body, validator)
+
+    def _stream_following_policy(
+        self,
+        session: Any,
+        method: str,
+        url: str,
+        request_kwargs: dict[str, Any],
+        allow_redirects: bool,
+    ) -> Any:
+        """流式版的逐跳跟随；返回的是**最后一跳**那条流。
+
+        流式这条路同样一次校验都不做（实测校验器调用 0 次）。中间跳也用 stream=True
+        发：重定向响应的正文本来就是空的或极小，读完 Location 立刻由 redirects._release
+        关掉还连接。
+        """
+        validator = self.url_validator
+        if validator is None or not allow_redirects:
+            return session.request(method, url, stream=True, **request_kwargs)
+
+        prepare, saved_body = self._hop_sender(request_kwargs, stream=True)
+
+        def send(hop_url: str, hop_method: str, body: Any) -> Any:
+            return session.request(hop_method, hop_url, **prepare(body))
 
         return follow_with_policy(send, url, method, saved_body, validator)
 
@@ -200,24 +266,25 @@ class CurlCffiAdapter(DownloaderAdapter):
         )
 
         # proxy/证书校验/指纹会改变连接属性，必须分开复用连接池。
-        session = self._sessions.get((proxy, verify, impersonate))
-        reset_cookies(session)
+        # 用 lease 而不是 get：整个请求期间都持着这个 session，而 LRU 会在别的线程
+        # 把它淘汰并 close 掉（见 sessions._SessionEntry）。
+        with self._sessions.lease((proxy, verify, impersonate)) as session:
+            reset_cookies(session)
+            try:
+                curl_cffi_resp = self._request_following_policy(session, method, url, request_kwargs, allow_redirects)
 
-        try:
-            curl_cffi_resp = self._request_following_policy(session, method, url, request_kwargs, allow_redirects)
+                return Response(
+                    url=str(curl_cffi_resp.url),
+                    status_code=curl_cffi_resp.status_code,
+                    content=curl_cffi_resp.content,
+                    text=curl_cffi_resp.text,
+                    headers=dict(curl_cffi_resp.headers),
+                    raw_response=curl_cffi_resp,
+                )
 
-            return Response(
-                url=str(curl_cffi_resp.url),
-                status_code=curl_cffi_resp.status_code,
-                content=curl_cffi_resp.content,
-                text=curl_cffi_resp.text,
-                headers=dict(curl_cffi_resp.headers),
-                raw_response=curl_cffi_resp,
-            )
-
-        except Exception as e:
-            log.warning(f"curl_cffi request failed for {url}: {e}")
-            raise
+            except Exception as e:
+                log.warning(f"curl_cffi request failed for {url}: {e}")
+                raise
 
     @override
     @aretry()
@@ -228,23 +295,24 @@ class CurlCffiAdapter(DownloaderAdapter):
             raise ValidationError(f"Unsupported HTTP method: {method}")
 
         request_kwargs = self._build_request_kwargs(kwargs)
-        session = self._async_sessions.get(
-            (kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate"))
-        )
-        reset_cookies(session)
-        try:
-            resp = await session.request(method, url, **request_kwargs)
-            return Response(
-                url=str(resp.url),
-                status_code=resp.status_code,
-                content=resp.content,
-                text=resp.text,
-                headers=dict(resp.headers),
-                raw_response=resp,
-            )
-        except Exception as e:
-            log.warning(f"curl_cffi async request failed for {url}: {e}")
-            raise
+        key = (kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate"))
+        with self._async_sessions.lease(key) as session:
+            reset_cookies(session)
+            try:
+                resp = await self._arequest_following_policy(
+                    session, method, url, request_kwargs, bool(request_kwargs.get("allow_redirects", True))
+                )
+                return Response(
+                    url=str(resp.url),
+                    status_code=resp.status_code,
+                    content=resp.content,
+                    text=resp.text,
+                    headers=dict(resp.headers),
+                    raw_response=resp,
+                )
+            except Exception as e:
+                log.warning(f"curl_cffi async request failed for {url}: {e}")
+                raise
 
     @override
     def download_stream(
@@ -260,30 +328,36 @@ class CurlCffiAdapter(DownloaderAdapter):
             yield StreamHeader(url=url, status_code=-1, error=f"Unsupported HTTP method: {method}")
             return
 
-        session = self._sessions.get((kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate")))
-        reset_cookies(session)
+        key = (kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate"))
+        # 租借必须覆盖**整条流**的生命周期：流式请求持有 session 的时间最长，而它的
+        # "最近使用时间"停在开流那一刻，最容易先变成 LRU 被淘汰关掉——那会让传输
+        # 在中途断掉。生成器结束或被 close 时租借才归还。
+        with self._sessions.lease(key) as session:
+            reset_cookies(session)
 
-        # 与普通请求共用白名单 builder，避免切换到 stream 后静默丢失指纹、证书等参数。
-        request_kwargs = self._build_request_kwargs(kwargs)
+            # 与普通请求共用白名单 builder，避免切换到 stream 后静默丢失指纹、证书等参数。
+            request_kwargs = self._build_request_kwargs(kwargs)
 
-        try:
-            response = session.request(method, url, stream=True, **request_kwargs)
-        except Exception as e:
-            log.warning(f"curl_cffi stream failed for {url}: {e}")
-            yield StreamHeader(url=url, status_code=-1, error=str(e))
-            return
+            try:
+                response = self._stream_following_policy(
+                    session, method, url, request_kwargs, bool(request_kwargs.get("allow_redirects", True))
+                )
+            except Exception as e:
+                log.warning(f"curl_cffi stream failed for {url}: {e}")
+                yield StreamHeader(url=url, status_code=-1, error=str(e))
+                return
 
-        try:
-            yield StreamHeader(
-                url=str(response.url),
-                status_code=response.status_code,
-                headers=dict(response.headers),
-                content_length=int(response.headers.get("content-length") or -1),
-            )
-            yield from response.iter_content(chunk_size=chunk_size)
-        finally:
-            # 提前停止迭代也会执行 finally，归还底层连接。
-            response.close()
+            try:
+                yield StreamHeader(
+                    url=str(response.url),
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                    content_length=int(response.headers.get("content-length") or -1),
+                )
+                yield from response.iter_content(chunk_size=chunk_size)
+            finally:
+                # 提前停止迭代也会执行 finally，归还底层连接。
+                response.close()
 
     @override
     def close(self) -> None:

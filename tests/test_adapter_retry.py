@@ -327,6 +327,36 @@ def test_normalize_js_only_wraps_real_return_statements(script: str, expected: s
 
 
 @pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        # 同一行里的 return 语句是函数体最常见的写法之一，不能因为它不在行首就被
+        # 当成表达式——包成 () => (...) 之后是 SyntaxError，脚本整个跑不起来。
+        ("if (x) return 1;", "() => { if (x) return 1; }"),
+        ("const t = document.title; return t;", "() => { const t = document.title; return t; }"),
+        (
+            "for (const e of document.links) return e.href;",
+            "() => { for (const e of document.links) return e.href; }",
+        ),
+        ("if (a) { return 1; } else { return 2; }", "() => { if (a) { return 1; } else { return 2; } }"),
+        # 字符串字面量和注释里的 return 仍然不算返回语句（这是"只认行首"当初要挡的假阳性）
+        ('"return"', '() => ("return")'),
+        ("`a return b`", "() => (`a return b`)"),
+        ("x + /* return */ y", "() => (x + /* return */ y)"),
+        ("// return x\ndocument.title", "() => (// return x\ndocument.title)"),
+    ],
+)
+def test_normalize_js_finds_return_statements_that_are_not_at_line_start(script: str, expected: str) -> None:
+    """return 语句不一定在行首。
+
+    "只认行首 return" 挡住了字符串里的假阳性，但同时把 ``if (x) return 1;``、
+    ``const t = ...; return t;`` 这类合法函数体判成了表达式——包成 ``() => (...)``
+    之后是 SyntaxError。判定改成"抹掉字符串字面量和注释之后再找 return"：
+    假阳性照样挡住，真的 return 语句不管在哪一列都认。
+    """
+    assert normalize_js(script) == expected
+
+
+@pytest.mark.parametrize(
     "error",
     [TypeError("data must be dict/list/tuple, str, BytesIO or bytes"), ValueError("bad argument")],
 )

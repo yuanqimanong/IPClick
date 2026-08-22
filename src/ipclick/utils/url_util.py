@@ -12,19 +12,29 @@ from ipclick.utils.coerce import as_bool
 
 DEFAULT_ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
+# 落在链路本地段之外、需要单独列举的元数据端点。
 _METADATA_ADDRESSES: frozenset[str] = frozenset(
     {
-        "169.254.169.254",
-        "100.100.100.200",
-        "fd00:ec2::254",
+        "100.100.100.200",  # 阿里云，在 100.64.0.0/10（CGNAT）里
+        "fd00:ec2::254",  # AWS IMDS over IPv6，在 fc00::/7（ULA）里
     }
 )
 
 
 def _is_metadata_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """判断地址是否为已知云厂商元数据端点。"""
+    """判断地址是否为云元数据端点。
+
+    只列举字面量必然漏。169.254.169.254 之外，AWS ECS/Fargate 还有
+    169.254.170.2 与 169.254.170.23——那是发**任务角色临时凭据**的地方，
+    正是这个开关要防的东西；同段里还有 169.254.169.253 等其它用途的端点。
+    默认配置是 block_private_networks = false，所以漏掉的那些一次 302 就能取到。
+
+    这些端点全都落在链路本地段（169.254.0.0/16 与 fe80::/10）里，而链路本地地址
+    对一个下载服务来说从来不是合法目标——它只在本网段可达。所以整段拒掉，
+    比追着各家厂商的地址列表补更可靠。确需访问请走 [SECURITY].allowlist。
+    """
     candidate = ip.ipv4_mapped if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped else ip
-    return str(candidate) in _METADATA_ADDRESSES
+    return candidate.is_link_local or str(candidate) in _METADATA_ADDRESSES
 
 
 def _is_private_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
