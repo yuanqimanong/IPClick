@@ -26,7 +26,7 @@ from ipclick.multiprocess import run_workers
 from ipclick.protocols import ShardableLimiter
 from ipclick.rpc import server_options
 from ipclick.secrets import warn_secrets_in_config
-from ipclick.server_settings import ServerSettings, resolve_processes
+from ipclick.server_settings import GRACE_PERIOD_SECONDS, ServerSettings, resolve_processes
 from ipclick.services import TaskService
 from ipclick.services.async_task_service import AsyncTaskService
 from ipclick.tls import TLSSettings, describe, server_credentials, warn_if_insecure
@@ -37,8 +37,6 @@ from ipclick.utils.log_util import LogUtil, log
 from ipclick.web import WebConfig, WebCredentials, WebPages, WebServer, announce
 from ipclick.web.snapshot import build_dashboard, build_live
 
-
-GRACE_PERIOD_SECONDS = 10
 
 FORCED_EXIT_MARGIN_SECONDS = 5
 

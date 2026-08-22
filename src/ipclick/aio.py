@@ -216,6 +216,13 @@ class AsyncDownloader(ClientBase):
                 )
                 # 异步客户端不能复用同步基类的 time.sleep，否则会阻塞事件循环。
                 await asyncio.sleep(delay)
+            except Exception as e:
+                # 同步那边有这一层（sdk.py），异步这边原来没有。channel 在停机边缘被关掉时
+                # grpc 抛的是 ValueError("Cannot invoke RPC on closed channel!") 而不是
+                # RpcError：一个任务在 await client.get() 期间另一个任务 await close()，
+                # 裸 ValueError 就会从 request() 直接穿出去，而同步客户端返回的是
+                # DownloadResponse.from_error(...)。
+                raise TransportError(f"连接 {self.target} 失败: {e}") from e
 
         raise TransportError(f"连接 {self.target} 失败：重试 {self.rpc_max_retries} 次后仍不可用")
 
@@ -247,17 +254,23 @@ class AsyncDownloader(ClientBase):
             for task in tasks:
                 yield task.to_protobuf()
 
+        call = stub.SendBatch(
+            _requests(),
+            timeout=timeout,
+            metadata=self._metadata or None,
+            compression=self.compression.for_stream(),
+        )
+        completed = False
         try:
-            call = stub.SendBatch(
-                _requests(),
-                timeout=timeout,
-                metadata=self._metadata or None,
-                compression=self.compression.for_stream(),
-            )
             async for pb_response in call:
                 yield DownloadResponse.from_protobuf(pb_response)
+            completed = True
         except grpc.RpcError as e:
             raise self._rpc_error(e) from e
+        finally:
+            # 与同步实现同因：提前 break 会留下一条半开的双向流，服务端一直守着它。
+            if not completed:
+                call.cancel()
 
     async def get(self, url: str, params: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
         """发送 GET 请求。"""

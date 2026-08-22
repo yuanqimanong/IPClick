@@ -13,6 +13,7 @@ from typing_extensions import override
 from ipclick.auth import TokenAuthInterceptor, extract_token, is_exempt, token_matches
 from ipclick.dto.proto import task_pb2_grpc
 from ipclick.rpc import server_options
+from ipclick.server_settings import GRACE_PERIOD_SECONDS
 from ipclick.services.async_task_service import AsyncTaskService
 from ipclick.trace import get_recorder
 from ipclick.utils.log_util import log
@@ -23,11 +24,6 @@ class _AsyncAuthInterceptor(aio.ServerInterceptor):
 
     def __init__(self, delegate: TokenAuthInterceptor) -> None:
         self._delegate: TokenAuthInterceptor = delegate
-
-    @property
-    def enabled(self) -> bool:
-        """返回委托鉴权器当前是否要求令牌。"""
-        return self._delegate.enabled
 
     @override
     async def intercept_service(self, continuation: Any, handler_call_details: Any) -> Any:
@@ -148,6 +144,7 @@ async def serve_async(
     *,
     credentials: grpc.ServerCredentials | None = None,
     health_enabled: bool = True,
+    grace: float = GRACE_PERIOD_SECONDS,
     **server_kwargs: Any,
 ) -> None:
     """启动异步 gRPC 服务，并在取消或终止时释放 service 资源。"""
@@ -192,7 +189,8 @@ async def serve_async(
             if health_servicer is not None:
                 await health_servicer.enter_graceful_shutdown()
             # 未成功 start 的 server 也持有 migration thread pool，仍需显式 stop。
-            await server.stop(grace=10 if started else 0)
+            # grace 原来写死成 10：调用方（含 [SERVER] 里配出来的停机预算）传什么都没用。
+            await server.stop(grace=grace if started else 0)
             if termination is not None and not termination.done():
                 # stop() 之后它必然很快完成；显式等一下，免得留下 pending task 警告。
                 with contextlib.suppress(Exception):

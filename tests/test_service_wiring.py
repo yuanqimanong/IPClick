@@ -443,6 +443,50 @@ def test_fork_failure_reaps_already_started_workers(monkeypatch: pytest.MonkeyPa
     assert killed == spawned == [1000, 1001]
 
 
+@pytest.mark.parametrize(
+    ("raised", "expected_code"),
+    [
+        (SystemExit(0), 0),
+        (SystemExit(3), 3),
+        (SystemExit(None), 0),
+        (RuntimeError("boom"), 1),
+    ],
+)
+def test_spawn_is_a_hard_boundary_in_the_child(
+    monkeypatch: pytest.MonkeyPatch, raised: BaseException, expected_code: int
+) -> None:
+    """子进程里任何异常都不能逃回 run_workers 的调用栈。
+
+    fork 之后子进程持有父进程那份 children 列表（0..index-1 号 worker 的 pid），异常逃出去
+    就会让它走进"fork 失败"的清理分支、对着自己的兄弟进程发 SIGTERM——一个只冲着单个
+    worker 的 SIGTERM 于是变成整队一起死。
+
+    SystemExit 是这里的关键：停机信号处理器（server._setup_signal_handlers）最后就是
+    sys.exit(0)，而 SystemExit 不是 Exception 的子类，原来那个 except Exception 接不住。
+    """
+    import ipclick.multiprocess as mp
+
+    exited: list[int] = []
+
+    class _Exited(BaseException):
+        """替身 os._exit：它本不返回，这里用异常模拟"就此终止"。"""
+
+    def fake_exit(code: int) -> None:
+        exited.append(code)
+        raise _Exited
+
+    monkeypatch.setattr(mp, "fork", lambda: 0)  # 装成子进程
+    monkeypatch.setattr("os._exit", fake_exit)
+
+    def worker(_index: int) -> None:
+        raise raised
+
+    with pytest.raises(_Exited):
+        _ = mp._spawn(3, worker)
+
+    assert exited == [expected_code]
+
+
 def test_query_params_are_not_rewritten_into_datetimes() -> None:
     """查询参数不得被 json_hook 还原成 datetime 再 str() 拼进 URL。
 

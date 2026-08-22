@@ -102,7 +102,17 @@ def run_workers(processes: int, endpoint: ServerSettings, worker: Callable[[int]
 
 
 def _spawn(index: int, worker: Callable[[int], None]) -> int:
-    """fork 单个 worker，并把未处理异常转换为稳定退出码。"""
+    """fork 单个 worker，并把未处理异常转换为稳定退出码。
+
+    子进程里这里必须是一道**硬边界**：任何异常都不能顺着调用栈逃回 run_workers。
+    fork 之后子进程持有父进程那份 children 列表（装着 0..index-1 号 worker 的 pid），
+    异常逃出去就会让它走进"fork 失败"的清理分支，对着自己的兄弟进程发 SIGTERM——
+    一个只冲着单个 worker 的 SIGTERM 于是变成整队一起死，父进程还会把它当成意外退出
+    再收掉剩下的。
+
+    SystemExit 尤其要单独接：停机信号处理器最后就是 sys.exit(0)，而 SystemExit 不是
+    Exception 的子类，原来那个 `except Exception` 接不住它。
+    """
     pid = fork()
     if pid != 0:
         return pid
@@ -111,7 +121,9 @@ def _spawn(index: int, worker: Callable[[int], None]) -> int:
         worker(index)
     except KeyboardInterrupt:
         pass
-    except Exception as e:
+    except SystemExit as e:
+        os._exit(e.code if isinstance(e.code, int) else 0)
+    except BaseException as e:
         log.exception(f"worker {index} 退出: {e}")
         os._exit(WORKER_FAILURE_EXIT_CODE)
     os._exit(0)

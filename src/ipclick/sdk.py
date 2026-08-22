@@ -460,16 +460,25 @@ class Downloader(ClientBase):
             for task in tasks:
                 yield task.to_protobuf()
 
+        call = stub.SendBatch(
+            _requests(),
+            timeout=timeout,
+            metadata=self._metadata or None,
+            compression=self.compression.for_stream(),
+        )
+        completed = False
         try:
-            for pb_response in stub.SendBatch(
-                _requests(),
-                timeout=timeout,
-                metadata=self._metadata or None,
-                compression=self.compression.for_stream(),
-            ):
+            for pb_response in call:
                 yield DownloadResponse.from_protobuf(pb_response)
+            completed = True
         except grpc.RpcError as e:
             raise self._rpc_error(e) from e
+        finally:
+            # 调用方提前 break 时必须取消这条双向流，否则它半开着挂在那里（默认
+            # timeout=None 就是没有 deadline），服务端的 SendBatch 会一直守着流和
+            # 未取走的任务直到连接断开。StreamedResponse 那边本来就这么做了。
+            if not completed:
+                call.cancel()
 
     def get(self, url: str, params: dict[str, Any] | None = None, **kwargs: Any) -> DownloadResponse:
         """发送 GET 请求。"""

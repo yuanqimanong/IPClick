@@ -17,6 +17,10 @@ from ipclick.utils.log_util import log
 
 DEFAULT_HOST = "[::]"
 
+# 优雅停机预算。放在这里而不是 server.py：async_server 也要用它，而 server.py
+# 是惰性导入 async_server 的，反向在模块层导入会成环。
+GRACE_PERIOD_SECONDS = 10
+
 DEFAULT_MAX_WORKERS = 100
 
 RPCS_PER_WORKER = 8
