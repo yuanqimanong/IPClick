@@ -189,3 +189,41 @@ def test_multiple_urls_are_reported_rather_than_silently_dropped() -> None:
 
     assert parsed.url == "https://a.example.com/"
     assert any("多个网址" in note for note in parsed.notes)
+
+
+def test_devtools_ansi_c_quoting_is_understood() -> None:
+    """Chrome DevTools 的「Copy as cURL」在 Linux/macOS 上会输出 ``$'...'``。
+
+    shlex 不认这种写法，``$`` 会留在 token 里——实测 ``-H $'Accept: text/html'``
+    解析出的请求头名字是 ``$Accept``。而 DevTools 只要值里有需要转义的字符就会用它，
+    这正是本功能最主要的输入来源。
+    """
+    parsed = parse_curl("curl -H $'Accept: text/html' -H $'X-T: a\\tb' https://real.example.com/")
+
+    assert parsed.headers == {"Accept": "text/html", "X-T": "a\tb"}
+
+
+def test_ansi_c_quoting_decodes_utf8_byte_escapes() -> None:
+    """DevTools 把非 ASCII 输出成 \\xNN 字节转义。"""
+    parsed = parse_curl("curl -H $'X-N: \\xe4\\xb8\\xad\\xe6\\x96\\x87' https://real.example.com/")
+
+    assert parsed.headers == {"X-N": "中文"}
+
+
+def test_a_backslash_newline_inside_a_quoted_body_is_not_a_line_continuation() -> None:
+    """续行替换必须认引号，不能在 tokenize 之前全文 replace。
+
+    原来先把 ``\\<换行>`` 全部换成空格再交给 shlex，于是引号里的那一个也被换掉：
+    ``-d 'line1\\<LF>line2'`` 的请求体变成 ``line1 line2``，一句提示都没有。
+    """
+    parsed = parse_curl("curl -d 'line1\\\nline2' https://real.example.com/")
+
+    assert parsed.body == "line1\\\nline2"
+
+
+def test_a_backslash_newline_outside_quotes_is_still_a_line_continuation() -> None:
+    """真正的续行照常生效——多行粘贴是最常见的形态。"""
+    parsed = parse_curl("curl \\\n  -H 'X-A: 1' \\\n  https://real.example.com/api")
+
+    assert parsed.url == "https://real.example.com/api"
+    assert parsed.headers == {"X-A": "1"}

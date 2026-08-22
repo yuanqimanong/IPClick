@@ -240,7 +240,7 @@ def parse_curl(command: str) -> ParsedCurl:
     if not text:
         return ParsedCurl(error="请先粘贴一条 curl 命令")
 
-    text = text.replace("\\\n", " ").replace("^\n", " ").replace("`\n", " ")
+    text = _join_continuations(_decode_ansi_c(text))
 
     try:
         tokens = shlex.split(text)
@@ -266,6 +266,63 @@ def _split_flag(token: str) -> tuple[str, str, bool]:
     if len(token) > 2 and not token.startswith("--") and token[:2] in _SHORT_VALUE_FLAGS:
         return token[:2], token[2:], True
     return token, "", False
+
+
+# bash 的 $'...' 写法。Chrome DevTools 的「Copy as cURL」在 Linux/macOS 上只要值里
+# 有需要转义的字符就会输出它，而这正是本功能最主要的输入来源。
+_ANSI_C_QUOTED = re.compile(r"\$'((?:\\.|[^'\\])*)'")
+
+
+def _decode_ansi_c(text: str) -> str:
+    """把 ``$'...'`` 换成等价的普通单引号串。
+
+    shlex 不认这种写法，``$`` 会原样留在 token 里——实测 ``-H $'Accept: text/html'``
+    解析出的请求头名字是 ``$Accept``。
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        raw = match.group(1)
+        try:
+            # DevTools 把非 ASCII 输出成 \xNN 的 UTF-8 字节转义，所以先按 latin-1
+            # 还原成字节再按 UTF-8 解码。
+            decoded = raw.encode("latin-1", "backslashreplace").decode("unicode_escape")
+            decoded = decoded.encode("latin-1", "replace").decode("utf-8", "replace")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            decoded = raw
+        return shlex.quote(decoded)
+
+    return _ANSI_C_QUOTED.sub(replace, text)
+
+
+def _join_continuations(text: str) -> str:
+    r"""把行尾续行符换成空格，但**只在引号外面**。
+
+    原来是在 tokenize 之前全文 replace，于是引号里的那一个也被换掉：
+    ``-d 'line1\<换行>line2'`` 的请求体静默变成 ``line1 line2``。
+    """
+    out: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            out.append(char)
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in "\"'":
+            quote = char
+            out.append(char)
+            index += 1
+            continue
+        if char in "\\^`" and text[index + 1 : index + 2] == "\n":
+            out.append(" ")
+            index += 2
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
 
 
 def _consume(tokens: list[str]) -> ParsedCurl:
