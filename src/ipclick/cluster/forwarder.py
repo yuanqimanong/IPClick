@@ -375,8 +375,11 @@ class ForwardingTaskService(TaskService):
                 entry = _ChannelEntry(open_channel_for(target, self._tls))
                 self._channels[node_id] = entry
                 log.debug(f"已建立到节点 {node_id} ({target}) 的转发连接")
-            entry.users += 1
+            # 先构造 stub 再计数：两行都在锁块里、在 try 之外，构造抛异常时异常直接
+            # 从锁块逃出、finally 不会执行。反过来写的话 users 就永久 +1，这个 channel
+            # 被 retire 之后再也不会 close，连接和 fd 就此泄漏。
             stub = task_pb2_grpc.TaskServiceStub(entry.channel)
+            entry.users += 1
         try:
             yield stub
         finally:
@@ -411,11 +414,22 @@ class ForwardingTaskService(TaskService):
         """由管理端手动摘除或恢复节点。"""
         return self._pool.drain(node_id) if drained else self._pool.undrain(node_id)
 
+    def _known_channel_ids(self) -> set[str]:
+        """在锁内快照当前 channel 表的键。
+
+        直接 ``set(self._channels)`` 是不加锁地迭代，而 ``_leased_stub`` 会在别的线程
+        往同一个 dict 里插新节点——正好在停机这条路上撞出 "dictionary changed size
+        during iteration"，把优雅停机变成一个异常。快照拿完就放锁，_close_channels
+        自己会再取一次（这把锁不是可重入的，不能嵌套）。
+        """
+        with self._channels_lock:
+            return set(self._channels)
+
     @override
     def cleanup(self) -> None:
         """停止探活、摘除下游 channel（在途请求结束后关闭），再释放本地适配器。"""
         self._pool.stop()
-        self._close_channels(set(self._channels))
+        self._close_channels(self._known_channel_ids())
         super().cleanup()
 
     @override
@@ -425,7 +439,7 @@ class ForwardingTaskService(TaskService):
         channel 同样是先摘除、由最后一个在途请求收尾关闭，不会在调用中途 close 掉。
         """
         self._pool.stop()
-        self._close_channels(set(self._channels))
+        self._close_channels(self._known_channel_ids())
         await super().acleanup()
 
 

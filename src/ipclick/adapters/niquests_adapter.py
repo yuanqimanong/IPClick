@@ -189,8 +189,6 @@ class NiquestsAdapter(DownloaderAdapter):
             raise ValidationError(f"Unsupported HTTP method: {method}")
 
         extra = self.parse_extra_kwargs(kwargs)
-        session = self._sessions.get((proxy, verify))
-        reset_cookies(session)
         request_kwargs = self._request_kwargs(
             {
                 "headers": headers,
@@ -205,19 +203,23 @@ class NiquestsAdapter(DownloaderAdapter):
             extra,
         )
 
-        try:
-            resp = self._request_following_policy(session, method, url, request_kwargs, allow_redirects)
-            return Response(
-                url=str(resp.url),
-                status_code=resp.status_code,
-                content=resp.content,
-                text=resp.text,
-                headers=dict(resp.headers),
-                raw_response=resp,
-            )
-        except Exception as e:
-            log.warning(f"niquests request failed for {url}: {e}")
-            raise
+        # 用 lease 而不是 get：整个请求期间都持着这个 session，而 LRU 会在别的线程
+        # 把它淘汰并 close 掉（见 sessions._SessionEntry）。
+        with self._sessions.lease((proxy, verify)) as session:
+            reset_cookies(session)
+            try:
+                resp = self._request_following_policy(session, method, url, request_kwargs, allow_redirects)
+                return Response(
+                    url=str(resp.url),
+                    status_code=resp.status_code,
+                    content=resp.content,
+                    text=resp.text,
+                    headers=dict(resp.headers),
+                    raw_response=resp,
+                )
+            except Exception as e:
+                log.warning(f"niquests request failed for {url}: {e}")
+                raise
 
     @override
     @aretry()
@@ -229,21 +231,21 @@ class NiquestsAdapter(DownloaderAdapter):
             raise ValidationError(f"Unsupported HTTP method: {method}")
 
         request_kwargs = self._request_kwargs(kwargs, self.parse_extra_kwargs(kwargs.get("kwargs")))
-        session = self._async_sessions.get((kwargs.get("proxy"), bool(kwargs.get("verify", True))))
-        reset_cookies(session)
-        try:
-            resp = await session.request(method, url, **request_kwargs)
-            return Response(
-                url=str(resp.url),
-                status_code=resp.status_code,
-                content=resp.content,
-                text=resp.text,
-                headers=dict(resp.headers),
-                raw_response=resp,
-            )
-        except Exception as e:
-            log.warning(f"niquests async request failed for {url}: {e}")
-            raise
+        with self._async_sessions.lease((kwargs.get("proxy"), bool(kwargs.get("verify", True)))) as session:
+            reset_cookies(session)
+            try:
+                resp = await session.request(method, url, **request_kwargs)
+                return Response(
+                    url=str(resp.url),
+                    status_code=resp.status_code,
+                    content=resp.content,
+                    text=resp.text,
+                    headers=dict(resp.headers),
+                    raw_response=resp,
+                )
+            except Exception as e:
+                log.warning(f"niquests async request failed for {url}: {e}")
+                raise
 
     @override
     def download_stream(
@@ -260,28 +262,30 @@ class NiquestsAdapter(DownloaderAdapter):
             yield StreamHeader(url=url, status_code=-1, error=f"Unsupported HTTP method: {method}")
             return
 
-        session = self._sessions.get((kwargs.get("proxy"), bool(kwargs.get("verify", True))))
-        reset_cookies(session)
-        request_kwargs = self._request_kwargs(kwargs, self.parse_extra_kwargs(kwargs.get("kwargs")))
+        # 租借必须覆盖**整条流**的生命周期：流式请求持有 session 的时间最长，而它的
+        # "最近使用时间"停在开流那一刻，最容易先变成 LRU 被淘汰关掉。
+        with self._sessions.lease((kwargs.get("proxy"), bool(kwargs.get("verify", True)))) as session:
+            reset_cookies(session)
+            request_kwargs = self._request_kwargs(kwargs, self.parse_extra_kwargs(kwargs.get("kwargs")))
 
-        try:
-            resp = session.request(method, url, stream=True, **request_kwargs)
-        except Exception as e:
-            log.warning(f"niquests stream failed for {url}: {e}")
-            yield StreamHeader(url=url, status_code=-1, error=str(e))
-            return
+            try:
+                resp = session.request(method, url, stream=True, **request_kwargs)
+            except Exception as e:
+                log.warning(f"niquests stream failed for {url}: {e}")
+                yield StreamHeader(url=url, status_code=-1, error=str(e))
+                return
 
-        try:
-            yield StreamHeader(
-                url=str(resp.url),
-                status_code=resp.status_code,
-                headers=dict(resp.headers),
-                content_length=int(resp.headers.get("content-length") or -1),
-            )
-            yield from resp.iter_content(chunk_size=chunk_size)
-        finally:
-            # 即使调用方提前停止迭代，也要归还连接池资源。
-            resp.close()
+            try:
+                yield StreamHeader(
+                    url=str(resp.url),
+                    status_code=resp.status_code,
+                    headers=dict(resp.headers),
+                    content_length=int(resp.headers.get("content-length") or -1),
+                )
+                yield from resp.iter_content(chunk_size=chunk_size)
+            finally:
+                # 即使调用方提前停止迭代，也要归还连接池资源。
+                resp.close()
 
     @override
     def close(self) -> None:

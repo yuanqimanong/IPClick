@@ -189,6 +189,106 @@ def test_channel_closes_immediately_when_nobody_holds_it(monkeypatch: pytest.Mon
     assert "n1" not in service._channels
 
 
+def test_leased_stub_does_not_leak_a_user_when_the_stub_cannot_be_built(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stub 构造失败不能留下一个永远减不回去的使用者。
+
+    ``entry.users += 1`` 和 ``TaskServiceStub(...)`` 都在 ``with self._channels_lock``
+    里、在 ``try:`` **之外**。构造抛异常时异常从锁块直接逃出，``finally`` 根本不执行，
+    ``users`` 永久 +1——这个 channel 被 retire 之后再也不会 close，连接和 fd 就此泄漏。
+    """
+    from ipclick.dto.proto import task_pb2_grpc
+
+    service = _forwarder_with_fake_channels(monkeypatch)
+
+    def _explode(_channel: object) -> object:
+        raise RuntimeError("stub 构造失败")
+
+    monkeypatch.setattr(task_pb2_grpc, "TaskServiceStub", _explode)
+
+    with pytest.raises(RuntimeError), service._leased_stub("n1", "127.0.0.1", 9528):
+        pass  # pragma: no cover - 进不来
+
+    entry = service._channels["n1"]
+    assert entry.users == 0
+
+    # 计数正确才能在摘除时真的关掉；漏减的话这里会停在 retired 而永不 close
+    service._close_channels({"n1"})
+    assert entry.channel.closed is True
+
+
+class _LockedOnlyDict(dict[str, Any]):
+    """只允许在持有指定锁时迭代的 dict，用来钉住"读 channel 表必须上锁"。"""
+
+    def __init__(self, lock: Any) -> None:
+        super().__init__()
+        self._lock: Any = lock
+
+    @override
+    def __iter__(self) -> Any:
+        if not self._lock.locked():
+            raise AssertionError("读 _channels 必须在 _channels_lock 内")
+        return super().__iter__()
+
+
+class _StoppablePool:
+    def __init__(self) -> None:
+        self.stopped: bool = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def test_shutdown_snapshots_the_channel_table_under_the_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """停机时读 channel 表必须上锁。
+
+    ``set(self._channels)`` 不加锁地迭代，而 ``_leased_stub`` 会在别的线程往同一个
+    dict 里插新节点——正好在停机这条路上撞出 "dictionary changed size during
+    iteration"，把优雅停机变成一个异常。
+    """
+    from ipclick.cluster import forwarder as fwd
+    from ipclick.services.task_service import TaskService
+
+    service = _forwarder_with_fake_channels(monkeypatch)
+    service._channels = _LockedOnlyDict(service._channels_lock)
+    service._pool = _StoppablePool()
+    monkeypatch.setattr(TaskService, "cleanup", lambda self: None)
+
+    with service._leased_stub("n1", "127.0.0.1", 9528):
+        pass
+
+    fwd.ForwardingTaskService.cleanup(service)
+
+    assert service._pool.stopped is True
+    assert "n1" not in service._channels
+
+
+async def test_async_shutdown_snapshots_the_channel_table_under_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """acleanup 与 cleanup 同理，同一处不加锁的迭代。"""
+    from ipclick.cluster import forwarder as fwd
+    from ipclick.services.task_service import TaskService
+
+    service = _forwarder_with_fake_channels(monkeypatch)
+    service._channels = _LockedOnlyDict(service._channels_lock)
+    service._pool = _StoppablePool()
+
+    async def _noop(_self: object) -> None:
+        return None
+
+    monkeypatch.setattr(TaskService, "acleanup", _noop)
+
+    with service._leased_stub("n1", "127.0.0.1", 9528):
+        pass
+
+    await fwd.ForwardingTaskService.acleanup(service)
+
+    assert service._pool.stopped is True
+    assert "n1" not in service._channels
+
+
 def test_leased_stub_reuses_one_channel_per_node(monkeypatch: pytest.MonkeyPatch) -> None:
     """同一节点的多次租借复用同一个 channel，且计数正确回落到零。"""
     service = _forwarder_with_fake_channels(monkeypatch)

@@ -200,24 +200,25 @@ class CurlCffiAdapter(DownloaderAdapter):
         )
 
         # proxy/证书校验/指纹会改变连接属性，必须分开复用连接池。
-        session = self._sessions.get((proxy, verify, impersonate))
-        reset_cookies(session)
+        # 用 lease 而不是 get：整个请求期间都持着这个 session，而 LRU 会在别的线程
+        # 把它淘汰并 close 掉（见 sessions._SessionEntry）。
+        with self._sessions.lease((proxy, verify, impersonate)) as session:
+            reset_cookies(session)
+            try:
+                curl_cffi_resp = self._request_following_policy(session, method, url, request_kwargs, allow_redirects)
 
-        try:
-            curl_cffi_resp = self._request_following_policy(session, method, url, request_kwargs, allow_redirects)
+                return Response(
+                    url=str(curl_cffi_resp.url),
+                    status_code=curl_cffi_resp.status_code,
+                    content=curl_cffi_resp.content,
+                    text=curl_cffi_resp.text,
+                    headers=dict(curl_cffi_resp.headers),
+                    raw_response=curl_cffi_resp,
+                )
 
-            return Response(
-                url=str(curl_cffi_resp.url),
-                status_code=curl_cffi_resp.status_code,
-                content=curl_cffi_resp.content,
-                text=curl_cffi_resp.text,
-                headers=dict(curl_cffi_resp.headers),
-                raw_response=curl_cffi_resp,
-            )
-
-        except Exception as e:
-            log.warning(f"curl_cffi request failed for {url}: {e}")
-            raise
+            except Exception as e:
+                log.warning(f"curl_cffi request failed for {url}: {e}")
+                raise
 
     @override
     @aretry()
@@ -228,23 +229,22 @@ class CurlCffiAdapter(DownloaderAdapter):
             raise ValidationError(f"Unsupported HTTP method: {method}")
 
         request_kwargs = self._build_request_kwargs(kwargs)
-        session = self._async_sessions.get(
-            (kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate"))
-        )
-        reset_cookies(session)
-        try:
-            resp = await session.request(method, url, **request_kwargs)
-            return Response(
-                url=str(resp.url),
-                status_code=resp.status_code,
-                content=resp.content,
-                text=resp.text,
-                headers=dict(resp.headers),
-                raw_response=resp,
-            )
-        except Exception as e:
-            log.warning(f"curl_cffi async request failed for {url}: {e}")
-            raise
+        key = (kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate"))
+        with self._async_sessions.lease(key) as session:
+            reset_cookies(session)
+            try:
+                resp = await session.request(method, url, **request_kwargs)
+                return Response(
+                    url=str(resp.url),
+                    status_code=resp.status_code,
+                    content=resp.content,
+                    text=resp.text,
+                    headers=dict(resp.headers),
+                    raw_response=resp,
+                )
+            except Exception as e:
+                log.warning(f"curl_cffi async request failed for {url}: {e}")
+                raise
 
     @override
     def download_stream(
@@ -260,30 +260,34 @@ class CurlCffiAdapter(DownloaderAdapter):
             yield StreamHeader(url=url, status_code=-1, error=f"Unsupported HTTP method: {method}")
             return
 
-        session = self._sessions.get((kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate")))
-        reset_cookies(session)
+        key = (kwargs.get("proxy"), bool(kwargs.get("verify", True)), kwargs.get("impersonate"))
+        # 租借必须覆盖**整条流**的生命周期：流式请求持有 session 的时间最长，而它的
+        # "最近使用时间"停在开流那一刻，最容易先变成 LRU 被淘汰关掉——那会让传输
+        # 在中途断掉。生成器结束或被 close 时租借才归还。
+        with self._sessions.lease(key) as session:
+            reset_cookies(session)
 
-        # 与普通请求共用白名单 builder，避免切换到 stream 后静默丢失指纹、证书等参数。
-        request_kwargs = self._build_request_kwargs(kwargs)
+            # 与普通请求共用白名单 builder，避免切换到 stream 后静默丢失指纹、证书等参数。
+            request_kwargs = self._build_request_kwargs(kwargs)
 
-        try:
-            response = session.request(method, url, stream=True, **request_kwargs)
-        except Exception as e:
-            log.warning(f"curl_cffi stream failed for {url}: {e}")
-            yield StreamHeader(url=url, status_code=-1, error=str(e))
-            return
+            try:
+                response = session.request(method, url, stream=True, **request_kwargs)
+            except Exception as e:
+                log.warning(f"curl_cffi stream failed for {url}: {e}")
+                yield StreamHeader(url=url, status_code=-1, error=str(e))
+                return
 
-        try:
-            yield StreamHeader(
-                url=str(response.url),
-                status_code=response.status_code,
-                headers=dict(response.headers),
-                content_length=int(response.headers.get("content-length") or -1),
-            )
-            yield from response.iter_content(chunk_size=chunk_size)
-        finally:
-            # 提前停止迭代也会执行 finally，归还底层连接。
-            response.close()
+            try:
+                yield StreamHeader(
+                    url=str(response.url),
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                    content_length=int(response.headers.get("content-length") or -1),
+                )
+                yield from response.iter_content(chunk_size=chunk_size)
+            finally:
+                # 提前停止迭代也会执行 finally，归还底层连接。
+                response.close()
 
     @override
     def close(self) -> None:
