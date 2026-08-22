@@ -10,6 +10,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import queue
+import re
 import sqlite3
 import sys
 import threading
@@ -403,6 +404,11 @@ class TraceReader:
             conn = sqlite3.connect(f"file:{encoded_path}?mode=ro", uri=True, timeout=5.0)
         else:
             conn = sqlite3.connect(self.path, timeout=10.0)
+            # synchronous 是**按连接**生效的，不像 journal_mode / auto_vacuum 那样写进
+            # 文件头。原来只在 _init_db 那条连接上设过，而它随即就关了：此后每次 _write /
+            # _purge 新开的连接都退回默认的 FULL，于是每 0.5 秒一次的批量提交都要整盘
+            # fsync——正是这条 pragma 想省掉的开销，队列被写满、记录被丢弃就更容易发生。
+            _ = conn.execute("PRAGMA synchronous=NORMAL")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -872,7 +878,11 @@ class TraceRecorder:
 
     def emit(self, tr: RequestTrace, duration_ms: int) -> None:
         """冻结请求上下文，更新计数器并送入记录后端。"""
-        url = tr.url if self.settings.record_url else _host_only(tr.url)
+        # error 也要过一遍：适配器的错误信息里常嵌着完整 URL，只脱敏 url 字段等于
+        # record_url = false 形同没设（查询串里的密钥照样落库、照样上页面）。
+        full_url = self.settings.record_url
+        url = tr.url if full_url else _host_only(tr.url)
+        error = tr.error if full_url else _host_only_in_text(tr.error)
         record = TraceRecord(
             ts=time.time(),
             uuid=tr.uuid,
@@ -886,7 +896,7 @@ class TraceRecorder:
             attempts=tr.attempts,
             forwarded=tr.forwarded,
             queued_ms=tr.queued_ms,
-            error=tr.error,
+            error=error,
             stream=tr.stream,
         )
         self.counters.leave(record)
@@ -1035,6 +1045,22 @@ def _host_only(url: str) -> str:
     from ipclick.limiter import host_of
 
     return host_of(url) or ""
+
+
+# 自由文本里的 URL。右边界排掉常见的收尾标点与中文括号，免得把"）"之类也吃进来。
+_URL_IN_TEXT = re.compile(r"https?://[^\s'\"<>）)\]]+", re.IGNORECASE)
+
+
+def _host_only_in_text(text: str) -> str:
+    """把自由文本里出现的完整 URL 缩成 host。
+
+    ``record_url = false`` 承诺"只记 host"，但原来只对 url 字段生效，error 字段是原样
+    抄进去的——而适配器的错误信息里经常嵌着完整 URL（重定向超上限、浏览器导航失败都会
+    带上）。于是 ``?api_key=…`` 照样落进 SQLite，并显示在请求流页面上。
+    """
+    if not text:
+        return text
+    return _URL_IN_TEXT.sub(lambda m: _host_only(m.group(0)) or m.group(0), text)
 
 
 def _default_node_id() -> str:

@@ -33,12 +33,24 @@ def config_option(func: Any) -> Any:
     )(func)
 
 
-def server_options(func: Any) -> Any:
-    """为需要连接 gRPC 服务端的命令添加地址、端口和令牌选项。"""
-    func = click.option("--token", default=None, help="gRPC 鉴权令牌（覆盖 IPCLICK_AUTH_TOKEN 与配置文件）")(func)
+def endpoint_options(func: Any) -> Any:
+    """为需要连接 gRPC 服务端的命令添加配置、地址和端口选项。"""
     func = click.option("--port", "-p", type=int, default=None, help="服务端端口（默认取配置）")(func)
     func = click.option("--host", default=None, help="服务端地址（默认取配置，[::]/0.0.0.0 会当成 127.0.0.1）")(func)
     return config_option(func)
+
+
+def server_options(func: Any) -> Any:
+    """endpoint_options 再加上 --token。
+
+    只给真正会把令牌发出去的命令用。``status`` 原来也挂着它，但它只调 check_health，
+    而 /grpc.health.v1.Health/ 是免鉴权的（见 auth.is_exempt），令牌一路走到
+    ``_ = token`` 就被丢掉：--token 写对写错输出完全一样，帮助里却写着"覆盖
+    IPCLICK_AUTH_TOKEN 与配置文件"——正在排查"我的令牌到底通不通"的人由此拿到一个
+    假的通过。
+    """
+    func = click.option("--token", default=None, help="gRPC 鉴权令牌（覆盖 IPCLICK_AUTH_TOKEN 与配置文件）")(func)
+    return endpoint_options(func)
 
 
 def _warn_about_unseen_port_configs(config: Path | None, port: int | None) -> None:
@@ -88,7 +100,7 @@ def _quiet_logs() -> None:
     LogUtil.init(level="ERROR")
 
 
-def _server_port(config: Settings, port: int | None) -> int:
+def server_port(config: Settings, port: int | None) -> int:
     """解析命令行优先的 gRPC 端口。"""
     # `if port` 会把 --port 0 当成"没传"而静默回落到配置端口；0 是非法端口，
     # 该让它走到 format_grpc_target 里被明确拒绝，而不是伪装成默认值。
@@ -100,7 +112,7 @@ def _server_port(config: Settings, port: int | None) -> int:
         return DEFAULT_GRPC_PORT
 
 
-def _server_host(config: Settings, host: str | None) -> str:
+def server_host(config: Settings, host: str | None) -> str:
     """解析命令行优先的连接主机，并把监听通配地址映射到本机。"""
     resolved = str(host if host is not None else section(config, "SERVER").get("host") or "127.0.0.1").strip()
     return "127.0.0.1" if resolved in ("", "*", "[::]", "::", "0.0.0.0") else resolved
@@ -266,7 +278,13 @@ def _body_payload(content: bytes, limit: int) -> dict[str, Any]:
 @click.option("--json-body", default=None, help="JSON 请求体（一段 JSON 文本；@路径 从文件读）")
 @click.option("--adapter", "-a", default=None, help="适配器：curl_cffi / niquests / browser / camoufox …")
 @click.option("--proxy", default=None, help="代理 URL；填 'config' 表示用配置文件里的 [PROXY]")
-@click.option("--timeout", type=float, default=60.0, show_default=True, help="单次请求超时（秒）")
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0, min_open=True),
+    default=60.0,
+    show_default=True,
+    help="单次请求超时（秒）",
+)
 @click.option("--retries", type=int, default=3, show_default=True, help="适配器内部重试次数")
 @click.option("--impersonate", default=None, help="curl_cffi 的浏览器指纹，如 chrome124")
 @click.option("--no-verify", is_flag=True, default=False, help="不校验目标站点的 TLS 证书")
@@ -437,15 +455,20 @@ def fetch(
 
 
 @click.command()
-@server_options
-@click.option("--timeout", type=float, default=5.0, show_default=True, help="健康检查超时（秒）")
+@endpoint_options
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0, min_open=True),
+    default=5.0,
+    show_default=True,
+    help="健康检查超时（秒）",
+)
 @click.option("--probe-nodes", is_flag=True, default=False, help="顺带探测集群里每个节点（会慢一些）")
 @json_option
 def status(
     config: Path | None,
     host: str | None,
     port: int | None,
-    token: str | None,
     timeout: float,
     probe_nodes: bool,
     as_json: bool,
@@ -459,10 +482,9 @@ def status(
     from ipclick.trace import TraceSettings
 
     _quiet_logs()
-    _ = token
     config_data = _load(config, as_json, port)
-    resolved_port = _server_port(config_data, port)
-    resolved_host = _server_host(config_data, host)
+    resolved_port = server_port(config_data, port)
+    resolved_host = server_host(config_data, host)
     target = format_grpc_target(resolved_host, resolved_port)
 
     try:
@@ -559,7 +581,7 @@ def _reader(config_data: Settings, port: int | None, as_json: bool) -> TraceRead
     """按端口解析链路库路径，并验证该库可读。"""
     from ipclick.trace import TraceReader, TraceSettings
 
-    resolved_port = _server_port(config_data, port)
+    resolved_port = server_port(config_data, port)
     settings = TraceSettings.from_config(
         placeholders.resolve_for("TRACE", section(config_data, "TRACE"), resolved_port)
     )
@@ -620,7 +642,7 @@ def _record_dict(record: Any) -> dict[str, Any]:
 )
 @click.option("--adapter", default="", help="按适配器筛选（精确匹配）")
 @click.option("--keyword", "-k", default="", help="URL 里包含这个子串")
-@click.option("--since", type=float, default=None, help="只看最近多少小时")
+@click.option("--since", type=click.FloatRange(min=0, min_open=True), default=None, help="只看最近多少小时")
 @json_option
 def trace_list(
     config: Path | None,
@@ -668,7 +690,7 @@ def trace_list(
 @trace.command("stats")
 @config_option
 @click.option("--port", "-p", type=int, default=None, help="服务端端口（只用于解析路径里的 {port} 占位符）")
-@click.option("--days", type=int, default=7, show_default=True, help="统计最近多少天；0 = 全部")
+@click.option("--days", type=click.IntRange(min=0), default=7, show_default=True, help="统计最近多少天；0 = 全部")
 @click.option("--top", type=click.IntRange(min=1), default=10, show_default=True, help="目标站点排行取前几名")
 @json_option
 def trace_stats(config: Path | None, port: int | None, days: int, top: int, as_json: bool) -> None:
@@ -803,7 +825,13 @@ def node_list(config: Path | None, as_json: bool) -> None:
 @config_option
 @click.argument("node_id", required=False, default="")
 @click.option("--address", default="", help="直接探这个地址（host:port），不必在配置里声明")
-@click.option("--timeout", type=float, default=5.0, show_default=True, help="单次探测超时（秒）")
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0, min_open=True),
+    default=5.0,
+    show_default=True,
+    help="单次探测超时（秒）",
+)
 @json_option
 def node_probe(config: Path | None, node_id: str, address: str, timeout: float, as_json: bool) -> None:
     """探测一个、全部或临时指定的集群节点。"""

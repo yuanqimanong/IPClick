@@ -147,3 +147,34 @@ def test_replace_endpoint_does_not_swallow_an_explicit_zero() -> None:
     assert settings.replace_endpoint(port=None).port == 19528
     with pytest.raises(ConfigError, match=re.escape("SERVER.port")):
         _ = settings.replace_endpoint(port=0)
+
+
+@pytest.mark.parametrize(
+    ("config", "expected_field"),
+    [
+        ({"processes": "auto"}, "SERVER.processes"),
+        ({"processes": -1}, "SERVER.processes"),
+        ({"max_concurrent_rpcs": "lots"}, "SERVER.max_concurrent_rpcs"),
+        ({"max_concurrent_streams": 1.5}, "SERVER.max_concurrent_streams"),
+    ],
+)
+def test_bad_concurrency_values_are_rejected_not_silently_defaulted(
+    config: dict[str, object], expected_field: str
+) -> None:
+    """这三项原来走 as_int，越界或类型不对时**静默回落默认值**。
+
+    processes = "auto" 悄悄变成 1，四进程的吞吐就这么没了，而 config-info 并不打印
+    processes，用户没有任何察觉的途径。port 早就因为同样的理由换成了 require_int
+    （见 from_config 里那段注释），这三项漏了。
+    """
+    with pytest.raises(ConfigError, match=expected_field):
+        _ = ServerSettings.from_config(config)
+
+
+def test_valid_concurrency_values_still_parse() -> None:
+    """收紧校验不能把正常取值一起挡掉。"""
+    settings = ServerSettings.from_config({"processes": 4, "max_concurrent_rpcs": 512, "max_concurrent_streams": 0})
+
+    assert settings.processes == 4
+    assert settings.max_concurrent_rpcs == 512
+    assert settings.max_concurrent_streams == 0

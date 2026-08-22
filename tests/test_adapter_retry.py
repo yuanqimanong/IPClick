@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import threading
 from typing import Any, final
 
 import pytest
@@ -379,3 +380,82 @@ def test_transport_errors_are_still_retried() -> None:
     delay = loop.on_error(0, ConnectionError("connection reset"))
 
     assert delay is not None and delay > 0
+
+
+@pytest.mark.parametrize("kind", ["curl_cffi", "niquests"])
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"automation_script": "return document.title"},
+        {"automation_config": '{"scroll_to_bottom": true}'},
+    ],
+)
+def test_http_adapters_refuse_browser_only_params(kind: str, params: dict[str, str]) -> None:
+    """HTTP 适配器不跑 JS，收下这两个参数却不读是静默失败。
+
+    此前两个适配器都只在签名里收下 automation_config / automation_script，正文一次都
+    不读：调用方拿到 200 和一段没执行过脚本的原始 HTML，既没有 x-ipclick-script-result
+    也没有任何告警，和"脚本返回了 null"分不开。
+
+    走两边共用的那个 builder 断言，因为三个入口（download / adownload /
+    download_stream）都从它过——拦在那里才对三条路都生效。
+    """
+    if kind == "curl_cffi":
+        from ipclick.adapters.curl_cffi_adapter import CurlCffiAdapter
+
+        adapter: Any = object.__new__(CurlCffiAdapter)
+        adapter.timeout = 60
+        adapter.settings = AdapterSettings()
+        build = adapter._build_request_kwargs
+    else:
+        from ipclick.adapters.niquests_adapter import NiquestsAdapter
+
+        adapter = object.__new__(NiquestsAdapter)
+        adapter.timeout = 60
+        adapter.settings = AdapterSettings()
+        adapter._ua_pool_cache = ("ipclick-test-agent",)
+        adapter._ua_lock = threading.Lock()
+        build = lambda source: adapter._request_kwargs(source, {})  # noqa: E731
+
+    with pytest.raises(ValidationError, match="不支持页面自动化参数"):
+        _ = build(params)
+
+
+def test_curl_cffi_refuses_files_on_every_entry_point() -> None:
+    """files 的拒绝必须在三个入口共用的那一层。
+
+    原来只有同步 download 里拦；adownload 与 download_stream 走 **kwargs，files 既不
+    在白名单 builder 里、也没有检查——POST 照发，body 是空的，调用方看不出来。
+    """
+    from ipclick.adapters.curl_cffi_adapter import CurlCffiAdapter
+
+    adapter: Any = object.__new__(CurlCffiAdapter)
+    adapter.timeout = 60
+    adapter.settings = AdapterSettings()
+
+    with pytest.raises(ValidationError, match="不支持 files 参数"):
+        _ = adapter._build_request_kwargs({"files": {"f": b"x"}})
+
+
+def test_curl_cffi_splits_the_total_timeout_into_a_connect_read_pair() -> None:
+    """connect_timeout 必须真的生效，且总预算不能凭空变大。
+
+    原来传的是标量总超时，[DOWNLOADER].connect_timeout 完全无从生效：连一个黑洞地址
+    要一直等到 download_timeout。curl_cffi 对二元组的语义是 all_timeout = 连接 + 读取，
+    所以两者之和要正好等于总超时。
+    """
+    from ipclick.adapters.curl_cffi_adapter import CurlCffiAdapter
+
+    adapter: Any = object.__new__(CurlCffiAdapter)
+    adapter.timeout = 300.0
+    adapter.settings = AdapterSettings(connect_timeout=10.0)
+
+    built = adapter._build_request_kwargs({})
+    connect, read = built["timeout"]
+
+    assert connect == 10.0
+    assert connect + read == 300.0
+
+    # 调用方给的总超时比 connect_timeout 还小时，不能反而放大预算
+    short = adapter._build_request_kwargs({"timeout": 3.0})
+    assert sum(short["timeout"]) == 3.0

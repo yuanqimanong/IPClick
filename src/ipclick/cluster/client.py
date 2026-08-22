@@ -188,7 +188,15 @@ class ClusterDownloader(ClientBase):
 
     def stream(self, url: str, **kwargs: Any) -> StreamedResponse:
         """建立流式响应；流开始后的中断不会跨节点续传。"""
-        return self._with_failover(lambda c: c.stream(url, **kwargs), f"流式下载 {url}")
+        # download / batch 都算 replayable，这里原来吃的是默认值 True——而
+        # Downloader.stream 照样接受 method=POST。建流阶段的传输错误意味着结果未知，
+        # 换个节点重投就是把那个 POST 执行第二次，正是 _with_failover 说明里点名
+        # 不能做的事。
+        return self._with_failover(
+            lambda c: c.stream(url, **kwargs),
+            f"流式下载 {url}",
+            replayable=_is_replayable(self._build_task(url=url, **kwargs)),
+        )
 
     def batch(self, tasks: Iterable[DownloadTask], timeout: float | None = None) -> Iterator[DownloadResponse]:
         """将一批任务固定派发到同一健康节点。"""

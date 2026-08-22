@@ -547,10 +547,13 @@ def current_value(config: Any, field: Field) -> Any:
     return node[field.key]
 
 
-def parse_form(form: dict[str, str]) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
-    """解析配置表单，分别返回更新、需重启字段和校验错误。"""
+def parse_form(form: dict[str, str]) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """解析配置表单，返回更新项与校验错误。
+
+    不在这里算"哪些项需要重启"：那要看值是否真的变了，只有筛过一遍现有配置的
+    调用方（``_changed_only``）才知道。
+    """
     updates: dict[str, dict[str, Any]] = {}
-    restart_needed: list[str] = []
     errors: list[str] = []
 
     for name, field in FIELDS.items():
@@ -567,10 +570,8 @@ def parse_form(form: dict[str, str]) -> tuple[dict[str, dict[str, Any]], list[st
                 errors.append(str(e))
                 continue
         updates.setdefault(field.section, {})[field.key] = value
-        if field.restart:
-            restart_needed.append(field.label)
 
-    return updates, restart_needed, errors
+    return updates, errors
 
 
 def parse_nodes(form: dict[str, str]) -> list[dict[str, Any]]:
@@ -593,15 +594,6 @@ def parse_nodes(form: dict[str, str]) -> list[dict[str, Any]]:
         except ValueError:
             weight = 100
         nodes.append({"id": node_id, "address": address, "weight": weight})
-
-    new_address = form.get("new_node_address", "").strip()
-    if new_address:
-        new_id = form.get("new_node_id", "").strip() or new_address
-        try:
-            weight = max(1, int(form.get("new_node_weight", "100") or 100))
-        except ValueError:
-            weight = 100
-        nodes.append({"id": new_id, "address": new_address, "weight": weight})
 
     return nodes
 

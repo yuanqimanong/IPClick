@@ -11,11 +11,15 @@ import grpc
 
 from ipclick.exceptions import ConfigError
 from ipclick.ports import DEFAULT_GRPC_PORT
-from ipclick.utils.coerce import as_int, as_text, require_bool, require_int
+from ipclick.utils.coerce import as_text, require_bool, require_int
 from ipclick.utils.log_util import log
 
 
 DEFAULT_HOST = "[::]"
+
+# 优雅停机预算。放在这里而不是 server.py：async_server 也要用它，而 server.py
+# 是惰性导入 async_server 的，反向在模块层导入会成环。
+GRACE_PERIOD_SECONDS = 10
 
 DEFAULT_MAX_WORKERS = 100
 
@@ -117,9 +121,17 @@ class ServerSettings:
             # 上界参数、原样穿过去才被校验到，同一项配置两个方向行为不一致。
             port=require_int(config.get("port"), "SERVER.port", defaults.port, minimum=1),
             max_workers=require_int(config.get("max_workers"), "SERVER.max_workers", defaults.max_workers, minimum=1),
-            max_concurrent_rpcs=as_int(config.get("max_concurrent_rpcs"), DERIVE, minimum=DERIVE),
-            max_concurrent_streams=as_int(config.get("max_concurrent_streams"), DERIVE, minimum=DERIVE),
-            processes=as_int(config.get("processes"), defaults.processes, minimum=0),
+            # 与上面 port 同理，这三项也必须用 require_int。as_int 越界或类型不对时静默
+            # 回落默认值：processes = "auto" / -1 悄悄变成 1，四进程的吞吐就这么没了，
+            # 而 config-info 并不打印 processes，用户没有任何察觉的途径；顺带
+            # __post_init__ 里那几个 processes < 0 / streams < 1 的校验也永远走不到。
+            max_concurrent_rpcs=require_int(
+                config.get("max_concurrent_rpcs"), "SERVER.max_concurrent_rpcs", DERIVE, minimum=DERIVE
+            ),
+            max_concurrent_streams=require_int(
+                config.get("max_concurrent_streams"), "SERVER.max_concurrent_streams", DERIVE, minimum=DERIVE
+            ),
+            processes=require_int(config.get("processes"), "SERVER.processes", defaults.processes, minimum=0),
             compression=as_text(config.get("compression"), defaults.compression).lower(),
             async_mode=require_bool(config.get("async_mode"), "SERVER.async_mode"),
         )

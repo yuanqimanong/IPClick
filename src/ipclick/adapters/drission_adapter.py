@@ -10,7 +10,12 @@ from typing import Any
 
 from typing_extensions import override
 
-from ipclick.adapters.base import DownloaderAdapter, mark_utf8_charset, raise_if_script_error
+from ipclick.adapters.base import (
+    DownloaderAdapter,
+    mark_utf8_charset,
+    raise_if_script_error,
+    reject_disallowed_urls,
+)
 from ipclick.adapters.browser_settings import BLOCKABLE_RESOURCES, BrowserSettings
 from ipclick.adapters.retry import retry
 from ipclick.adapters.settings import AdapterSettings
@@ -277,6 +282,17 @@ class DrissionPageAdapter(DownloaderAdapter):
             status = int(getattr(response, "status", 0) or 0) if response is not None else 0
             resp_headers = dict(getattr(response, "headers", None) or {}) if response is not None else {}
 
+            # 逐跳重定向校验此前只覆盖 curl_cffi / niquests / browser 三条路，这一条
+            # 一次都不校验：url_validator 在本文件里根本没被读过。于是
+            # 302 -> http://169.254.169.254/ 会被 chromium 跟到底，云元数据连同
+            # tab.url 一起交回调用方，而 SSRF 准入只看过入口 URL。
+            # 必须在读 tab.html / 跑脚本之前拦下来。
+            reject_disallowed_urls(
+                self.url_validator,
+                url,
+                (str(tab.url or ""), str(getattr(packet, "url", "") or "") if packet else ""),
+            )
+
             selector = config.get("wait_for_selector")
             if selector:
                 tab.wait.ele_displayed(str(selector), timeout=page_timeout)
@@ -359,7 +375,11 @@ def _scroll_to_bottom(tab: Any) -> None:
         if height == previous:
             return
         previous = height
-        tab.run_js("window.scrollTo(0, document.body.scrollHeight)")
+        # 和上一行同样要防 document.body 为空：XML / 纯 SVG / text-plain 文档没有 body，
+        # 少了这层保护会抛 TypeError，被当成用户脚本错误报成 ValidationError。
+        # 上一行的高度读取已经带守卫，于是无 body 的文档 height=0 != previous=-1，
+        # 每次都会走到这里。
+        tab.run_js("if (document.body) window.scrollTo(0, document.body.scrollHeight);")
         tab.wait(0.3)
 
 

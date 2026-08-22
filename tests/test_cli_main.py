@@ -9,6 +9,7 @@ from click.testing import CliRunner
 import pytest
 
 from ipclick.cli.main import main
+from ipclick.cli.output import Exit
 from ipclick.dto.models import DownloadResponse
 from ipclick.exceptions import ConfigError
 
@@ -340,3 +341,73 @@ def test_config_info_reports_auth_that_comes_from_the_cluster_secret(tmp_path: P
 
     assert "共享密钥派生" in with_secret.output, with_secret.output
     assert "未配置（任何人都能调用）" in without.output, without.output
+
+
+def test_run_forwards_verbose_to_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`run -v` 必须一路传到 IPClickServer。
+
+    CLI 里先 LogUtil.init(level="DEBUG")，但 IPClickServer.__init__ 紧接着按同一个
+    logger_name 再初始化一次、把 handler 全换成 [LOG].level——于是 -v 只对建 server
+    之前那两行生效，之后整个进程都退回 INFO。唯一真正管用的开关是
+    [GENERAL].debug = true，而帮助里写的是"输出 DEBUG 级别日志"。
+    """
+    cli_main = import_module("ipclick.cli.main")
+
+    captured: dict[str, object] = {}
+
+    def fake_serve(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli_main, "serve", fake_serve)
+
+    result = CliRunner().invoke(main, ["run", "-v"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["verbose"] is True
+
+
+def test_run_without_verbose_does_not_force_debug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """不带 -v 时不能反过来把 DEBUG 打开。"""
+    cli_main = import_module("ipclick.cli.main")
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli_main, "serve", lambda **kwargs: captured.update(kwargs))
+
+    result = CliRunner().invoke(main, ["run"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["verbose"] is False
+
+
+def test_status_no_longer_advertises_a_token_it_ignores() -> None:
+    """status 只调 check_health，而 health 服务免鉴权，--token 到不了任何地方。
+
+    原来它挂着 --token、帮助里写"覆盖 IPCLICK_AUTH_TOKEN 与配置文件"，实现里却是
+    `_ = token`：写对写错输出完全一样，正在排查"我的令牌通不通"的人拿到一个假通过。
+    """
+    result = CliRunner().invoke(main, ["status", "--token", "whatever", "--json"])
+
+    assert result.exit_code == int(Exit.USAGE)
+    assert "--token" in result.output
+
+
+@pytest.mark.parametrize(
+    ("argv", "flag"),
+    [
+        (["status", "--timeout", "-5"], "--timeout"),
+        (["fetch", "https://example.com", "--timeout", "-5"], "--timeout"),
+        (["trace", "list", "--since", "-1"], "--since"),
+        (["trace", "stats", "--days", "-3"], "--days"),
+    ],
+)
+def test_negative_numeric_options_are_rejected_at_the_parameter_layer(argv: list[str], flag: str) -> None:
+    """负超时会让 gRPC 立刻 DEADLINE_EXCEEDED，把健康的服务端报成挂了。
+
+    main.health 早就用 FloatRange 挡住了这一类（那里有注释说明），其余几个命令漏了：
+    --since -1 算出一个未来的截止时间、只会打印"没有匹配的记录"，--days -3 则悄悄等于
+    "全部记录"。
+    """
+    result = CliRunner().invoke(main, argv)
+
+    assert result.exit_code == int(Exit.USAGE)
+    assert flag in result.output

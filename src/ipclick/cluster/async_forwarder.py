@@ -81,7 +81,12 @@ class AsyncForwardingTaskService(AsyncTaskService, ForwardingTaskService):
                 return await AsyncTaskService.Send(self, request, context)
 
             try:
-                response = await loop.run_in_executor(self._forward_pool, self._forward, state, request)
+                # 同步转发器里那条注释同样适用：转发流量原来不过入口的限流闸门，
+                # 而开了转发就不做分片，N 个节点各放行完整配额。
+                # 这里必须用 async_limiter——host_limiter 是另一个独立配额池，
+                # 混用会让单 host 的有效并发翻倍（见 AsyncTaskService.SendStream 的说明）。
+                async with self.async_limiter.acquire(request.url):
+                    response = await loop.run_in_executor(self._forward_pool, self._forward, state, request)
             except ValueError as e:
                 # channel 在停机或热更新的边缘被关掉时，grpc 抛的是 ValueError
                 # （"Cannot invoke RPC on closed channel!"）而不是 RpcError，上面那个

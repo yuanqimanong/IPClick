@@ -1,121 +1,14 @@
-"""统一配置控制台、文件和 SQLite 日志输出。"""
+"""统一配置控制台与滚动文件日志输出。"""
 
-from collections.abc import Callable
 import contextlib
-import functools
 from pathlib import Path
-import sqlite3
-from sqlite3 import Connection
 import sys
 import threading
-from typing import Any, ClassVar, Protocol, TypeVar, cast
+from typing import Any, ClassVar
 
 from loguru import logger
-from typing_extensions import override, runtime_checkable
 
 from ipclick.utils.path_util import PathUtil
-
-
-F = TypeVar("F", bound=Callable[..., Any])
-
-
-@runtime_checkable
-class DatabaseAdapter(Protocol):
-    """可被 loguru sink 调用的持久化适配器协议。"""
-
-    def write(self, log_message: Any) -> None:
-        """持久化一条 loguru 消息。"""
-        ...
-
-
-class SQLiteAdapter(DatabaseAdapter):
-    """将结构化日志追加到本地 SQLite 表。"""
-
-    def __init__(self, db_path: str, table_name: str = "logs") -> None:
-        """打开数据库并确保日志表存在。"""
-        if not table_name.isidentifier():
-            raise ValueError(f"非法的表名: {table_name!r}（只允许标识符字符）")
-
-        self.db_path: str = db_path
-        self.table_name: str = table_name
-        sql_path = PathUtil.resolve_path(db_path)
-        PathUtil.ensure_parent_dir(sql_path)
-        self.conn: Connection = sqlite3.connect(str(sql_path), check_same_thread=False, timeout=10.0)
-        self._create_table()
-
-    def _create_table(self) -> None:
-        """按需创建日志表。"""
-        cursor = self.conn.cursor()
-        _ = cursor.execute(f"""
-            CREATE TABLE IF NOT EXISTS {self.table_name} (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                level TEXT,
-                message TEXT,
-                file TEXT,
-                line INTEGER,
-                function TEXT,
-                process_id INTEGER,
-                thread_id INTEGER,
-                exception TEXT
-            )
-        """)
-        self.conn.commit()
-
-    @override
-    def write(self, log_message: Any) -> None:
-        """提取 loguru record 并以参数化 SQL 写入一行。"""
-        record = log_message.record
-
-        timestamp = record["time"].isoformat()
-        level = record["level"].name
-        message = record["message"]
-        file = record["file"].path
-        line = record["line"]
-        function = record["function"]
-        process_id = record["process"].id
-        thread_id = record["thread"].id
-        exception = str(record["exception"]) if record["exception"] else None
-
-        with self.conn:
-            _ = self.conn.execute(
-                f"""
-                INSERT INTO {self.table_name} (timestamp, level, message, file, line, function, process_id, thread_id, exception)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    timestamp,
-                    level,
-                    message,
-                    file,
-                    line,
-                    function,
-                    process_id,
-                    thread_id,
-                    exception,
-                ),
-            )
-
-    def close(self) -> None:
-        """关闭底层 SQLite 连接。"""
-        self.conn.close()
-
-
-def ensure_configured(func: F) -> F:
-    """装饰日志方法，使首次调用前自动安装默认 handler。"""
-
-    @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any):
-        """在转发调用前触发所属类的日志初始化。"""
-        if args:
-            cls = args[0]
-            if hasattr(cls, "_ensure_configured"):
-                cls._ensure_configured()
-        else:
-            pass
-        return func(*args, **kwargs)
-
-    return cast(F, wrapper)
 
 
 def _validate_format(value: object) -> str | None:
@@ -166,7 +59,6 @@ class LogUtil:
         base_dir: Path | None = None,
         rotation: str = "10 MB",
         retention: str | int = "30 days",
-        adapter: DatabaseAdapter | None = None,
         **kwargs: Any,
     ) -> None:
         """安装控制台、可选滚动文件及数据库 handler。"""
@@ -179,7 +71,6 @@ class LogUtil:
                 base_dir=base_dir,
                 rotation=rotation,
                 retention=retention,
-                adapter=adapter,
                 kwargs=kwargs,
             )
 
@@ -194,7 +85,6 @@ class LogUtil:
         base_dir: Path | None,
         rotation: str,
         retention: str | int,
-        adapter: DatabaseAdapter | None,
         kwargs: dict[str, Any],
     ) -> None:
         """在持有配置锁时替换指定名称的 handler。"""
@@ -242,22 +132,12 @@ class LogUtil:
             )
             handler_ids.append(file_handler)
 
-        if adapter:
-            adapter_handler = logger.add(
-                adapter.write,
-                level=level,
-                enqueue=True,
-                **kwargs,
-            )
-            handler_ids.append(adapter_handler)
-
         cls._emitter = None
 
         cls._own_handler_ids.update(handler_ids)
         cls._configurations[logger_name] = {
             "handler_ids": handler_ids,
             "level": level,
-            "adapter": adapter,
         }
 
     @classmethod
@@ -286,10 +166,18 @@ class LogUtil:
         debug: bool = False,
     ) -> None:
         """从 ``[LOG]`` 配置初始化 logger。"""
+        from ipclick.utils.coerce import as_int
+
         config = dict(log_config or {})
         output = str(config.get("output", "stdout"))
         rotation_config = dict(config.get("rotation", {}))
-        max_size = rotation_config.get("max_size", 100)
+        # 都要过 as_int（告警后回落默认值），别再裸 int()/裸插值。这两项原来直接
+        # int() 和 f"{...} MB"：max_backups = "30 days"（loguru 自己认的保留期写法）
+        # 或 max_size = "100MB" 都会抛 ValueError——而调用点一个在 IPClickServer.__init__
+        # （启动直接死，报错里不提是哪个键），一个在 Web 端改日志级别时（500）。
+        # 日志配置写错不该让服务起不来。
+        max_size = as_int(rotation_config.get("max_size"), 100, minimum=1)
+        max_backups = as_int(rotation_config.get("max_backups"), 5, minimum=0)
 
         cls.init(
             level="DEBUG" if debug else str(config.get("level", "INFO")),
@@ -297,7 +185,7 @@ class LogUtil:
             format=_validate_format(config.get("format")),
             log_file=None if output in ("stdout", "stderr", "") else output,
             rotation=f"{max_size} MB",
-            retention=int(rotation_config.get("max_backups", 5)),
+            retention=max_backups,
         )
 
     @classmethod

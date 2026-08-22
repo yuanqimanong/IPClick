@@ -227,3 +227,69 @@ def test_a_backslash_newline_outside_quotes_is_still_a_line_continuation() -> No
 
     assert parsed.url == "https://real.example.com/api"
     assert parsed.headers == {"X-A": "1"}
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # 值里带 "=" 的短参数贴值写法：按 "=" 先拆会得到一个并不存在的参数名。
+        ("curl -H'Cookie: sid=abc' https://real.example.com/", {"headers": {"Cookie": "sid=abc"}}),
+        ("curl -b'sid=abc' https://real.example.com/", {"headers": {"Cookie": "sid=abc"}}),
+        ("curl -d'user=alice&p=1' https://real.example.com/", {"body": "user=alice&p=1", "method": "POST"}),
+        # 长参数的 "=" 拆分照旧。
+        ("curl --data-raw=x=1 https://real.example.com/", {"body": "x=1", "method": "POST"}),
+        # 不带值的短参数与并写的布尔短参数不受影响。
+        ("curl -XPOST https://real.example.com/", {"method": "POST"}),
+        ("curl -sS https://real.example.com/", {"method": "GET"}),
+    ],
+)
+def test_short_flags_with_an_equals_sign_in_the_glued_value(command: str, expected: dict[str, object]) -> None:
+    """``-H'Cookie: sid=abc'`` 的 ``=`` 属于值，不是 ``--flag=value`` 的分隔符。
+
+    先按 ``=`` 拆的话，参数名成了 ``-HCookie: sid``——它不在任何表里，于是整条请求头
+    连同 ``-d`` 的请求体被当作"未识别的参数"丢掉，提示里还报出一个根本不存在的参数。
+    请求照样发得出去，只是少了鉴权头、少了 body、方法还退回 GET。
+    """
+    parsed = parse_curl(command)
+
+    assert parsed.error == ""
+    for attribute, value in expected.items():
+        assert getattr(parsed, attribute) == value
+
+
+def test_ansi_c_quoting_keeps_literal_non_ascii() -> None:
+    """``$'...'`` 里原样的中文不能被压成 "?"。
+
+    原来按 latin-1 取字节（配 errors="replace"）：中文不在 latin-1 里，
+    ``$'{"name":"张三"}'`` 静默变成 ``{"name":"??"}``——请求发得出去，内容已经不对了。
+    """
+    parsed = parse_curl("""curl https://real.example.com/ -d $'{"name":"张三"}'""")
+
+    assert parsed.body == '{"name":"张三"}'
+    assert parsed.method == "POST"
+
+
+def test_a_scheme_less_url_carrying_a_query_string_is_found() -> None:
+    """``=`` 只有出现在 host 段里才说明这不是网址。
+
+    原来对整个 token 判，于是 ``example.com/api?q=1`` 这种 curl 能接受的写法被判成
+    "没找到网址"，整条命令导入失败。
+    """
+    parsed = parse_curl("curl 'example.com/api?q=1'")
+
+    assert parsed.url == "https://example.com/api?q=1"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl 'user=alice@evil.example'",
+        "curl 'example.com:443:127.0.0.1'",
+    ],
+)
+def test_tokens_that_only_look_like_urls_are_still_rejected(command: str) -> None:
+    """放宽 "=" 判定不能把这两类顶替真正目标的写法放回来。"""
+    parsed = parse_curl(command)
+
+    assert parsed.url == ""
+    assert "没找到网址" in parsed.error

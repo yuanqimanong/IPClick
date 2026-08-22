@@ -146,7 +146,16 @@ class ForwardingTaskService(TaskService):
                 return super().Send(request, context)
 
             try:
-                response = self._forward(state, request)
+                # 入口节点的限流闸门必须把转发流量也算进去。本地执行那一支由
+                # _execute_download 里的 acquire 覆盖，转发这一支原来完全不过闸；
+                # 而 server._wire_rate_sharding 又在 forwarding_enabled 时直接返回、
+                # 不做分片，于是每个下游节点各按完整配额放行：配 10 QPS 部三台，目标
+                # 站点实际挨 30。default_config 里写的恰好是反过来的承诺——
+                # "forward = on 精确……要精确限流，这是最省事的形态"。
+                # 只包这一支，不包上面 self_id 那支：那边 super().Send 会自己 acquire，
+                # 嵌套获取在 per_host_max_concurrent = 1 时会把自己锁死。
+                with self.host_limiter.acquire(request.url):
+                    response = self._forward(state, request)
             except ValueError as e:
                 # channel 在停机或热更新的边缘被关掉时，grpc 抛的是 ValueError
                 # （"Cannot invoke RPC on closed channel!"）而不是 RpcError，上面那个

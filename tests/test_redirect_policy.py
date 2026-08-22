@@ -423,3 +423,120 @@ def test_stream_releases_the_intermediate_hop_and_returns_the_last_one(kind: str
     assert b"".join(e for e in events if isinstance(e, bytes)) == b"payload"
     assert hop.closed is True, "中间跳没关，连接会一路占着直到 GC"
     assert last.closed is True, "生成器结束时最终响应也要关"
+
+
+@final
+class _FakeDrissionTab:
+    """够 DrissionPageAdapter._render 跑完一次的最小 tab。"""
+
+    def __init__(self, final_url: str) -> None:
+        self.url: str = final_url
+        self.html: str = "<html>secret</html>"
+        self.closed: bool = False
+        self.cookies_cleared: bool = False
+        tab = self
+
+        @final
+        class _Cookies:
+            def clear(self) -> None:
+                tab.cookies_cleared = True
+
+        @final
+        class _Set:
+            cookies: _Cookies = _Cookies()
+
+            def headers(self, _headers: dict[str, str]) -> None:
+                return None
+
+            def blocked_urls(self, _patterns: list[str]) -> None:
+                return None
+
+        @final
+        class _Listen:
+            def start(self, *, targets: str, method: str) -> None:
+                _ = (targets, method)
+                return None
+
+            def wait(self, *, timeout: float, raise_err: bool) -> Any:
+                # 关键字名由生产代码决定，不能改成 _timeout / _raise_err
+                _ = (timeout, raise_err)
+                return _FakeDrissionPacket(tab.url)
+
+            def stop(self) -> None:
+                return None
+
+        self.set: _Set = _Set()
+        self.listen: _Listen = _Listen()
+
+    def get(self, _url: str, *, timeout: float, retry: int) -> bool:
+        _ = (timeout, retry)
+        return True
+
+    def run_js(self, _script: str) -> Any:
+        return None
+
+    def wait(self, _seconds: float) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@final
+class _FakeDrissionPacket:
+    def __init__(self, url: str) -> None:
+        self.url: str = url
+        self.response: Any = type("R", (), {"status": 200, "headers": {"content-type": "text/html"}})()
+
+
+def _drission_adapter(tab: _FakeDrissionTab, validator: Any) -> Any:
+    from ipclick.adapters.browser_settings import BrowserSettings
+    from ipclick.adapters.drission_adapter import DrissionPageAdapter
+
+    adapter: Any = object.__new__(DrissionPageAdapter)
+    adapter.browser_settings = BrowserSettings()
+    adapter.url_validator = validator
+    adapter._ensure_browser = lambda: type("B", (), {"new_tab": staticmethod(lambda: tab)})()
+    return adapter
+
+
+def test_drissionpage_rejects_a_redirect_that_violates_policy() -> None:
+    """DrissionPage 这条路此前一次校验都不做。
+
+    url_validator 在 drission_adapter.py 里根本没被读过——curl_cffi / niquests /
+    browser 三条路都逐跳校验，唯独它没有。于是
+    ``302 Location: http://169.254.169.254/`` 会被 chromium 跟到底，云元数据连同
+    tab.url 一起交回调用方，而 SSRF 准入只看过入口 URL。
+    """
+    tab = _FakeDrissionTab("http://169.254.169.254/latest/meta-data/")
+
+    def validate(url: str) -> None:
+        if "169.254.169.254" in url:
+            raise URLNotAllowedError("禁止访问云元数据地址")
+
+    adapter = _drission_adapter(tab, validate)
+
+    with pytest.raises(URLNotAllowedError, match="重定向目标被 URL 策略拒绝"):
+        _ = adapter._render("http://attacker.example/r", None, None, {}, None, 5.0)
+
+    # 即便被拒，tab 也要照常关掉
+    assert tab.closed is True
+
+
+def test_drissionpage_allows_a_clean_navigation() -> None:
+    """同源、合规的导航不得误伤。"""
+    tab = _FakeDrissionTab("http://example.com/a")
+    adapter = _drission_adapter(tab, lambda _u: None)
+
+    response = adapter._render("http://example.com/a", None, None, {}, None, 5.0)
+
+    assert response.status_code == 200
+    assert response.text == "<html>secret</html>"
+
+
+def test_drissionpage_skips_the_check_without_a_validator() -> None:
+    """没注入校验器时（进程内直接用适配器）不做额外校验。"""
+    tab = _FakeDrissionTab("http://169.254.169.254/")
+    adapter = _drission_adapter(tab, None)
+
+    assert adapter._render("http://attacker.example/", None, None, {}, None, 5.0).status_code == 200

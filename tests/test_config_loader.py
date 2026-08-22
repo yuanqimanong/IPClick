@@ -53,15 +53,10 @@ def test_environment_overrides_are_cast(monkeypatch: pytest.MonkeyPatch) -> None
     assert config["GENERAL"]["mode"] == "cluster"
 
 
-def test_unparsable_environment_override_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("IPCLICK_PORT", "not-a-port")
-    loader.load_config.cache_clear()
-
-    assert load_config()["SERVER"]["port"] == 9528
-
-
-def test_empty_environment_override_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("IPCLICK_PORT", "")
+@pytest.mark.parametrize("raw", ["not-a-port", "", "   "])
+def test_an_unusable_environment_override_is_ignored(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    """环境变量给不出可用端口时退回配置默认值，而不是抛异常或用 0。"""
+    monkeypatch.setenv("IPCLICK_PORT", raw)
     loader.load_config.cache_clear()
 
     assert load_config()["SERVER"]["port"] == 9528

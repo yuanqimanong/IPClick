@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any
+from collections.abc import Generator
+from contextlib import contextmanager
+from typing import Any, final
 
 import pytest
 from typing_extensions import override
@@ -9,7 +11,9 @@ from typing_extensions import override
 from ipclick.cluster.balancer import RoundRobinBalancer, create_balancer
 from ipclick.cluster.node import ClusterConfig, Node, NodeState, NodeStatus
 from ipclick.cluster.tokens import CLUSTER_SECRET_ENV, cluster_secret, derive_token, self_tokens, token_for
+from ipclick.dto.proto import task_pb2
 from ipclick.exceptions import ConfigError
+from ipclick.services.detached import DetachedContext
 
 
 def _states(count: int, weight: int = 100) -> list[NodeState]:
@@ -405,3 +409,86 @@ def test_transport_error_carries_the_grpc_code() -> None:
     for code in (_grpc.StatusCode.UNAVAILABLE, _grpc.StatusCode.INTERNAL, _grpc.StatusCode.UNKNOWN):
         error = downloader._rpc_error(_Err(code))
         assert getattr(error, "grpc_code", None) is code
+
+
+class _RecordingLimiter:
+    """记录 acquire 过哪些 URL 的假限流器。"""
+
+    def __init__(self) -> None:
+        self.acquired: list[str] = []
+
+    @contextmanager
+    def acquire(self, url: str) -> Generator[None]:
+        self.acquired.append(url)
+        yield
+
+
+def _forwarder_that_forwards(monkeypatch: pytest.MonkeyPatch, limiter: _RecordingLimiter) -> Any:
+    """装一个"必定转发到远端节点"的转发器，只留下限流这条链路可观察。"""
+    from ipclick.cluster import forwarder as fwd
+    from ipclick.cluster.node import ClusterConfig, Node
+
+    service: Any = object.__new__(fwd.ForwardingTaskService)
+    service.self_id = "entry"
+    service.cluster = ClusterConfig(forward="on", nodes=(Node(id="n1", host="10.0.0.1", port=9528),), max_failover=0)
+    service.host_limiter = limiter
+    service._local_count = 0
+    service._forwarded_count = 0
+
+    remote = _StubState(Node(id="n1", host="10.0.0.1", port=9528))
+    service._pool = _StubPool(remote)
+
+    forwarded: list[Any] = []
+
+    def _forward(_state: Any, request: Any) -> Any:
+        forwarded.append(request)
+        return task_pb2.TaskResp(request_uuid=request.uuid, status_code=200)
+
+    monkeypatch.setattr(service, "_forward", _forward)
+    monkeypatch.setattr(service, "_reject_if_url_not_allowed", lambda _r, _c: None)
+    service.forwarded = forwarded
+    return service
+
+
+@final
+class _StubState:
+    def __init__(self, node: Any) -> None:
+        self.node: Any = node
+        self.successes: int = 0
+
+    def record_request(self, *, success: bool) -> None:
+        self.successes += int(success)
+
+    def mark_unhealthy(self, _reason: str) -> None:
+        return None
+
+
+@final
+class _StubPool:
+    def __init__(self, state: _StubState) -> None:
+        self._state: _StubState = state
+
+    def acquire(self, *, exclude: set[str]) -> _StubState:
+        _ = exclude
+        return self._state
+
+
+def test_the_entry_node_rate_limits_forwarded_traffic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """forward = "on" 时转发流量必须过入口节点的限流闸门。
+
+    原来只有本地执行那一支过闸（_execute_download 里的 acquire），转发这一支完全不过；
+    而 server._wire_rate_sharding 在开了转发时直接返回、不做分片，于是每个下游节点各按
+    完整配额放行——配 10 QPS 部三台，目标站点实际挨 30。default_config 里写的恰好是
+    反过来的承诺（"forward = on 精确……要精确限流，这是最省事的形态"），而且这种偏差
+    从任何单台机器的视角看都完全正常，极难自查。
+    """
+    limiter = _RecordingLimiter()
+    service = _forwarder_that_forwards(monkeypatch, limiter)
+    request = task_pb2.ReqTask(uuid="u1", url="https://target.example/a")
+
+    response = service.Send(request, DetachedContext().as_servicer_context())
+
+    assert response.request_uuid == "u1"
+    assert response.status_code == 200
+    assert len(service.forwarded) == 1
+    assert limiter.acquired == ["https://target.example/a"]

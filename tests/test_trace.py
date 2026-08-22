@@ -221,3 +221,68 @@ def test_records_dropped_after_falling_back_to_memory_are_counted(tmp_path: Path
         assert sink.dropped == before + 5
     finally:
         sink.close()
+
+
+def test_record_url_off_also_scrubs_urls_out_of_the_error_text() -> None:
+    """record_url = false 承诺"只记 host"，error 字段原来是原样抄进去的。
+
+    适配器的错误信息里经常嵌着完整 URL（重定向超上限、浏览器导航失败都会带上），
+    于是 ?api_key=… 照样落进 SQLite、照样显示在请求流页面上——而运维以为自己已经
+    把完整 URL 关掉了。
+    """
+    from ipclick.trace import TraceRecorder, TraceSettings
+
+    recorder = TraceRecorder(TraceSettings(record_url=False, memory_size=10))
+    try:
+        with recorder.track_request(
+            adapter="curl_cffi", method="GET", url="https://api.example.com/v1?api_key=SECRET"
+        ) as tr:
+            tr.status_code = -1
+            tr.error = "重定向次数超过上限 10：最后停在 https://api.example.com/v1?api_key=SECRET"
+
+        record = recorder.recent(1)[0]
+    finally:
+        recorder.close()
+
+    assert record.url == "api.example.com"
+    assert "SECRET" not in record.error
+    assert "api.example.com" in record.error
+
+
+def test_record_url_on_keeps_the_error_text_intact() -> None:
+    """默认打开时不能反过来把错误信息也削掉。"""
+    from ipclick.trace import TraceRecorder, TraceSettings
+
+    recorder = TraceRecorder(TraceSettings(record_url=True, memory_size=10))
+    try:
+        with recorder.track_request(
+            adapter="curl_cffi", method="GET", url="https://api.example.com/v1?api_key=SECRET"
+        ) as tr:
+            tr.status_code = -1
+            tr.error = "最后停在 https://api.example.com/v1?api_key=SECRET"
+
+        record = recorder.recent(1)[0]
+    finally:
+        recorder.close()
+
+    assert record.url == "https://api.example.com/v1?api_key=SECRET"
+    assert "api_key=SECRET" in record.error
+
+
+def test_write_connections_get_synchronous_normal(tmp_path: Path) -> None:
+    """synchronous 是按连接生效的，不写进文件头。
+
+    原来只在 _init_db 那条连接上设过，而它随即关闭：此后每次 _write / _purge 新开的
+    连接都退回默认 FULL，每 0.5 秒一次的批量提交都要整盘 fsync——正是这条 pragma
+    想省掉的开销。（journal_mode 反过来是持久化的，所以那一项本来就没问题。）
+    """
+    sink = SQLiteSink(str(tmp_path / "t.db"), retention_days=1, queue_size=10)
+    try:
+        conn = sink._connect()
+        try:
+            assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1  # 1 = NORMAL
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        finally:
+            conn.close()
+    finally:
+        sink.close()

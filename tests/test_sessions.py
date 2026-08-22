@@ -185,6 +185,8 @@ def test_curl_cffi_stream_preserves_whitelisted_request_kwargs() -> None:
     session = StreamSession()
     adapter: Any = object.__new__(CurlCffiAdapter)
     adapter.timeout = 60
+    # _build_request_kwargs 要按 connect_timeout 拆出 (连接, 读取) 二元组。
+    adapter.settings = AdapterSettings()
     adapter._sessions = StreamCache(session)
 
     events = list(

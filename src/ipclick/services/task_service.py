@@ -570,14 +570,19 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         # 取消掉。之前只是 break 出循环，已提交的任务照样一个个执行完——子任务用的是
         # DetachedContext，它的 is_active() 恒为 True，所以它们也没法自己放弃。
         # 结果是调用方早就走了，服务端还在替它把整批请求打给目标站点。
-        pending: list[Future[task_pb2.TaskResp]] = []
+        #
+        # 用 set 而不是 list，取走结果就立刻移出：已完成的 Future 会一直持有它的
+        # TaskResp（连响应体一起）。只 append 不删的话，下面那道背压只限住了在途任务数，
+        # 响应体却全部堆到 RPC 结束——两万个平均 1 MB 的任务就是约 20 GB。
+        # 协程版（async_task_service）用 asyncio.wait 重新赋值 pending，本来就没这个问题。
+        pending: set[Future[task_pb2.TaskResp]] = set()
 
         for request in request_iterator:
             if not context.is_active():
                 log.info("Batch cancelled by client")
                 break
             future: Future[task_pb2.TaskResp] = pool.submit(self._handle_one, request, batch_metadata(context))
-            pending.append(future)
+            pending.add(future)
             future.add_done_callback(finished.put)
             in_flight += 1
             submitted += 1
@@ -587,6 +592,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 # 防止超长客户端流把全部任务和请求体堆进内存。
                 done = finished.get()
                 in_flight -= 1
+                pending.discard(done)
                 yield done.result()
 
             while True:
@@ -595,6 +601,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 except queue.Empty:
                     break
                 in_flight -= 1
+                pending.discard(done)
                 yield done.result()
 
         while in_flight > 0:
@@ -602,8 +609,10 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
                 break
             done = finished.get()
             in_flight -= 1
+            pending.discard(done)
             yield done.result()
 
+        # 留在 pending 里的正是从未被取走结果的那些；cancel() 对已完成的返回 False。
         cancelled = sum(1 for future in pending if future.cancel())
         if cancelled:
             log.info(f"调用方已断开，取消了 {cancelled} 个尚未开始的批量子任务")

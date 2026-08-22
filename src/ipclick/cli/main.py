@@ -32,7 +32,7 @@ from ipclick.factory import resolve_mode
 from ipclick.health import check_health
 from ipclick.limiter import LimiterSettings
 from ipclick.ports import DEFAULT_GRPC_PORT, DEFAULT_WEB_PORT
-from ipclick.secrets import SECRETS, describe_source
+from ipclick.secrets import SECRETS, describe_source, proxy_config
 from ipclick.server import serve
 from ipclick.server_settings import ServerSettings
 from ipclick.tls import TLSSettings, describe
@@ -256,6 +256,9 @@ def run(
             web=web,
             web_port=web_port,
             web_host=web_host,
+            # 不传的话，IPClickServer 里那次 init_from_config 会把上面 LogUtil.init 设的
+            # DEBUG 换回 [LOG].level，-v 就只对建 server 之前的几行生效。
+            verbose=verbose,
         )
 
     except click.UsageError:
@@ -268,7 +271,7 @@ def run(
 
 
 @main.command()
-@click.option("--host", default="127.0.0.1", show_default=True, help="服务端地址")
+@click.option("--host", default=None, help="服务端地址（默认取配置，[::]/0.0.0.0 会当成 127.0.0.1）")
 @click.option("--port", "-p", type=int, help="服务端端口（默认取配置）")
 @click.option("--config", "-c", type=click.Path(path_type=Path), help="配置文件路径")
 @click.option("--service", default="", help="要查询的服务名，默认查总体状态")
@@ -281,14 +284,18 @@ def run(
     show_default=True,
     help="超时（秒）",
 )
-def health(host: str, port: int | None, config: Path | None, service: str, timeout: float) -> None:
+def health(host: str | None, port: int | None, config: Path | None, service: str, timeout: float) -> None:
     """调用标准 gRPC health 服务并通过退出码报告结果。"""
+    from ipclick.cli.agent import server_host, server_port
+
     LogUtil.init(level="ERROR")
 
     config_data = load_config(str(config) if config else None)
-    # 同 agent._server_port：--port 0 不能被真假值判断吞掉，0 是非法端口不是"没传"。
-    resolved_port = port if port is not None else int(section(config_data, "SERVER").get("port", DEFAULT_GRPC_PORT))
-    target = format_grpc_target(host, resolved_port)
+    # 复用 agent 里那两个解析函数，别再实现一遍：原来这里的 int(...) 没有 try/except，
+    # 配置里写了 port = "abc"（合法 TOML）时 health 会抛裸 ValueError，而 status 处理得了。
+    # 顺带 host 也统一成"通配监听地址映射回本机"的口径。
+    resolved_port = server_port(config_data, port)
+    target = format_grpc_target(server_host(config_data, host), resolved_port)
     tls = TLSSettings.from_config(section(config_data, "SECURITY"))
 
     healthy, status = check_health(target, service=service, timeout=timeout, tls=tls)
@@ -305,7 +312,9 @@ def config_info(config: Path | None) -> None:
         cfg = load_config(str(config) if config else None)
 
         server = section(cfg, "SERVER")
-        proxy = section(cfg, "PROXY")
+        # 用 proxy_config 而不是裸 section：凭据走 IPCLICK_PROXY_AUTH_KEY 环境变量时
+        # （文档推荐的方式）裸 section 里没有 auth_key，"代理鉴权: 已配置"永远不显示。
+        proxy = proxy_config(cfg)
         security = section(cfg, "SECURITY")
         server_settings = ServerSettings.from_config(server)
         log_cfg = placeholders.resolve_for("LOG", section(cfg, "LOG"), server_settings.port)
