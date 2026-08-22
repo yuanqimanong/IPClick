@@ -72,6 +72,16 @@ class SettingsPage:
             groups.append((title, items))
         return groups
 
+    def _running_port(self) -> int:
+        """取当前实际在跑的 gRPC 端口，用于解析路径里的 {port}。
+
+        优先用运行时值（它已经算过命令行覆盖），拿不到时退回配置文件。
+        """
+        actual = self.ctx.runtime_ports.get("SERVER.port")
+        if actual:
+            return actual
+        return ServerSettings.from_config(section(self.ctx.config, "SERVER")).port
+
     def _running_mismatch(self, name: str, file_value: Any) -> int:
         actual = self.ctx.runtime_ports.get(name)
         if not actual:
@@ -387,9 +397,15 @@ class SettingsPage:
         log_updates = updates.get("LOG") or {}
         debug = bool((updates.get("GENERAL") or {}).get("debug", False))
         if log_updates.get("level") or "debug" in (updates.get("GENERAL") or {}):
+            from ipclick.config_loader import placeholders
             from ipclick.utils.log_util import LogUtil
 
-            merged = {**section(self.ctx.config, "LOG"), **log_updates}
+            # 和 server.py / cli.main 一样要先解析 {port}：漏了它，
+            # [LOG].output = "logs/app-{port}.log" 在这里会按字面路径重开日志，
+            # 真正那个 logs/app-9528.log 从此不再收到任何行，而且毫无提示。
+            merged = placeholders.resolve_for(
+                "LOG", {**section(self.ctx.config, "LOG"), **log_updates}, self._running_port()
+            )
             LogUtil.init_from_config(merged, debug=debug)
             log.info(f"日志级别已即时切换为 {'DEBUG' if debug else merged.get('level', 'info')}")
 

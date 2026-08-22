@@ -31,7 +31,7 @@ class ConfigUtil:
     """TOML 配置文件的加载与覆盖合并工具。"""
 
     @staticmethod
-    def load(path: str | Path | list[str | Path], encoding: str = "utf-8") -> Settings:
+    def load(path: str | Path | list[str | Path], encoding: str = "utf-8-sig") -> Settings:
         """依次读取配置文件，并让后加载文件覆盖先加载文件。"""
         log.debug(f"load path ==> {path!r}")
         file_paths = [path] if isinstance(path, (str, Path)) else path

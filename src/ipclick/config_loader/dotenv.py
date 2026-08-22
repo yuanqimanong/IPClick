@@ -115,7 +115,10 @@ def load_dotenv(path: str | Path | None = None, *, override: bool = False) -> di
     _warn_if_world_readable(env_file)
 
     try:
-        text = env_file.read_text(encoding="utf-8")
+        # utf-8-sig：Windows 记事本 / PowerShell Set-Content 存出来的 .env 带 BOM，
+        # 而 str.strip() 不会去掉 U+FEFF（它不是空白），于是第一个键变成
+        # "\ufeffIPCLICK_AUTH_TOKEN"——鉴权令牌静默失效。无 BOM 时与 utf-8 等价。
+        text = env_file.read_text(encoding="utf-8-sig")
     except OSError:
         return {}
 

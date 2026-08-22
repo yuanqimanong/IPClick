@@ -56,6 +56,7 @@ class IPClickServer:
         web_port: int | None = None,
         web_host: str | None = None,
         reuseport: bool = False,
+        verbose: bool = False,
     ):
         self._reuseport: bool = reuseport
         self._config_path: str | None = config_path
@@ -66,9 +67,12 @@ class IPClickServer:
             host, port
         )
 
+        # verbose 必须参与这一次初始化。CLI 里 `run -v` 先 LogUtil.init(level="DEBUG")，
+        # 但这里紧接着按同一个 logger_name 再初始化一次、把 handler 全换成 [LOG].level，
+        # 于是 -v 只对建 server 之前那两行生效，之后整个进程都退回 INFO。
         LogUtil.init_from_config(
             placeholders.resolve_for("LOG", section(self.config, "LOG"), self.settings.port),
-            debug=as_bool(section(self.config, "GENERAL").get("debug")),
+            debug=verbose or as_bool(section(self.config, "GENERAL").get("debug")),
         )
         self.recorder: TraceRecorder = init_recorder(
             TraceSettings.from_config(
@@ -492,6 +496,7 @@ def serve(
     web: bool | None = None,
     web_port: int | None = None,
     web_host: str | None = None,
+    verbose: bool = False,
 ) -> None:
     """运行 IPClick server，并按配置选择单进程或 fork worker 模式。"""
 
@@ -504,6 +509,7 @@ def serve(
             web_port=web_port,
             web_host=web_host,
             reuseport=reuseport,
+            verbose=verbose,
         )
 
     try:
