@@ -99,7 +99,32 @@ class CurlCffiAdapter(DownloaderAdapter):
             return None
         return {"http": "", "https": ""}
 
+    def _timeout_pair(self, requested: float | None) -> tuple[float, float]:
+        """把总超时拆成 curl_cffi 需要的（连接, 读取）二元组。
+
+        curl_cffi 对二元组的语义是 ``all_timeout = connect + read``，所以两者之和这里
+        正好等于总超时，总预算不会凭空多出一个 connect_timeout。
+
+        传标量则 ``[DOWNLOADER].connect_timeout`` 完全无从生效——此前就是这样：连一个
+        黑洞地址要一直等到 download_timeout（默认 300 秒），每次重试再付一遍。
+        """
+        total = requested or self.timeout
+        # 读 settings 而不是 self.connect_timeout，和 niquests 那边保持一致。
+        connect = min(self.settings.connect_timeout, total)
+        return connect, max(0.0, total - connect)
+
     def _build_request_kwargs(self, source: dict[str, Any]) -> dict[str, Any]:
+        # 三个入口（download / adownload / download_stream）都经过这里，所以拒绝也放
+        # 这里：此前 files 只在同步 download 里拦，async 与 stream 两条路把它静默丢掉
+        # ——POST 照发，body 是空的，调用方看不出来。
+        self.reject_browser_only_params(source.get("automation_config"), source.get("automation_script"))
+        if source.get("files"):
+            # gRPC 上没有 files 字段，所以这只可能来自进程内直接调用。
+            raise ValidationError(
+                "curl_cffi 适配器不支持 files 参数：请自行拼好 multipart 请求体，"
+                "用 data=<bytes> 加上 Content-Type: multipart/form-data; boundary=... 发送"
+            )
+
         extra = self.parse_extra_kwargs(source.get("kwargs"))
 
         built: dict[str, Any] = {
@@ -108,7 +133,7 @@ class CurlCffiAdapter(DownloaderAdapter):
             "params": source.get("params"),
             "data": source.get("data"),
             "json": source.get("json"),
-            "timeout": source.get("timeout") or self.timeout,
+            "timeout": self._timeout_pair(source.get("timeout")),
             "allow_redirects": source.get("allow_redirects", True),
         }
         for key in _PASSTHROUGH_KWARGS:
@@ -244,14 +269,6 @@ class CurlCffiAdapter(DownloaderAdapter):
         method = method.upper()
         if method not in _SUPPORTED_METHODS:
             raise ValidationError(f"Unsupported HTTP method: {method}")
-        if files:
-            # gRPC 上没有 files 字段，所以这只可能来自进程内直接调用。
-            # 之前是静默丢掉——请求照样发出，body 是空的，调用方查不出原因。
-            raise ValidationError(
-                "curl_cffi 适配器不支持 files 参数：请自行拼好 multipart 请求体，"
-                "用 data=<bytes> 加上 Content-Type: multipart/form-data; boundary=... 发送"
-            )
-
         request_kwargs = self._build_request_kwargs(
             {
                 "headers": headers,
@@ -259,8 +276,11 @@ class CurlCffiAdapter(DownloaderAdapter):
                 "params": params,
                 "data": data,
                 "json": json,
+                "files": files,
                 "timeout": timeout,
                 "allow_redirects": allow_redirects,
+                "automation_config": automation_config,
+                "automation_script": automation_script,
                 "kwargs": kwargs,
             }
         )

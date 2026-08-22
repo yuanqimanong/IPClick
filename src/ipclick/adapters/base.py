@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 import asyncio
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 import functools
 from random import randrange
@@ -12,7 +12,7 @@ from typing import Any, cast
 
 from ipclick.adapters.settings import AdapterSettings
 from ipclick.dto.response import Response
-from ipclick.exceptions import ValidationError
+from ipclick.exceptions import URLNotAllowedError, ValidationError
 from ipclick.utils.log_util import log
 
 
@@ -229,6 +229,24 @@ class DownloaderAdapter(ABC):
                 f"需要指纹伪装请用 adapter=curl_cffi，或去掉 impersonate 参数"
             )
 
+    def reject_browser_only_params(self, automation_config: str | None, automation_script: str | None) -> None:
+        """拒绝只有浏览器适配器能实现的页面自动化参数。
+
+        HTTP 适配器不跑 JS，这两个参数在它们身上无从生效。此前是签名收下、正文里
+        一次都不读：调用方拿到的是一个 200 和一段没执行过脚本的原始 HTML，既没有
+        ``x-ipclick-script-result`` 也没有任何告警，和"脚本返回了 null"分不开。
+        """
+        given = [
+            name
+            for name, value in (("automation_config", automation_config), ("automation_script", automation_script))
+            if value
+        ]
+        if given:
+            raise ValidationError(
+                f"{self.adapter_name} 不支持页面自动化参数（{'、'.join(given)}）：它不执行 JavaScript。"
+                f"需要渲染页面请用浏览器适配器（camoufox / patchright / playwright / DrissionPage）"
+            )
+
     @staticmethod
     def parse_extra_kwargs(raw: str | None) -> dict[str, Any]:
         """解析受控透传参数 JSON；格式错误时记录告警并返回空字典。"""
@@ -306,3 +324,28 @@ class DownloaderAdapter(ABC):
 
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         self.close()
+
+
+def reject_disallowed_urls(
+    validator: Callable[[str], None] | None,
+    entry_url: str,
+    candidates: Iterable[str],
+) -> None:
+    """校验重定向链上的每一跳，任一跳不被策略允许就拒绝这次响应。
+
+    浏览器路径上这是**事后**校验：重定向由浏览器网络栈内部跟随完，拦不住请求真的发
+    出去。能做到的是不把响应体交回调用方——SSRF 读云元数据这类攻击要的就是那段正文。
+    但它**不等于**请求没发生，带副作用的内网写操作依然会执行；真正不可信的调用方面前，
+    浏览器路径应当靠网络层隔离，而不是靠这一层。
+    """
+    if validator is None:
+        return
+    seen: set[str] = set()
+    for url in candidates:
+        if not url or url == entry_url or url in seen:
+            continue
+        seen.add(url)
+        try:
+            validator(url)
+        except Exception as e:
+            raise URLNotAllowedError(f"重定向目标被 URL 策略拒绝（{url}）：{e}") from e

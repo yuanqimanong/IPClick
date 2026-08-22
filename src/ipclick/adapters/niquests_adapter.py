@@ -104,6 +104,8 @@ class NiquestsAdapter(DownloaderAdapter):
         )
 
     def _request_kwargs(self, kwargs: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+        # 三个入口（download / adownload / download_stream）都经过这里。
+        self.reject_browser_only_params(kwargs.get("automation_config"), kwargs.get("automation_script"))
         headers = kwargs.get("headers")
         if headers is None:
             headers = {"User-Agent": self._get_user_agent(), "Accept": "*/*"}
@@ -250,6 +252,8 @@ class NiquestsAdapter(DownloaderAdapter):
                 "files": files,
                 "allow_redirects": allow_redirects,
                 "timeout": timeout,
+                "automation_config": automation_config,
+                "automation_script": automation_script,
             },
             extra,
         )
