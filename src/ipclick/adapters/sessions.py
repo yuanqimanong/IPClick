@@ -198,8 +198,8 @@ class AsyncSessionCache(Generic[_K]):
     def lease(self, key: _K) -> Generator[Any]:
         """租借当前事件循环专属的 session，使用期间不会被淘汰关闭。
 
-        用同步 contextmanager 而不是 async 版：整段没有 await，而这样它在
-        ``download_stream`` 那种同步生成器里也能直接用。
+        用同步 contextmanager 而不是 ``asynccontextmanager``：整段没有一个 await，
+        换成异步版只会逼调用点多一个 ``async with``，没有任何好处。
         """
         loop = asyncio.get_running_loop()
         composite = (id(loop), key)
