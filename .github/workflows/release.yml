@@ -188,7 +188,11 @@ jobs:
   # ---------------------------------------------------------------- #
   github-release:
     if: github.event_name == 'push'
-    needs: publish-pypi
+    # build 必须列进来：needs.build.outputs 只对 needs 里声明过的 job 可见。
+    # 只写 publish-pypi 的话 needs.build.outputs.version 会静默取到空字符串，
+    # Release 说明里的链接就变成 https://pypi.org/project/ipclick//
+    # ——PyPI 对多余的斜杠宽容，照样返回 200，所以这个错不会以 404 的形式暴露。
+    needs: [build, publish-pypi]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
