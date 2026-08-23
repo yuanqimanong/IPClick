@@ -85,7 +85,10 @@ class IPClickServer:
         self._auth_interceptor: TokenAuthInterceptor | None = None
         self.cluster_config: ClusterConfig = ClusterConfig.from_config(section(self.config, "CLUSTER"))
         self._monitor_config: dict[str, Any] = section(self.config, "MONITOR")
-        self.health: HealthReporter = HealthReporter(enabled=self.health_check_enabled)
+        # async 模式下 serve_async 会自己建 grpc.aio 的 HealthServicer，这里这份用不上。
+        # 不加这个条件的话，每个 worker 进程都白开一个 2 线程的池
+        # （processes = 4 就是 8 个只等着被关掉的线程）。
+        self.health: HealthReporter = HealthReporter(enabled=self.health_check_enabled and not self.settings.async_mode)
 
         self.web_config: WebConfig = WebConfig(section(self.config, "WEB"))
         if web is not None:

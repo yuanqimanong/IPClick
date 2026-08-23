@@ -492,3 +492,59 @@ def test_the_entry_node_rate_limits_forwarded_traffic(monkeypatch: pytest.Monkey
     assert response.status_code == 200
     assert len(service.forwarded) == 1
     assert limiter.acquired == ["https://target.example/a"]
+
+
+def _pool_with(*node_ids: str) -> Any:
+    from ipclick.cluster.pool import NodePool
+
+    config = ClusterConfig(nodes=tuple(Node(id=i, host="10.0.0.1", port=9528) for i in node_ids))
+    return NodePool(config, start_probing=False)
+
+
+def test_a_removed_and_readded_node_does_not_stay_drained() -> None:
+    """摘除标记必须跟着节点列表一起裁剪。
+
+    _drained 原来只在 drain/undrain 里增删，replace() 重建 _states 时不管它。于是
+    "摘除 n1 → 从配置里删掉 n1 → 又把 n1 加回来"之后，n1 的 id 仍留在 _drained 里，
+    available() 一直把它滤掉——新加回来的节点永远分不到流量，而快照里只显示它
+    "已摘除"，看不出为什么。DNS 发现下 id 还会不断变化，这个集合只增不减。
+    """
+    pool = _pool_with("n1", "n2")
+    assert pool.drain("n1") is True
+    assert [s.node.id for s in pool.available()] == ["n2"]
+
+    # 把 n1 从配置里摘掉
+    _ = pool.replace(ClusterConfig(nodes=(Node(id="n2", host="10.0.0.1", port=9528),)))
+    # 再加回来
+    _ = pool.replace(
+        ClusterConfig(nodes=(Node(id="n2", host="10.0.0.1", port=9528), Node(id="n1", host="10.0.0.1", port=9528)))
+    )
+
+    assert sorted(s.node.id for s in pool.available()) == ["n1", "n2"]
+    assert [n["id"] for n in pool.snapshot()["nodes"] if n["drained"]] == []
+
+
+def test_draining_still_works_across_an_unrelated_replace() -> None:
+    """裁剪不能把仍在配置里的摘除标记也抹掉。"""
+    pool = _pool_with("n1", "n2")
+    assert pool.drain("n1") is True
+
+    _ = pool.replace(
+        ClusterConfig(nodes=(Node(id="n1", host="10.0.0.1", port=9528), Node(id="n2", host="10.0.0.1", port=9528)))
+    )
+
+    assert [s.node.id for s in pool.available()] == ["n2"]
+    assert [n["id"] for n in pool.snapshot()["nodes"] if n["drained"]] == ["n1"]
+
+
+def test_changing_the_node_count_reshards_the_quota_immediately() -> None:
+    """加减节点后限流分片要立刻重算，不能等到下一轮探活。"""
+    pool = _pool_with("n1")
+    seen: list[int] = []
+    pool.on_health_change(seen.append)
+
+    _ = pool.replace(
+        ClusterConfig(nodes=(Node(id="n1", host="10.0.0.1", port=9528), Node(id="n2", host="10.0.0.1", port=9528)))
+    )
+
+    assert seen and seen[-1] == 2

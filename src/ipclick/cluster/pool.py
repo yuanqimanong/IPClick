@@ -86,7 +86,6 @@ class NodePool:
         with self._lock:
             states = list(self._states)
             callbacks = list(self._health_callbacks)
-        with self._lock:
             drained = set(self._drained)
         # 计入"未被判定为不健康"的节点，而不是只算 HEALTHY。这个计数唯一的用途是限流
         # 分片（每台分 1/N 的 per_host_qps），而节点的初始状态是 UNKNOWN——只认 HEALTHY
@@ -172,10 +171,20 @@ class NodePool:
                 refreshed.append(state)
             self._states = refreshed
 
+            # 摘除标记必须跟着节点列表一起裁剪。不裁的话：把一个已摘除的节点从配置里删掉、
+            # 之后再加回来，它的 id 仍留在 _drained 里，available() 一直把它滤掉——
+            # 新加的节点永远分不到流量，而快照里只显示它"已摘除"，看不出为什么。
+            # DNS 发现下 id 还会不断变化，这个集合只增不减。
+            self._drained &= {n.id for n in config.nodes}
+
         if added:
             log.info(f"集群新增节点：{', '.join(added)}")
         if removed:
             log.info(f"集群移除节点：{', '.join(removed)}")
+        if added or removed:
+            # 节点数变了就要立刻重算限流分片，否则配额一直停在旧的 N 上，
+            # 直到下一轮探活（最长一个 probe_interval）才纠正。
+            self._notify_health()
         return added, removed
 
     def probe_once(self) -> None:

@@ -20,7 +20,6 @@ from ipclick.dto.proto import task_pb2
 from ipclick.exceptions import TransportError
 from ipclick.services.async_task_service import AsyncTaskService
 from ipclick.services.task_service import is_forwarded
-from ipclick.utils.config_util import section
 from ipclick.utils.log_util import log
 
 
@@ -34,14 +33,12 @@ class AsyncForwardingTaskService(AsyncTaskService, ForwardingTaskService):
         # 事件循环共用的（默认只有 min(32, cpu+4) 个线程，4 核机器上就是 8 个），
         # 还同时承载着 SendStream 逐项推流和适配器的同步兜底。转发是阻塞调用、
         # 一占就是整个下游 RPC 的时长，挤在同一个池里能把本地执行和流式请求一起饿死。
+        # 容量跟随 [SERVER].max_workers。直接用父类算好的 _batch_concurrency，
+        # 不再自己 int(section(...)) 重解析一遍——那份解析没有校验，且与
+        # ServerSettings.from_config 的口径各走一路。
         self._forward_pool: ThreadPoolExecutor = ThreadPoolExecutor(
-            max_workers=max(2, self.settings_max_workers), thread_name_prefix="ipclick-forward"
+            max_workers=max(2, self._batch_concurrency), thread_name_prefix="ipclick-forward"
         )
-
-    @property
-    def settings_max_workers(self) -> int:
-        """转发线程池容量：跟随 [SERVER].max_workers。"""
-        return int(section(self.config, "SERVER").get("max_workers") or 32)
 
     @override
     async def acleanup(self) -> None:
