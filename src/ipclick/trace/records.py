@@ -178,7 +178,10 @@ def matches(record: TraceRecord, status_class: str, adapter: str, keyword: str) 
         return True
     if status_class in ("failed", "error"):
         return not record.ok
-    return record.status_class == status_class
+    if status_class in ("2xx", "3xx", "4xx", "5xx", "failure"):
+        return record.status_class == status_class
+    # 未识别的取值（例如 "ok"）与 SQL 侧 _status_clause() 的 .get(..., "") 回退一致：不筛选。
+    return True
 
 
 def host_only(url: str) -> str:

@@ -73,6 +73,15 @@ def test_informational_status_is_failed_in_memory_and_sql_filters() -> None:
     assert _status_clause("failure") == "status_code < 200"
 
 
+def test_ok_status_class_is_a_no_op_filter_in_memory_and_sql() -> None:
+    success = _record()
+    http_error = replace(success, status_code=500)
+
+    assert _status_clause("ok") == ""
+    assert matches(success, "ok", "", "")
+    assert matches(http_error, "ok", "", "")
+
+
 def test_close_delivers_sentinel_when_queue_starts_full(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     original_run = SQLiteSink._run
     worker_started = threading.Event()
