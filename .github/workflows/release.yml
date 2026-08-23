@@ -4,7 +4,13 @@ name: Release
 #
 # 触发方式：
 #   1. 推送 v* 标签（如 v0.2.3）—— 常规发布路径
-#   2. 手动触发 workflow_dispatch —— 用于补发已有标签，或先发 TestPyPI 验证
+#   2. 手动触发 workflow_dispatch，在 ref 里填**已有的 v* 标签** —— 用于补发
+#
+# 两条路径都只发**正式 PyPI**，都要过下面同一套校验。这里**没有 TestPyPI 通路**：
+# publish 步骤没有传 repository-url，也没有对应的 input 与 environment。
+# （曾经这段注释写着"或先发 TestPyPI 验证"，但代码里从来没有这条路——照着做等于
+# 直接做了一次不可撤销的正式发布。要加的话需要先在 TestPyPI 上配好 Trusted
+# Publishing，并另建一个 environment，不是改这里一行就够。）
 #
 # 发布这一步跑在 GitHub Environment 里，可在其中配置人工审批与分支/标签限制。
 
@@ -15,8 +21,10 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "要发布的标签或提交（留空则用当前分支）"
-        required: false
+        # 必须填 v* 标签：留空会落到当前分支，而下面的版本校验只认 v* 目标，
+        # 会直接失败——这是有意的，别把它当成"留空就发当前分支"。
+        description: "要补发的标签，必须是 v* 形式（如 v2.0.0）"
+        required: true
         type: string
 
 permissions: {}
@@ -51,7 +59,7 @@ jobs:
         # 里是互斥的，同时点亮会直接解不出来。见 ci.yml 里的同一处说明。
         run: >-
           uv sync --frozen
-          --group lint --group test
+          --group lint --group test --group proto
           --extra niquests --extra camoufox --extra patchright --extra drissionpage
 
       - name: Lint / format / types
@@ -59,6 +67,20 @@ jobs:
           uv run ruff check src/ tests/
           uv run ruff format --check src/ tests/
           uv run basedpyright src/ tests/
+
+      - name: Verify protobuf stubs are up to date
+        # 这一步在 ci.yml 里也有，但 release 不依赖 ci 跑过这个 commit：标签一推就走
+        # 自己这条流水线。下面的产物校验只断言 task_pb2.py / .pyi **存在**，不管它们
+        # 是不是从当前的 task.proto 生成的——少了这一步，过时的存根能一路发上 PyPI，
+        # 而下游拿到的类型跟真实 wire 格式对不上。
+        run: |
+          uv run python src/ipclick/dto/proto/generate.py
+          changed="$(git status --porcelain -- src/ipclick/dto/proto/)"
+          if [ -n "$changed" ]; then
+            echo "$changed"
+            echo "::error::proto 生成物与 task.proto 不一致，拒绝发布。请重新生成并提交后再打标签"
+            exit 1
+          fi
 
       - name: Test
         run: uv run pytest
@@ -73,23 +95,52 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "pyproject version: $version"
 
-          # 标签触发时，标签必须与 pyproject 版本一致，否则发出去的版本号会对不上
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            tag="${GITHUB_REF_NAME#v}"
-            if [ "$tag" != "$version" ]; then
-              echo "::error::标签 v$tag 与 pyproject.toml 中的版本 $version 不一致"
+          # 校验必须针对**上面实际 checkout 的那个 ref**，而且必须"要么通过、要么失败"，
+          # 不能有"跳过"这条路。
+          #
+          # 原先这里判的是 github.ref_type == "tag"。它描述的是**触发**用的 ref，不是被
+          # 构建的 ref：workflow_dispatch 从分支触发时它是 "branch"，于是整段校验被跳过，
+          # 而 checkout 用的是 inputs.ref —— 等于可以拿任意 ref 构建、把它 pyproject.toml
+          # 里的版本号直接传上 PyPI，全程不报错、流水线还是绿的。PyPI 传上去不可撤销，
+          # 所以这里宁可拦死。
+          target="${{ inputs.ref || github.ref_name }}"
+          echo "发布目标: $target"
+          case "$target" in
+            v*)
+              if [ "${target#v}" != "$version" ]; then
+                echo "::error::目标 $target 与 pyproject.toml 中的版本 $version 不一致"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::只允许发布 v* 标签，当前目标是 '$target'。手动触发请在 ref 里填标签名（如 v2.0.0）"
               exit 1
-            fi
-          fi
+              ;;
+          esac
 
       - name: Verify artifacts
         run: |
           uvx twine check dist/*
           python - <<'PY'
-          import glob, sys, zipfile
+          import glob, sys, tarfile, zipfile
 
-          wheel = glob.glob("dist/*.whl")[0]
-          names = zipfile.ZipFile(wheel).namelist()
+          # 上传的是 dist/ 里的**全部**文件（gh-action-pypi-publish 不挑），所以校验也得
+          # 覆盖全部，而不是只看 glob(...)[0] 那一个 wheel —— sdist 里漏打包数据文件、
+          # 或者夹带了机密，原先是一路绿灯发出去的。
+          wheels = sorted(glob.glob("dist/*.whl"))
+          sdists = sorted(glob.glob("dist/*.tar.gz"))
+          # 数量也要断言：glob 匹配不到时循环体一次都不执行，检查会"真空通过"。
+          if len(wheels) != 1 or len(sdists) != 1:
+              sys.exit(f"dist/ 内容不符合预期：wheels={wheels} sdists={sdists}")
+
+          def _wheel_names(path):
+              return zipfile.ZipFile(path).namelist()
+
+          def _sdist_names(path):
+              with tarfile.open(path) as tf:
+                  # sdist 里所有路径都带一层 <name>-<version>/ 前缀，剥掉后才能跟
+                  # wheel 用同一套规则比对
+                  return [n.partition("/")[2] for n in tf.getnames()]
 
           required = [
               "ipclick/configs/default_config.toml",
@@ -101,9 +152,6 @@ jobs:
               # 读它。漏打包的话命令会在用户机器上炸，而 CI 全绿。
               "ipclick/skills/ipclick/SKILL.md",
           ]
-          if missing := [r for r in required if r not in names]:
-              sys.exit(f"wheel 缺少文件: {missing}")
-
           # 不该出现在分发包里的东西。
           # 注意别用 `"test" in name` 这种子串匹配：包内合法存在名字带 test 的模块
           # （例如渲染「试一试」页的模板），那样会把正常发布拦下来。只认真正的
@@ -118,11 +166,28 @@ jobs:
                   or base.startswith("test_")
                   or base.endswith("_test.py")
                   or "__pycache__" in name
-                  or base in (".env", ".git", ".gitignore")
+                  # 前缀匹配而不是精确列举：原先写的是 base in (".env", ".git",
+                  # ".gitignore")，那又是个白名单——.env.local / .env.prod 全都溜得过去。
+                  # 这正是下面 METADATA 那段注释里说过、且已经踩过一次的错误形状。
+                  or base.startswith((".env", ".git", ".npmrc", ".netrc", ".pypirc"))
+                  or base.endswith((".pem", ".key", ".p12"))
+                  or base in ("id_rsa", "id_ed25519")
               )
 
-          if leaked := [n for n in names if _is_leak(n)]:
-              sys.exit(f"wheel 含不应分发的文件: {leaked}")
+          # sdist 里 src/ 前缀跟 wheel 不同，所以要各自算一份 required 路径
+          for path in wheels:
+              names = _wheel_names(path)
+              if missing := [r for r in required if r not in names]:
+                  sys.exit(f"{path} 缺少文件: {missing}")
+              if leaked := [n for n in names if _is_leak(n)]:
+                  sys.exit(f"{path} 含不应分发的文件: {leaked}")
+
+          for path in sdists:
+              names = _sdist_names(path)
+              if missing := [r for r in required if f"src/{r}" not in names]:
+                  sys.exit(f"{path} 缺少文件: {missing}")
+              if leaked := [n for n in names if _is_leak(n)]:
+                  sys.exit(f"{path} 含不应分发的文件: {leaked}")
 
           # README 会作为 long_description 成为 PyPI 项目页正文，且**上传后不可修改**。
           # 相对链接会相对 https://pypi.org/project/ipclick/<version>/ 解析 → 404，
@@ -135,8 +200,10 @@ jobs:
           # Markdown 链接目标一律拦。
           import re
 
+          wheel = wheels[0]
+          wheel_names = _wheel_names(wheel)
           meta = zipfile.ZipFile(wheel).read(
-              next(n for n in names if n.endswith("METADATA"))
+              next(n for n in wheel_names if n.endswith("METADATA"))
           ).decode()
           relative = sorted({
               target
