@@ -60,6 +60,14 @@ def test_other_adapters_keep_impersonate_unset() -> None:
     assert task.impersonate is None
 
 
+def test_curl_cffi_gets_a_default_impersonate_when_adapter_is_a_string() -> None:
+    task = DownloadTask(url="http://example.com", adapter="curl_cffi")
+    assert task.impersonate == "chrome"
+
+    task = DownloadTask(url="http://example.com", adapter="CURL_CFFI")
+    assert task.impersonate == "chrome"
+
+
 def test_allowed_status_codes_default() -> None:
     assert DownloadTask(url="http://example.com").allowed_status_codes == [200, 404]
     assert DownloadTask(url="http://example.com", allowed_status_codes=[204]).allowed_status_codes == [204]
