@@ -209,5 +209,5 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --notes "已发布到 PyPI: https://pypi.org/project/ipclick/${{ needs.build.outputs.version }}/
 
-          完整变更见 [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/master/CHANGELOG.md)。" \
+          用法与配置见 [Wiki](https://github.com/${{ github.repository }}/wiki)。" \
             --verify-tag
