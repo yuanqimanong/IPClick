@@ -188,7 +188,10 @@ class DownloadTask:
         ):
             raise ValidationError("retry_backoff must be a finite number >= 0")
 
-        if self.adapter == IPClickAdapter.CURL_CFFI and not self.impersonate:
+        is_curl_cffi = self.adapter is IPClickAdapter.CURL_CFFI or (
+            isinstance(self.adapter, str) and self.adapter.lower() == IPClickAdapter.CURL_CFFI.display_name.lower()
+        )
+        if is_curl_cffi and not self.impersonate:
             self.impersonate = "chrome"
 
         if not self.allowed_status_codes:
