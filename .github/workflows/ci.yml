@@ -61,8 +61,15 @@ jobs:
       - name: Verify protobuf stubs are up to date
         run: |
           uv run python src/ipclick/dto/proto/generate.py
-          git diff --exit-code -- src/ipclick/dto/proto/ \
-            || (echo "::error::task.proto 改动后未重新生成代码，请运行 uv run python src/ipclick/dto/proto/generate.py" && exit 1)
+          # 用 git status --porcelain 而不是 git diff：git diff 看不见**未跟踪**文件。
+          # 新加一个 .proto 时，生成出来的 _pb2.py / _pb2.pyi 谁都没提交过，于是
+          # git diff 一片干净、这一步照样绿——检查在、跑了、但什么都没拦住。
+          changed="$(git status --porcelain -- src/ipclick/dto/proto/)"
+          if [ -n "$changed" ]; then
+            echo "$changed"
+            echo "::error::proto 生成物与 task.proto 不一致（含新增的未跟踪文件），请运行 uv run python src/ipclick/dto/proto/generate.py 并提交结果"
+            exit 1
+          fi
 
   # ---------------------------------------------------------------- #
   # 测试。刻意**不装任何 extra**：绝大多数用户只装核心依赖，
@@ -140,6 +147,9 @@ jobs:
         with:
           name: dist
           path: dist/
+          # 默认是 warn：构建没产出任何文件时上传一个空 artifact 也算成功，
+          # 这一步就成了摆设。release.yml 里同一处已经是 error，这里对齐。
+          if-no-files-found: error
 
   docker:
     runs-on: ubuntu-latest
