@@ -145,9 +145,15 @@ class TraceSettings:
             if key not in section:
                 return default
             raw = section[key]
-            value = as_int(raw, default, minimum=minimum)
-            if value == default and raw != default:
+            # 用哨兵探测"到底有没有解析成功"，而不是拿结果和默认值比。后者会误报：
+            # memory_size = "500"（TOML 里写成字符串）解析结果正好等于默认值 500，
+            # 而 raw != default（"500" != 500），于是打出一句
+            # "不是 >= 0 的整数，改用默认值 500"——它其实解析成功了，值也正是 500。
+            sentinel = -(2**62)
+            value = as_int(raw, sentinel, minimum=minimum)
+            if value == sentinel:
                 log.warning(f"[TRACE].{key} 不是 >= {minimum} 的整数，改用默认值 {default}")
+                return default
             return value
 
         return cls(
