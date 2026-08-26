@@ -287,8 +287,8 @@ def build_limiter(downloader_config: dict[str, Any] | None) -> HostLimiter:
     backend = str(rate.get("backend") or "memory").strip().lower()
     if backend not in ("", "memory", "local"):
         raise ConfigError(
-            f"未知的限流后端 {backend!r}。0.3 起只支持 memory——"
-            f"集群限流由入口节点统一计算，不再需要 Redis。请删掉 [DOWNLOADER.rate_limit].backend"
+            f"未知的限流后端 {backend!r}。只支持 memory——"
+            f"集群限流由入口节点统一计算，不需要 Redis。请删掉 [DOWNLOADER.rate_limit].backend"
         )
     return HostLimiter(LimiterSettings.from_config(config))
 

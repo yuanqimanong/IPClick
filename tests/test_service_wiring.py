@@ -569,13 +569,22 @@ def test_open_stream_passes_retry_settings_through() -> None:
             _ = url
             return iter(())
 
-    service._build_download_kwargs = lambda request: {"max_retries": 7, "retry_delay": 1.5, "method": "GET"}
+    stream_flags: list[bool] = []
+
+    def _fake_kwargs(request: Any, *, stream: bool = False) -> dict[str, Any]:
+        _ = request
+        stream_flags.append(stream)
+        return {"max_retries": 7, "retry_delay": 1.5, "method": "GET"}
+
+    service._build_download_kwargs = _fake_kwargs
     service._chunk_size = 1024
     service._limited_stream = lambda url, stream: stream
     _ = service._open_stream(cast(Any, _Recording()), task_pb2.ReqTask(url="https://example.com/f"))
 
     assert captured["max_retries"] == 7
     assert captured["retry_delay"] == 1.5
+    # 流式必须走 stream=True 那条兜底：否则没给超时的流式请求会按普通请求的预算算。
+    assert stream_flags == [True]
 
 
 def test_dns_failure_becomes_an_ordinary_failed_response_not_a_grpc_error() -> None:
@@ -594,6 +603,10 @@ def test_dns_failure_becomes_an_ordinary_failed_response_not_a_grpc_error() -> N
     assert policy.code is grpc.StatusCode.PERMISSION_DENIED
 
 
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="Windows 的 os.kill 走 TerminateProcess，不投递可捕获信号——会把 pytest 自己杀掉",
+)
 async def test_graceful_shutdown_does_not_cancel_the_servers_own_terminator() -> None:
     """取消 wait_for_termination() 会把 grpc.aio 的 server 一起打进 cancelled。
 

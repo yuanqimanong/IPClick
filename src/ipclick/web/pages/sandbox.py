@@ -8,6 +8,7 @@ import secrets
 import threading
 from typing import Any, cast, final
 
+from ipclick.adapters.settings import DEFAULT_DOWNLOAD_TIMEOUT
 from ipclick.dto.models import METHOD_MAP, IPClickAdapter
 from ipclick.dto.proto import task_pb2
 from ipclick.exceptions import ValidationError
@@ -21,6 +22,10 @@ from ipclick.web.templates import render_test
 TEST_BODY_LIMIT = 256 * 1024
 
 TEST_TIMEOUT_MAX = 120.0
+
+# 和 [DOWNLOADER].download_timeout 用同一个默认值：页面预填 30 而配置里是别的数，
+# 等于"试一试跑的和线上跑的不是一回事"，而页面上看不出来。
+TEST_TIMEOUT_DEFAULT = DEFAULT_DOWNLOAD_TIMEOUT
 
 TEST_RETRIES_MAX = 5
 
@@ -229,7 +234,7 @@ class SandboxPage:
         if method_value is None:
             raise ValidationError(f"不支持的方法 {method_name!r}")
 
-        timeout = max(1.0, min(TEST_TIMEOUT_MAX, _as_number(form.get("timeout"), 30.0, "超时")))
+        timeout = max(1.0, min(TEST_TIMEOUT_MAX, _as_number(form.get("timeout"), TEST_TIMEOUT_DEFAULT, "超时")))
 
         retries = int(max(0, min(TEST_RETRIES_MAX, _as_number(form.get("max_retries"), 0, "重试次数"))))
 

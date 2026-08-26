@@ -97,7 +97,7 @@ class TaskServiceServicer:
 
     def Ping(self, request, context):
         """节点探测：验连通性与集群内部鉴权，不做任何业务动作。
-        0.4 新增——对着 0.3 的节点调会收到 UNIMPLEMENTED，调用方据此判断"连上了、
+        对着没有这个接口的旧节点调会收到 UNIMPLEMENTED，调用方据此判断"连上了、
         鉴权也过了，只是那台还没升级"。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -105,8 +105,8 @@ class TaskServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def Component(self, request, context):
-        """远程管理可选组件。0.5 新增，**默认关闭**（见 ComponentReq 的说明）。
-        对着 0.4 及更早的节点调会收到 UNIMPLEMENTED，主控据此提示"那台还没升级"。
+        """远程管理可选组件，**默认关闭**（见 ComponentReq 的说明）。对着没有这个
+        接口的旧节点调会收到 UNIMPLEMENTED，主控据此提示"那台还没升级"。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

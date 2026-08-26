@@ -176,7 +176,7 @@ with Downloader() as downloader:
     response = downloader.request(
         method=HttpMethod.GET,
         url="https://httpbin.org/get",
-        headers={"User-Agent": "IPClick/1.0"},
+        headers={"User-Agent": "MyApp/1.0"},
         params={"key": "value"},
         timeout=30,
     )
@@ -221,7 +221,7 @@ IPCLICK_WEB_USER=ops IPCLICK_WEB_PASSWORD=... ipclick run -w
 | **请求流** `/trace` | 实时看请求打进来，按状态 / 适配器 / URL 过滤，看站点排行与按天趋势 |
 | **试一试** `/test` | 填网址或直接粘一条 curl，就地发一次请求看链路与源码；可点名打到某个节点 |
 | **组件** `/components` | 五个可选 extras 的两级安装状态，可就地安装 / 卸载 / 下载浏览器本体 |
-| **配置** `/config` | 75 项配置分 12 组，写回 `ipclick.toml`（保留注释、留 `.bak`）；集群节点增删 |
+| **配置** `/config` | 75 项配置分 10 组（可折叠），写回 `ipclick.toml`（保留注释、留 `.bak`）；隧道代理整串粘贴自动拆分（地址进 toml、凭据进 `.env`）；集群节点增删 |
 | **AI 接入** `/skill` | 技能包全文、安装命令与 `SKILL.md` 下载 |
 
 「试一试」走的是本进程 `TaskService` 的**同一条**代码路径——SSRF 准入、限流、以及开了转发时

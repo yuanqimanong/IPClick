@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
 import threading
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 import pytest
 
 from ipclick.adapters import registry
+from ipclick.config_loader.dotenv import parse_env
 from ipclick.services.task_service import TaskService
 from ipclick.trace import TraceRecorder
 from ipclick.utils.config_util import Settings
@@ -158,6 +160,131 @@ def test_saving_config_writes_the_file(pages: WebPages, config_file: Path) -> No
 
     assert "已写回" in html
     assert "max_workers = 16" in config_file.read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def proxy_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """把隧道相关用例关进干净的工作目录和干净的进程环境。
+
+    save_config 写完 .env 会顺手把值灌进 os.environ——那是刻意的（让「试一试」不用
+    重启就用上新凭据），但它会漏给后面的用例：第二个用例会以为"这一项已经由真实
+    环境变量提供了"，于是一个字都不写，然后对着 FileNotFoundError 发呆。
+    """
+    monkeypatch.chdir(tmp_path)
+    for key in ("IPCLICK_PROXY_AUTH_KEY", "IPCLICK_PROXY_AUTH_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.mark.usefixtures("proxy_env")
+def test_pasting_a_tunnel_string_splits_it_across_both_files(
+    pages: WebPages, config_file: Path, tmp_path: Path
+) -> None:
+    """隧道串里地址和凭据是混着的：地址进 toml，账号密码进 .env。
+
+    整串塞进 toml 会让密码跟着配置文件进版本库、进 CI 日志、进备份，这正是
+    [PROXY] 那两项被列为机密的原因。
+    """
+    html = pages.save_config({"tab": "basic", "proxy_tunnel": "socks5://user1:pass2@gate.example.com:7000"}, USER, CSRF)
+
+    assert "已写回" in html
+    toml_text = config_file.read_text(encoding="utf-8")
+    assert 'scheme = "socks5"' in toml_text
+    assert 'host = "gate.example.com"' in toml_text
+    assert "port = 7000" in toml_text
+    # tunnel_server 在 to_url() 里优先级高于 host/port：留着旧值会让这次改动整个不生效。
+    assert 'tunnel_server = ""' in toml_text
+    assert "user1" not in toml_text and "pass2" not in toml_text
+
+    env_values = parse_env((tmp_path / ".env").read_text(encoding="utf-8"))
+    assert env_values["IPCLICK_PROXY_AUTH_KEY"] == "user1"
+    assert env_values["IPCLICK_PROXY_AUTH_PASSWORD"] == "pass2"
+
+
+@pytest.mark.usefixtures("proxy_env")
+def test_a_pasted_tunnel_overrides_the_hand_typed_fields(pages: WebPages, config_file: Path) -> None:
+    """同时手填了主机、又粘了整串时以整串为准。
+
+    拆出来的 scheme/host/port 必须整组一致；让半边被表单里的旧值顶掉，会得到一个
+    "主机是新的、端口是旧的"的组合——两个来源都看起来对，配置却是坏的。
+    """
+    _ = pages.save_config(
+        {
+            "tab": "basic",
+            "PROXY.host": "stale.example.com",
+            "PROXY.port": "1080",
+            "proxy_tunnel": "gate.example.com:7000@user1:pass2",
+        },
+        USER,
+        CSRF,
+    )
+
+    toml_text = config_file.read_text(encoding="utf-8")
+    assert 'host = "gate.example.com"' in toml_text
+    assert "stale.example.com" not in toml_text
+    assert "port = 7000" in toml_text
+
+
+@pytest.mark.usefixtures("proxy_env")
+def test_a_real_env_var_is_not_written_into_the_env_file(
+    pages: WebPages, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真实环境变量压过 .env，所以往文件里写只会造成"文件和实际用的值不一样"。"""
+    monkeypatch.setenv("IPCLICK_PROXY_AUTH_KEY", "injected-from-outside")
+
+    html = pages.save_config({"tab": "basic", "proxy_tunnel": "socks5://user1:pass2@gate.example.com:7000"}, USER, CSRF)
+
+    assert "由真实环境变量提供" in html
+    env_values = parse_env((tmp_path / ".env").read_text(encoding="utf-8"))
+    assert env_values.get("IPCLICK_PROXY_AUTH_KEY", "") == ""
+    # 没被外部注入的那一项照旧要写进去。
+    assert env_values["IPCLICK_PROXY_AUTH_PASSWORD"] == "pass2"
+    assert os.environ["IPCLICK_PROXY_AUTH_KEY"] == "injected-from-outside"
+
+
+@pytest.mark.usefixtures("proxy_env")
+def test_echoing_the_placeholders_back_leaves_the_credentials_alone(
+    pages: WebPages, config_file: Path, tmp_path: Path
+) -> None:
+    """页面回显的是占位符名字。原样交回来（哪怕改了主机）都不该动凭据。
+
+    不识别这一点的话，在配置页上点一次保存就会把账号密码写成
+    "{IPCLICK_PROXY_AUTH_KEY}" 这个字面串——代理立刻失效，页面上却一切正常。
+    """
+    (tmp_path / ".env").write_text("IPCLICK_PROXY_AUTH_KEY=keepme\n", encoding="utf-8")
+
+    echoed = "socks5://{IPCLICK_PROXY_AUTH_KEY}:{IPCLICK_PROXY_AUTH_PASSWORD}@moved.example.com:7100"
+    _ = pages.save_config({"tab": "basic", "proxy_tunnel": echoed}, USER, CSRF)
+
+    assert 'host = "moved.example.com"' in config_file.read_text(encoding="utf-8")
+    assert parse_env((tmp_path / ".env").read_text(encoding="utf-8"))["IPCLICK_PROXY_AUTH_KEY"] == "keepme"
+
+
+@pytest.mark.usefixtures("proxy_env")
+def test_a_broken_tunnel_string_touches_neither_file(pages: WebPages, config_file: Path, tmp_path: Path) -> None:
+    """解析失败必须在写任何文件之前拦住，并说清是哪一步不认。"""
+    before = config_file.read_text(encoding="utf-8")
+
+    html = pages.save_config({"tab": "basic", "proxy_tunnel": "1.2.3.4:8080@5.6.7.8:9090"}, USER, CSRF)
+
+    assert "两种排法都讲得通" in html
+    assert config_file.read_text(encoding="utf-8") == before
+    assert not (tmp_path / ".env").exists()
+
+
+def test_config_groups_are_collapsible(pages: WebPages) -> None:
+    """12 组全摊开要滚很久。折叠靠 <details>，所以闭合的组照样随表单提交。"""
+    html = pages.config_page(USER, CSRF)
+
+    assert 'data-group="代理"' in html
+    assert 'data-groups="open"' in html
+
+
+def test_the_proxy_group_carries_the_tunnel_paste_box(pages: WebPages) -> None:
+    html = pages.config_page(USER, CSRF)
+
+    assert 'name="proxy_tunnel"' in html
+    assert 'name="proxy_tunnel_format"' in html
+    assert "hostname:port:username:password" in html
 
 
 def test_concurrent_config_saves_preserve_both_updates(

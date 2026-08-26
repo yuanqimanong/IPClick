@@ -11,6 +11,9 @@ from ipclick.web.templates.base import attr, card, checkbox, esc, hidden_fields,
 
 DEFAULT_GRPC_PORT_HINT = DEFAULT_GRPC_PORT
 
+# 隧道解析框只挂在这一组下面，靠标题匹配——字段分组本来就是按标题组织的。
+PROXY_GROUP = "代理"
+
 CONFIG_TABS: tuple[tuple[str, str, str], ...] = (
     ("basic", "基础设置", "这一台自己的端口、线程、超时、日志、浏览器与链路记录"),
     ("cluster", "集群设置", "转发开关、节点增删、以及每台子节点的部署材料"),
@@ -41,13 +44,21 @@ def render_config(
     generated: dict[str, Any] | None = None,
     tab: str = "basic",
     cluster: dict[str, Any] | None = None,
+    tunnel: dict[str, Any] | None = None,
 ) -> str:
     """渲染配置字段、只读安全摘要、凭据生成器与集群节点表格。"""
     active = tab if tab in {key for key, _, _ in CONFIG_TABS} else "basic"
     subtitle = next(sub for key, _, sub in CONFIG_TABS if key == active)
 
+    # 只剩一组时（集群页）默认展开：那时候"折叠"只是多一次点击，没有省下任何篇幅。
+    single = len(groups) == 1
     sections = "".join(
-        f"<fieldset><legend>{esc(title)}</legend>{''.join(_config_row(field) for field in fields)}</fieldset>"
+        _config_group(
+            title,
+            fields,
+            extra=_tunnel_box(tunnel) if title == PROXY_GROUP and tunnel else "",
+            open_default=single or any(field.get("running") for field in fields),
+        )
         for title, fields in groups
     )
     tab_field = f'<input type="hidden" name="tab" value="{attr(active)}">'
@@ -61,8 +72,12 @@ def render_config(
     <div class="card-head">
       <h2>可编辑项</h2>
       <span class="hint">保存后写回 <code>{esc(config_path)}</code>（先留一份 <code>.bak</code>）</span>
+      <span class="grow"></span>
+      <button class="small" type="button" data-groups="open">全部展开</button>
+      <button class="small" type="button" data-groups="close">全部折叠</button>
     </div>
-    <p class="note">文件里的注释与格式都保留，只替换被改动那一行的值。</p>
+    <p class="note">文件里的注释与格式都保留，只替换被改动那一行的值。
+       折叠起来的组照样会提交——它只是收起来了，不是被排除在表单外。</p>
     <form method="post" action="/config" id="config-form">
       {hidden_fields(csrf, "save_config")}{tab_field}
       {sections}
@@ -305,6 +320,80 @@ def _secret_generators(generators: list[dict[str, Any]], csrf: str) -> str:
         "服务端不保存、不写进任何文件——请自己粘进 <code>.env</code>。</p>",
         hint="随机生成一个足够长的值，省得自己想",
     )
+
+
+def _config_group(title: str, fields: list[dict[str, Any]], *, extra: str = "", open_default: bool = False) -> str:
+    """把一组字段渲染成可折叠块。
+
+    用 ``<details>`` 而不是 JS 显隐：闭合状态下里面的 input 仍然在 DOM 里、照样随
+    表单提交，所以折叠纯粹是显示层的事，不会出现"收起来的那几项没保存"。
+    """
+    running = sum(1 for field in fields if field.get("running"))
+    restart = sum(1 for field in fields if field.get("restart"))
+    badges = ""
+    if running:
+        badges += pill(f"{running} 项与运行值不一致", "warn")
+    elif restart:
+        badges += f'<span class="hint">{restart} 项需重启</span>'
+    body = extra + "".join(_config_row(field) for field in fields)
+    return (
+        f'<details class="more group" data-group="{attr(title)}"{" open" if open_default else ""}>'
+        f'<summary>{esc(title)}<span class="hint">{len(fields)} 项</span>{badges}</summary>'
+        f"{body}</details>"
+    )
+
+
+def _tunnel_box(tunnel: dict[str, Any]) -> str:
+    """渲染隧道接入串的粘贴框、格式选择和凭据来源表。"""
+    options = "".join(
+        f'<option value="{attr(key)}">{esc(label)}</option>' for key, label in tunnel.get("formats") or ()
+    )
+    source_rows = "".join(
+        f"<tr><td>{esc(label)}</td><td><code>{esc(env)}</code></td><td>{esc(source)}</td></tr>"
+        for label, env, source in tunnel.get("sources") or ()
+    )
+    sources = (
+        f'<div class="scroll"><table class="data">'
+        f"<thead><tr><th>凭据</th><th>环境变量</th><th>当前来源</th></tr></thead>"
+        f"<tbody>{source_rows}</tbody></table></div>"
+        if source_rows
+        else ""
+    )
+    env_path = str(tunnel.get("env_path") or ".env")
+    override = str(tunnel.get("override") or "")
+    override_note = (
+        f'<div class="msg caution" style="margin-top:.5rem">'
+        f"<b>当前 <code>[PROXY].tunnel_server</code> 手写着 <code>{esc(override)}</code>。</b>"
+        f"它在拼代理 URL 时压过下面的主机+端口，所以上面这一行显示的是它。"
+        f"想改回按主机+端口走，在这里粘一行新地址保存即可——保存会把 tunnel_server 清空。</div>"
+        if override
+        else ""
+    )
+
+    return f"""
+      <div class="field-row">
+        <label for="proxy-tunnel-format">代理格式
+          <span class="hint">服务商给的那一行长什么样。认不出来时会让你手动选</span></label>
+        <div><select id="proxy-tunnel-format" name="proxy_tunnel_format">{options}</select></div>
+      </div>
+      <div class="field-row">
+        <label for="proxy-tunnel">隧道代理接入地址
+          <span class="hint">整行粘进来，<b>带账号密码</b>也没关系</span></label>
+        <div>
+          <input id="proxy-tunnel" name="proxy_tunnel" class="mono" autocomplete="off"
+                 placeholder="socks5://username:password@gate.example.com:7000"
+                 value="{attr(tunnel.get("value") or "")}">
+          <p class="note" style="margin:.375rem 0 0">
+            保存时自动拆开：<b>协议 / 主机 / 端口</b>写进 toml，<b>账号密码</b>写进
+            <code>{esc(env_path)}</code>，下面几格会跟着变成拆出来的值。
+            回显时凭据位置只出现 <code>{{IPCLICK_PROXY_AUTH_KEY}}</code> 这样的名字——
+            原样交回来就表示"凭据别动"，只想换机器就直接改这一行里的主机端口。
+            某一项由真实环境变量提供时不写文件，写了也会被环境变量压过去。
+          </p>
+          {override_note}
+          {sources}
+        </div>
+      </div>"""
 
 
 def _config_row(field: dict[str, Any]) -> str:

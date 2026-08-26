@@ -94,11 +94,18 @@ class ProxyConfig:
         if not self.host and not self.tunnel_server:
             return None
 
-        auth = (
-            f"{quote(str(self.auth_key), safe='')}:{quote(str(self.auth_password or ''), safe='')}"
-            if self.auth_key
-            else ""
-        )
+        auth_key = str(self.auth_key or "").strip()
+        auth_password = str(self.auth_password or "")
+        # 只填密码不填账号，原先是**静默**丢掉整个凭据段：拼出一个不带鉴权的代理 URL，
+        # 请求照发、被隧道商拒掉（多半 407），而报错和"我明明填了密码"毫无关系。
+        # 缺一半的凭据只可能是配错了，当场说清楚比让人对着 407 排查半天强。
+        if auth_password and not auth_key:
+            raise ValidationError(
+                "配了代理密码却没配代理账号：IPCLICK_PROXY_AUTH_PASSWORD 有值，"
+                "IPCLICK_PROXY_AUTH_KEY 是空的。代理鉴权要两个一起给——"
+                "补上账号，或者把密码也清掉（那就是不带鉴权的代理）"
+            )
+        auth = f"{quote(auth_key, safe='')}:{quote(auth_password, safe='')}" if auth_key else ""
         channel_name = f":C{quote(str(self.channel_name), safe='')}" if self.channel_name else ""
         session_ttl = f":T{quote(str(self.session_ttl), safe='')}" if self.session_ttl else ""
         country_code = f":A{quote(str(self.country_code), safe='')}" if self.country_code else ""

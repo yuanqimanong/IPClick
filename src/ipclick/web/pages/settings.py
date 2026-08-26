@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import os
+from pathlib import Path
 import secrets
 import threading
 from typing import TYPE_CHECKING, Any, final
 
-from ipclick.exceptions import ConfigError
+from ipclick.exceptions import ConfigError, ValidationError
 from ipclick.server_settings import ServerSettings
 from ipclick.utils.config_util import section
 from ipclick.utils.log_util import log
@@ -29,6 +31,27 @@ def _same_value(current: Any, new: Any) -> bool:
     if isinstance(current, (int, float)) and isinstance(new, (int, float)):
         return float(current) == float(new)
     return current == new
+
+
+def _real_env_overrides(key: str, env_path: Path) -> bool:
+    """判断某个机密当前是不是由**真实环境变量**提供的。
+
+    不能只看 `os.environ`：启动时 `load_dotenv()` 已经把 `.env` 的值灌进去了，
+    光看进程环境的话每一项都像"环境变量里有"。所以拿它和 `.env` 文件里的值比——
+    对得上就是 `.env` 供的（可以写），对不上才是外面注入的（写了也不生效，别写）。
+    """
+    current = os.environ.get(key, "").strip()
+    if not current:
+        return False
+    if not env_path.exists():
+        return True
+    from ipclick.config_loader.dotenv import parse_env
+
+    try:
+        in_file = parse_env(env_path.read_text(encoding="utf-8-sig")).get(key, "")
+    except OSError:
+        return True
+    return current != in_file.strip()
 
 
 def _probe_title(result: Any) -> str:
@@ -143,7 +166,43 @@ class SettingsPage:
             generated=self.take_generated(generated_token),
             tab=tab,
             cluster=self._cluster_tab_data() if tab == "cluster" else None,
+            tunnel=self._tunnel_state() if tab != "cluster" else None,
         )
+
+    def _tunnel_state(self) -> dict[str, Any]:
+        """给「隧道代理接入串」那一格准备回显数据。
+
+        回显的是**占位符形式**：真账号密码在 ``.env`` 里，页面上永远只出现
+        ``{IPCLICK_PROXY_AUTH_KEY}`` 这样的名字。这样既能一眼看出"凭据已配好"，
+        又不会因为有人截图配置页就把密码漏出去。
+        """
+        from ipclick.config_loader.env_writer import env_target_path
+        from ipclick.secrets import SECRETS, describe_source, proxy_config
+        from ipclick.web.proxy_tunnel import TUNNEL_FORMATS, render_masked, render_masked_endpoint
+
+        proxy = section(self.ctx.config, "PROXY")
+        merged = proxy_config(self.ctx.config)
+        has_credentials = bool(str(merged.get("auth_key") or "").strip())
+        scheme = str(proxy.get("scheme") or "http")
+        # tunnel_server 在 to_url() 里压过 host/port。它已经不是网页可编辑项了，但手写在
+        # toml 里仍然生效——这时必须照着**它**回显，否则页面显示的是 host/port（多半是空的），
+        # 而实际在用的是另一个地址：一个会让人查上半天的"页面在说谎"。
+        override = str(proxy.get("tunnel_server") or "").strip()
+        return {
+            "formats": TUNNEL_FORMATS,
+            "override": override,
+            "value": render_masked_endpoint(scheme, override, with_credentials=has_credentials)
+            if override
+            else render_masked(
+                scheme, str(proxy.get("host") or ""), proxy.get("port") or 0, with_credentials=has_credentials
+            ),
+            "sources": [
+                (spec.label, spec.env, describe_source(self.ctx.config, spec))
+                for spec in SECRETS
+                if spec.section == "PROXY"
+            ],
+            "env_path": str(env_target_path()),
+        }
 
     def _cluster_tab_data(self) -> dict[str, Any]:
         from ipclick.auth import load_tokens
@@ -242,6 +301,12 @@ class SettingsPage:
 
         tab = form.get("tab", "basic")
         updates, errors = parse_form(form)
+        tunnel_updates, tunnel_secrets, tunnel_errors = self._parse_tunnel_input(form)
+        errors.extend(tunnel_errors)
+        if tunnel_updates:
+            # 粘进来的整串**压过**下面那几格手填的值：它是这次操作里更明确的意图，
+            # 而且拆出来的 scheme/host/port 必须整组一致，让半边被旧值顶掉只会更难查。
+            updates.setdefault("PROXY", {}).update(tunnel_updates)
         updates, restart_needed = self._changed_only(updates)
 
         if "__present__CLUSTER.forward_on" in form:
@@ -261,7 +326,9 @@ class SettingsPage:
         if errors:
             self.ctx.fail(*errors)
             return self.config_page(username, csrf, tab=tab)
-        if not updates and not has_node_grid:
+        # tunnel_secrets 也要算进"有改动"：只换账号密码时 toml 里一个字都不变，
+        # 漏了它就会在真的写了 .env 的情况下报"没有可保存的改动"。
+        if not updates and not has_node_grid and not tunnel_secrets:
             self.ctx.fail("没有可保存的改动")
             return self.config_page(username, csrf, tab=tab)
 
@@ -277,6 +344,8 @@ class SettingsPage:
             return self.config_page(username, csrf, tab=tab)
 
         self.ctx.notify(f"已写回 {self.ctx.config_path}（{len(changes)} 项）")
+        if tunnel_secrets:
+            self._store_proxy_secrets(tunnel_secrets)
         if has_node_grid:
             self.ctx.extend_first_message(f"，{len(nodes)} 个节点")
         if restart_needed:
@@ -287,6 +356,76 @@ class SettingsPage:
         if tab == "cluster":
             self.ctx.hot_reload_cluster()
         return self.config_page(username, csrf, tab=tab)
+
+    def _parse_tunnel_input(self, form: dict[str, str]) -> tuple[dict[str, Any], dict[str, str], list[str]]:
+        """把粘进来的隧道接入串拆成 ``[PROXY]`` 更新项和待写入 ``.env`` 的凭据。
+
+        服务商给的那一行里地址和账号密码是混着的。整串塞进 toml 会让密码跟着配置
+        文件进版本库，所以拆开：地址进 toml，凭据进 ``.env``。
+
+        解析放在**保存**这一步做，不在浏览器里做——JS 里再写一份解析器，两份迟早
+        对不上，而"页面显示解析对了、存进去的是另一回事"是最难查的一类问题。
+        """
+        raw = (form.get("proxy_tunnel") or "").strip()
+        if not raw:
+            return {}, {}, []
+
+        from ipclick.web.proxy_tunnel import AUTO_FORMAT, parse_tunnel
+
+        try:
+            parsed = parse_tunnel(raw, (form.get("proxy_tunnel_format") or AUTO_FORMAT).strip())
+        except ValidationError as e:
+            return {}, {}, [str(e)]
+
+        # tunnel_server 清空：端点已经拆进 host/port 了，而 to_url() 里 tunnel_server
+        # 的优先级更高——留着旧值会让这次改动整个不生效，且页面上看不出问题在哪。
+        updates: dict[str, Any] = {
+            "scheme": parsed.scheme,
+            "host": parsed.host,
+            "port": parsed.port,
+            "tunnel_server": "",
+        }
+        if parsed.credentials_are_placeholders:
+            # 用户把回显那串原样交回来了（可能只改了主机），凭据位置还是占位符——
+            # 那就是"凭据别动"，不是"把凭据设成 '{IPCLICK_PROXY_AUTH_KEY}' 这个字符串"。
+            return updates, {}, []
+        return updates, {"IPCLICK_PROXY_AUTH_KEY": parsed.username, "IPCLICK_PROXY_AUTH_PASSWORD": parsed.password}, []
+
+    def _store_proxy_secrets(self, secrets_to_write: dict[str, str]) -> None:
+        """把代理凭据写进 ``.env``，并让它对本进程立即生效。"""
+        from ipclick.config_loader.env_writer import env_target_path, update_env_file
+
+        target = env_target_path()
+        pending = {key: value for key, value in secrets_to_write.items() if not _real_env_overrides(key, target)}
+        skipped = sorted(set(secrets_to_write) - set(pending))
+        if skipped:
+            self.ctx.add_message(
+                f"{'、'.join(skipped)} 由真实环境变量提供，没有写进 {target.name}——"
+                f"写了也会被环境变量压过去。要改请改注入它的地方。"
+            )
+        if not pending:
+            return
+
+        try:
+            path, changed = update_env_file(pending, target)
+        except (ConfigError, OSError) as e:
+            self.ctx.add_error(f"toml 已保存，但机密没能写进 {target}：{e}")
+            return
+
+        for key, value in pending.items():
+            # 让「试一试」不用重启就能用上新凭据。空值等于"不设置"，直接删掉这一项——
+            # 留一个空串在进程环境里会把 .env 里配好的值悄悄顶掉（见 dotenv 的注释）。
+            if value:
+                os.environ[key] = value
+            else:
+                _ = os.environ.pop(key, None)
+
+        cleared = sorted(key for key, value in pending.items() if not value)
+        if changed:
+            self.ctx.add_message(f"代理凭据已写进 {path}（{len(changed)} 项），本进程已即时生效，不用重启")
+        if cleared:
+            self.ctx.add_message(f"{'、'.join(cleared)} 被清空了——这个代理现在不带鉴权")
+        log.info(f"Web 端写入代理凭据：{'、'.join(sorted(changed)) or '（值未变）'} -> {path}")
 
     def add_node(self, form: dict[str, str], username: str, csrf: str) -> str:
         """校验地址后向本机节点列表追加条目并触发热更新。"""

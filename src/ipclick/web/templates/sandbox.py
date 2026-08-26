@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ipclick.adapters.settings import DEFAULT_DOWNLOAD_TIMEOUT
 from ipclick.web.templates.base import (
     attr,
     bool_pill,
@@ -90,8 +91,10 @@ def render_test(
         <div><select id="t-method" name="method">{method_options}</select></div>
       </div>
       <div class="field-row">
-        <label for="t-timeout">超时（秒）</label>
-        <div><input id="t-timeout" name="timeout" value="{attr(form.get("timeout", "30"))}"></div>
+        <label for="t-timeout">超时（秒）<span class="hint">总预算，建连也算在里面。
+          建连那一段的上限是配置页的「连接超时」，超了就是
+          <code>curl: (28) Connection timed out</code>——不是这一格没生效</span></label>
+        <div><input id="t-timeout" name="timeout" value="{attr(form.get("timeout", str(int(DEFAULT_DOWNLOAD_TIMEOUT))))}"></div>
       </div>
       <div class="field-row">
         <label for="t-body">请求体<span class="hint">POST/PUT 时用；留空则不带</span></label>

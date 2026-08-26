@@ -12,10 +12,10 @@ STYLE = """
      data-theme="light"（或未设置）-> 亮
      data-theme="dark"             -> 暗
 
-   0.5 去掉了"跟随系统"。它靠 prefers-color-scheme，而那一位取决于浏览器读不读
+   刻意没有"跟随系统"。它靠 prefers-color-scheme，而那一位取决于浏览器读不读
    得到桌面偏好——Linux 上 Chrome/Firefox 要 GTK 或 xdg-desktop-portal 配好才认，
    读不到就静默按亮色处理。一个在半数机器上不生效、失败时又毫无迹象的选项，
-   比没有这个选项更糟：用户会以为是页面坏了。现在只有明确的两个值。            */
+   比没有这个选项更糟：用户会以为是页面坏了。所以只留明确的两个值。            */
 :root {
   color-scheme: light;
   --bg: #ffffff;
@@ -87,8 +87,8 @@ hr { border: 0; border-top: 1px solid var(--line-soft); margin: 1.25rem 0; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 
 /* ---------- 骨架 ----------
-   0.3 是单栏纵向堆叠：总览页把服务器信息、各适配器、渲染引擎、集群、最近请求
-   全挤在一条竖线上，只能一路往下滚。改成左导航 + 主内容 + 右状态栏三栏。     */
+   不用单栏纵向堆叠：总览页要放服务器信息、各适配器、渲染引擎、集群、最近请求，
+   全挤在一条竖线上只能一路往下滚。这里是左导航 + 主内容 + 右状态栏三栏。     */
 .shell {
   display: grid;
   grid-template-columns: var(--side) minmax(0, 1fr);
@@ -164,6 +164,7 @@ hr { border: 0; border-top: 1px solid var(--line-soft); margin: 1.25rem 0; }
 .card-head { display: flex; align-items: center; justify-content: space-between;
              gap: .75rem; flex-wrap: wrap; margin-bottom: .875rem; }
 .card-head .hint { color: var(--fg-dim); font-size: .75rem; }
+.card-head .grow { flex: 1 1 0; }
 .sub-head { font-size: .8125rem; color: var(--fg-dim); margin-bottom: .5rem; }
 .grid { display: grid; gap: 1rem; }
 .grid.two { grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); }
@@ -322,6 +323,9 @@ details.more[open] > summary::before { content: "▾"; }
 details.more > summary .hint { color: var(--fg-dim); font-weight: 400; font-size: .75rem; }
 details.more[open] > summary { border-bottom: 1px solid var(--line-soft); margin-bottom: .5rem; }
 details.more .field-row:last-of-type { border-bottom: none; }
+/* 折叠组的标题行要塞下项数和状态徽标，窄屏上换行而不是把标题挤没。 */
+details.more.group > summary { flex-wrap: wrap; }
+details.more.group > summary .pill { font-weight: 600; }
 details.more > p.note { padding-bottom: .875rem; }
 
 /* ---------- 提示条 ---------- */
@@ -377,8 +381,8 @@ pre.term { background: #0b0f14; color: #d7dee7; border-color: #21262d; max-heigh
 .tabs a.on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 
 /* ---------- 节点卡片 ----------
-   **一行最多 4 张**，窄了自动降列。0.4 是一张表格，加减机器要在一行里横向找输入框；
-   一台一张卡之后，"这台是什么状态、能对它做什么"聚在一起。
+   **一行最多 4 张**，窄了自动降列。不用表格：加减机器要在一行里横向找输入框；
+   一台一张卡，"这台是什么状态、能对它做什么"才聚在一起。
 
    列宽取 max(15rem, 四分之一)：后者把上限钉在 4 列（宽屏上不会摊成 5、6 列，
    那样每张卡都很窄、信息反而更难扫），前者保证窄屏时优先降列而不是压扁卡片。 */
@@ -757,7 +761,7 @@ SCRIPT_MAIN = """
   // 就是和自己的表对不上"，很少有人会当成 bug 报出来。
   //
   // <time datetime="..."> 里是带偏移量的 ISO-8601，浏览器据此换算。没有 JS 时
-  // 标签里的文字仍是服务端时间，也就是维持旧行为，不会变成空白。
+  // 标签里的文字仍是服务端时间，不会变成空白。
   function localizeTimes(root) {
     var nodes = (root || document).querySelectorAll('time[datetime]');
     for (var i = 0; i < nodes.length; i++) {
@@ -773,11 +777,11 @@ SCRIPT_MAIN = """
   localizeTimes(document);
 
   // ---------- 实时刷新 ----------
-  // 0.3 用的是 <meta refresh> 整页重载：滚动位置丢失、正在填的过滤条件被冲掉、
-  // 每 3 秒白闪一次。改成只换那一块的 HTML，服务端仍然负责渲染（不在 JS 里
-  // 复制一份渲染逻辑）。
+  // 不用 <meta refresh> 整页重载：滚动位置丢失、正在填的过滤条件被冲掉、每 3 秒
+  // 白闪一次。这里只换那一块的 HTML，服务端仍然负责渲染（不在 JS 里复制一份
+  // 渲染逻辑）。
   //
-  // 0.5 加了频率切换。切档**不重载整页**：这一页的用途就是盯着看，重载会把
+  // 频率切档**不重载整页**：这一页的用途就是盯着看，重载会把
   // 滚动位置和刚展开的错误行一起丢掉。选择用 replaceState 写回地址栏，所以
   // 手动刷新、收藏、复制链接给别人，档位都还在。
   var live = document.querySelector('[data-live-src]');
@@ -840,6 +844,47 @@ SCRIPT_MAIN = """
           url.searchParams.set('_', '1');  // 没这个标记的话，服务端认为"没提交过表单"
           window.history.replaceState(null, '', url);
         } catch (err) { /* 地址栏没跟上而已，刷新这件事本身照常 */ }
+      });
+    }
+  }
+
+  // ---------- 配置分组的折叠状态 ----------
+  // 12 组全摊开要滚很久，所以默认收起（服务端已给「与运行值不一致」的组加上 open）。
+  // 谁展开过哪几组是纯个人习惯，记在本机 localStorage：不该写进服务端配置文件，
+  // 也不该同步给同一个管理端的其他人。读写都可能抛（隐私窗口、站点数据被禁），
+  // 所以全部包起来——记不住只是下次多点一下，不能让整个页面的脚本挂掉。
+  var GROUP_KEY = 'ipclick.config.groups';
+  var groupBoxes = document.querySelectorAll('details.group[data-group]');
+
+  function readGroupState() {
+    try {
+      return JSON.parse(window.localStorage.getItem(GROUP_KEY) || '{}') || {};
+    } catch (err) { return {}; }
+  }
+
+  function writeGroupState() {
+    var state = {};
+    for (var i = 0; i < groupBoxes.length; i++) {
+      state[groupBoxes[i].getAttribute('data-group')] = groupBoxes[i].open;
+    }
+    try { window.localStorage.setItem(GROUP_KEY, JSON.stringify(state)); } catch (err) { /* 记不住就算了 */ }
+  }
+
+  if (groupBoxes.length) {
+    var savedGroups = readGroupState();
+    for (var gi = 0; gi < groupBoxes.length; gi++) {
+      var box = groupBoxes[gi];
+      var groupName = box.getAttribute('data-group');
+      // 只在存过这一组时才覆盖，否则服务端定的默认展开会被一条空记录抹掉。
+      if (Object.prototype.hasOwnProperty.call(savedGroups, groupName)) { box.open = !!savedGroups[groupName]; }
+      box.addEventListener('toggle', writeGroupState);
+    }
+    var groupButtons = document.querySelectorAll('[data-groups]');
+    for (var bi = 0; bi < groupButtons.length; bi++) {
+      groupButtons[bi].addEventListener('click', function (event) {
+        var wanted = event.currentTarget.getAttribute('data-groups') === 'open';
+        for (var i = 0; i < groupBoxes.length; i++) { groupBoxes[i].open = wanted; }
+        writeGroupState();
       });
     }
   }

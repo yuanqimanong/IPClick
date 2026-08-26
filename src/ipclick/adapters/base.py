@@ -10,7 +10,7 @@ import re
 import threading
 from typing import Any, cast
 
-from ipclick.adapters.settings import AdapterSettings
+from ipclick.adapters.settings import DEFAULT_DOWNLOAD_TIMEOUT, AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import URLNotAllowedError, ValidationError
 from ipclick.utils.log_util import log
@@ -168,7 +168,7 @@ class DownloaderAdapter(ABC):
         json: dict[str, Any] | None = None,
         files: dict[str, Any] | None = None,
         proxy: str | None = None,
-        timeout: float = 60,
+        timeout: float = DEFAULT_DOWNLOAD_TIMEOUT,
         max_retries: int = 3,
         retry_delay: float = 2.0,
         verify: bool = True,
@@ -201,6 +201,17 @@ class DownloaderAdapter(ABC):
                 return
             yield cast(StreamEvent, item)
 
+    def apply_stream_timeout(self, kwargs: dict[str, Any]) -> None:
+        """流式请求没显式给超时时，换用比普通请求更大的那份预算。
+
+        调用方显式传了就用调用方的——这里只兜"没传"的情况。放在基类是因为三条流式
+        路径（curl_cffi、niquests 的真流式，以及下面这个先下完再切块的兜底实现）都得
+        用同一份预算，否则"换个适配器就超时"会变成一个查不出原因的差异。
+        """
+        requested = kwargs.get("timeout")
+        if not requested or requested <= 0:
+            kwargs["timeout"] = self.settings.stream_timeout
+
     def download_stream(
         self,
         url: str,
@@ -209,6 +220,7 @@ class DownloaderAdapter(ABC):
         **kwargs: Any,
     ) -> "Iterator[StreamEvent]":
         """把非流式响应按固定大小切块，作为默认流式实现。"""
+        self.apply_stream_timeout(kwargs)
         response = self.download(url, **kwargs)
         yield StreamHeader(
             url=response.url,
