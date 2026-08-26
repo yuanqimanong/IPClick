@@ -6,6 +6,13 @@
 
 ARG PYTHON_VERSION=3.14
 
+# 基础镜像的完整引用。默认是 Docker Hub 上的官方 python 镜像；本机配的加速器不通时
+# 不用去改 Docker Desktop 的 registry-mirrors，直接换一个能通的源：
+#   --build-arg PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.14-slim
+# 写全了域名的引用不会再走 registry-mirrors——加速器只对不带域名的 docker.io 短名生效。
+# 顺带一提：加速器坏掉时的报错落在 `load metadata` 这一步，和 Dockerfile 本身无关。
+ARG PYTHON_IMAGE=python:${PYTHON_VERSION}-slim
+
 # 渲染引擎，决定装哪个 extra、下哪个浏览器本体：
 #   patchright  Playwright 的反检测分支 + chromium 本体（默认）
 #   camoufox    Firefox 内核，反检测最彻底，本体约 1 GB
@@ -14,7 +21,7 @@ ARG PYTHON_VERSION=3.14
 ARG ENGINE=patchright
 
 # ============================ 构建阶段 ============================
-FROM python:${PYTHON_VERSION}-slim AS builder
+FROM ${PYTHON_IMAGE} AS builder
 
 ARG ENGINE
 
@@ -32,7 +39,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /bin/uv
+# uv 从 PyPI 装，而不是 COPY --from=ghcr.io/astral-sh/uv。
+# 依赖本来就要从 PyPI 拉，再多依赖一个 ghcr.io 只是白送一个失败点：国内网络下它
+# 常年 TLS 握手超时，而且这一步在依赖层之前——load metadata 一失败，整个构建当场
+# 就没了（net/http: TLS handshake timeout），连 apt 那层缓存都用不上。
+#
+# 版本区间跟 pyproject 的 [tool.uv].required-version 对齐。这个值是原样交给 pip 的
+# requirement，要钉死某个版本就传 --build-arg UV_SPEC=uv==0.9.18。
+ARG UV_SPEC=uv~=0.9.18
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --root-user-action=ignore "$UV_SPEC"
 
 # 先只复制依赖定义，让依赖层能被 Docker 缓存复用
 # LICENSE 也要进来：pyproject 用 PEP 639 的 license-files 声明了它，
@@ -59,7 +75,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi
 
 # ============================ 运行阶段 ============================
-FROM python:${PYTHON_VERSION}-slim AS runtime
+FROM ${PYTHON_IMAGE} AS runtime
 
 ARG ENGINE
 # camoufox 的默认插件（当前只有 uBlock Origin）必须真的下下来才算构建成功。
