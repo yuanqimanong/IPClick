@@ -9,7 +9,7 @@ from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamE
 from ipclick.adapters.redirects import HopFollowingMixin
 from ipclick.adapters.retry import aretry, retry
 from ipclick.adapters.sessions import AsyncSessionCache, SessionCache, reset_cookies
-from ipclick.adapters.settings import AdapterSettings
+from ipclick.adapters.settings import DEFAULT_DOWNLOAD_TIMEOUT, AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError
 from ipclick.utils.log_util import log
@@ -106,7 +106,7 @@ class CurlCffiAdapter(HopFollowingMixin, DownloaderAdapter):
         正好等于总超时，总预算不会凭空多出一个 connect_timeout。
 
         传标量则 ``[DOWNLOADER].connect_timeout`` 完全无从生效——此前就是这样：连一个
-        黑洞地址要一直等到 download_timeout（默认 300 秒），每次重试再付一遍。
+        黑洞地址要一直等到 download_timeout，每次重试再付一遍。
         """
         total = requested or self.timeout
         # 读 settings 而不是 self.connect_timeout，和 niquests 那边保持一致。
@@ -155,7 +155,7 @@ class CurlCffiAdapter(HopFollowingMixin, DownloaderAdapter):
         json: dict[str, Any] | None = None,
         files: dict[str, Any] | None = None,
         proxy: str | None = None,
-        timeout: float = 60,
+        timeout: float = DEFAULT_DOWNLOAD_TIMEOUT,
         max_retries: int = 3,
         retry_delay: float = 2.0,
         verify: bool = True,
@@ -245,6 +245,7 @@ class CurlCffiAdapter(HopFollowingMixin, DownloaderAdapter):
         **kwargs: Any,
     ) -> Iterator[StreamEvent]:
         """产出响应首部及正文分片，并在生成器结束时关闭响应。"""
+        self.apply_stream_timeout(kwargs)
         method = str(kwargs.get("method", "GET")).upper()
         if method not in _SUPPORTED_METHODS:
             yield StreamHeader(url=url, status_code=-1, error=f"Unsupported HTTP method: {method}")

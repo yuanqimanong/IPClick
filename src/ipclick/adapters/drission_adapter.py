@@ -24,7 +24,7 @@ from ipclick.adapters.browser_settings import (
     wait_for_timeout_ms,
 )
 from ipclick.adapters.retry import retry
-from ipclick.adapters.settings import AdapterSettings
+from ipclick.adapters.settings import DEFAULT_DOWNLOAD_TIMEOUT, AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError
 from ipclick.utils.log_util import log
@@ -132,7 +132,7 @@ class DrissionPageAdapter(DownloaderAdapter):
         json: dict[str, Any] | None = None,
         files: dict[str, Any] | None = None,
         proxy: str | None = None,
-        timeout: float = 60,
+        timeout: float = DEFAULT_DOWNLOAD_TIMEOUT,
         max_retries: int = 3,
         retry_delay: float = 2.0,
         verify: bool = True,

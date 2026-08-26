@@ -11,7 +11,7 @@ from ipclick.adapters.base import DEFAULT_CHUNK_SIZE, DownloaderAdapter, StreamE
 from ipclick.adapters.redirects import HopFollowingMixin
 from ipclick.adapters.retry import aretry, retry
 from ipclick.adapters.sessions import AsyncSessionCache, SessionCache, reset_cookies
-from ipclick.adapters.settings import AdapterSettings
+from ipclick.adapters.settings import DEFAULT_DOWNLOAD_TIMEOUT, AdapterSettings
 from ipclick.dto.response import Response
 from ipclick.exceptions import AdapterError, ValidationError
 from ipclick.utils.log_util import log
@@ -141,7 +141,7 @@ class NiquestsAdapter(HopFollowingMixin, DownloaderAdapter):
         json: dict[str, Any] | None = None,
         files: dict[str, Any] | None = None,
         proxy: str | None = None,
-        timeout: float = 60,
+        timeout: float = DEFAULT_DOWNLOAD_TIMEOUT,
         max_retries: int = 3,
         retry_delay: float = 2.0,
         verify: bool = True,
@@ -231,6 +231,7 @@ class NiquestsAdapter(HopFollowingMixin, DownloaderAdapter):
         **kwargs: Any,
     ) -> Iterator[StreamEvent]:
         """产出响应首部和正文分片，并确保响应最终关闭。"""
+        self.apply_stream_timeout(kwargs)
         self.reject_impersonate(kwargs.get("impersonate"))
         method = str(kwargs.get("method", "GET")).upper()
         if method not in _SUPPORTED_METHODS:

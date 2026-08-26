@@ -282,8 +282,12 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             return [(k, v) for k, v in value]
         return value
 
-    def _build_download_kwargs(self, request: task_pb2.ReqTask) -> dict[str, Any]:
-        """将 protobuf 可选字段转换为适配器调用参数。"""
+    def _build_download_kwargs(self, request: task_pb2.ReqTask, *, stream: bool = False) -> dict[str, Any]:
+        """将 protobuf 可选字段转换为适配器调用参数。
+
+        ``stream`` 只影响"调用方没给超时"时兜的那个默认值：流式要在一个预算里收完
+        整段响应体，和普通请求共用同一份的话，默认配置下大文件必然中途断。
+        """
         method = METHOD_MAP.get(request.method, "GET")
 
         if request.HasField("max_retries") and not 0 <= request.max_retries <= HARD_MAX_RETRIES:
@@ -297,6 +301,8 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
 
         headers = dict(request.headers) if request.headers else None
         cookies = dict(request.cookies) if request.cookies else None
+        settings = self.adapter_settings
+        default_timeout = settings.stream_timeout if stream else settings.download_timeout
 
         # 查询参数**不过** json_hook：它会把形似 ISO 的字符串还原成 datetime，
         # 而这些值最终要被 str() 拼进 URL。于是 params={"start": "2024-01-01"} 发出去
@@ -321,11 +327,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             "data": data,
             "json": json_data,
             "proxy": request.proxy or None,
-            "timeout": (
-                request.timeout_seconds
-                if request.HasField("timeout_seconds")
-                else self.adapter_settings.download_timeout
-            ),
+            "timeout": (request.timeout_seconds if request.HasField("timeout_seconds") else default_timeout),
             "max_retries": (
                 request.max_retries if request.HasField("max_retries") else self.adapter_settings.max_attempts
             ),
@@ -346,8 +348,11 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
             "kwargs": request.kwargs or None,
         }
 
+        # 兜底两处：字段没带（上面）和带了个 0/负数（这里）。当初只有下面这一处按流式
+        # 分支，结果"字段没带"那条路照旧拿普通请求的预算——一个只在默认路径上出现、
+        # 而单测正好覆盖不到的差异。
         if not download_kwargs["timeout"] or download_kwargs["timeout"] <= 0:
-            download_kwargs["timeout"] = self.adapter_settings.download_timeout
+            download_kwargs["timeout"] = default_timeout
 
         return download_kwargs
 
@@ -490,7 +495,7 @@ class TaskService(task_pb2_grpc.TaskServiceServicer):
         真流式适配器若将来加上 ``@retry()``，就必须在那一层自己判断"已经吐过字节了
         就不能重投"，而不是靠这里抹参数——那样做只会让调用方的参数看起来生效实际不生效。
         """
-        download_kwargs = self._build_download_kwargs(request)
+        download_kwargs = self._build_download_kwargs(request, stream=True)
         return self._caller_aware_stream(
             context,
             self._limited_stream(

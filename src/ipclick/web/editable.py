@@ -7,6 +7,11 @@ from typing import Any, Literal, final
 
 from ipclick.adapters.browser_engines import ENGINE_NAMES
 from ipclick.adapters.browser_settings import BROWSER_KINDS, WAIT_UNTIL_CHOICES
+from ipclick.adapters.settings import (
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_DOWNLOAD_TIMEOUT,
+    DEFAULT_STREAM_TIMEOUT,
+)
 from ipclick.exceptions import ValidationError
 from ipclick.ports import DEFAULT_GRPC_PORT, DEFAULT_WEB_PORT
 
@@ -59,7 +64,7 @@ class Field:
 
 GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
     (
-        "服务端",
+        "服务端与 Web 管理端",
         (
             Field(
                 "SERVER",
@@ -120,7 +125,7 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
                 default=1,
                 hint="1 = 单进程（默认）；0 = 按 CPU 核数自动（上限 8）。"
                 "多个进程靠 SO_REUSEPORT 共享同一个端口，分发由内核做，对调用方完全透明。"
-                "这是唯一能突破 GIL 的办法——1.0.0 时期在 16 核机器上实测 1→4 进程吞吐 313→663 QPS（未重测）。"
+                "这是唯一能突破 GIL 的办法——16 核机器上实测 1→4 进程吞吐 313→663 QPS。"
                 "代价：内存按进程数近似线性增长；链路记录变成每进程一份，本页只看得到 0 号进程那一份",
             ),
             Field(
@@ -133,8 +138,8 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
                 default=0,
                 hint="0 = worker 线程数 × 8。这一项决定「排队能排多长」，和 worker 线程数"
                 "（「同时能干多少活」）是两件事。"
-                "0.5.0 里它被写死成线程数×2，于是 500 并发就开始拒流——实测成功率大幅下降，"
-                "而那时服务端 CPU 只用了 1.45 个核。调大它不额外消耗资源",
+                "定得太小会在并发一上来时直接拒流，而服务端往往还远没跑满：按线程数×2 算的话，"
+                "500 并发下成功率就大幅下降，而那时 CPU 只用了 1.45 个核。调大它不额外消耗资源",
             ),
             Field(
                 "SERVER",
@@ -163,61 +168,61 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
                 "异步模式（实验性）",
                 "bool",
                 default=False,
-                hint="换成 grpc.aio + 协程，不再一请求一线程。1.0.0 时期实测端到端 1.8×（未重测）。"
-                "⚠️ 实验性，默认关：自定义适配器会被丢进线程池跑（线程安全假设变了）；"
-                "0.8 视反馈再考虑翻默认值。想吃满多核仍要靠上面的「工作进程数」——"
+                hint="换成 grpc.aio + 协程，不再一请求一线程。实测端到端 1.8×。"
+                "⚠️ 实验性，默认关：自定义适配器会被丢进线程池跑（线程安全假设变了），"
+                "视反馈再考虑翻默认值。想吃满多核仍要靠上面的「工作进程数」——"
                 "协程解决并发模型，多进程解决多核",
             ),
             Field(
                 "GENERAL", "debug", "调试模式", "bool", restart=False, hint="强制 DEBUG 级别日志，覆盖下面的日志级别"
             ),
-        ),
-    ),
-    (
-        "日志",
-        (
-            Field("LOG", "level", "日志级别", "choice", restart=False, choices=("debug", "info", "warning", "error")),
-            Field("LOG", "output", "输出位置", "str", hint="stdout 或文件路径"),
             Field(
-                "LOG",
-                "format",
-                "日志格式",
-                "str",
-                hint="留空用内置带颜色的格式。写错了不会让服务起不来，会告警后回落内置格式",
-            ),
-            Field(
-                "LOG.rotation",
-                "max_size",
-                "单个日志文件上限（MB）",
-                "int",
-                minimum=1,
-                maximum=10000,
-                default=100,
-                hint="只在「输出位置」是文件路径时有意义",
-            ),
-            Field(
-                "LOG.rotation",
-                "max_backups",
-                "保留几个历史日志",
-                "int",
-                minimum=0,
-                maximum=1000,
-                default=5,
+                "WEB",
+                "theme",
+                "页面主题",
+                "choice",
+                choices=("light", "dark"),
+                default="light",
+                hint="这台机器上打开时的默认值；浏览器里手动点过的选择优先于它",
             ),
         ),
     ),
     (
         "下载行为",
         (
-            Field("DOWNLOADER", "download_timeout", "单次请求超时（秒）", "float", minimum=0.1, maximum=3600),
-            Field("DOWNLOADER", "connect_timeout", "连接超时（秒）", "float", minimum=0.1, maximum=600),
+            # 这两项不是并列的：连接段从总预算里先划走，剩下的才归收数据。页面上不写
+            # 清楚的话，"我设了 60 秒怎么 20 秒就超时了"没有任何线索。
             Field(
                 "DOWNLOADER",
-                "trust_env",
-                "跟随系统代理环境变量",
-                "bool",
-                hint="开了之后出站请求会读本机的 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY。"
-                "默认关，免得「在我机器上好好的」变成「在服务器上悄悄走了别的出口」",
+                "download_timeout",
+                "单次请求超时（秒）",
+                "float",
+                minimum=0.1,
+                maximum=3600,
+                default=DEFAULT_DOWNLOAD_TIMEOUT,
+                hint="一次请求的总预算，建连也算在里面。请求里带了 timeout 就用请求的。下大文件时调大这一项",
+            ),
+            Field(
+                "DOWNLOADER",
+                "connect_timeout",
+                "连接超时（秒）",
+                "float",
+                minimum=0.1,
+                maximum=600,
+                default=DEFAULT_CONNECT_TIMEOUT,
+                hint="总预算里先划给建连的上限，剩下的归收数据。走代理时建连更慢，太小会误杀；"
+                "太接近总预算则没时间收数据。推荐 15~30，且不超过总预算的一半",
+            ),
+            Field(
+                "DOWNLOADER",
+                "stream_timeout",
+                "流式下载超时（秒）",
+                "float",
+                minimum=0.1,
+                maximum=86400,
+                default=DEFAULT_STREAM_TIMEOUT,
+                hint="stream=true 时的总预算，单独一份。整段响应体要在这里面收完，所以比上面大得多。"
+                "下几百 MB 的文件就调它，不用动上面那个",
             ),
             Field(
                 "DOWNLOADER",
@@ -231,6 +236,70 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         ),
     ),
     (
+        "代理",
+        (
+            # 整组都是 restart=False：[PROXY] 不参与 gRPC 服务端的请求处理——服务端用的是
+            # 调用方在请求里带来的 proxy。这一节只被三处读：Web 的「试一试」（保存后
+            # reload_config 已经刷过，立即生效）、SDK 的 proxy=True（调用方自己的进程读自己
+            # 的配置）、以及 CLI。哪一处都跟"重启这个服务"没关系，打"需重启"是骗人的。
+            Field(
+                "PROXY",
+                "host",
+                "代理主机",
+                "str",
+                restart=False,
+                hint="留空表示不配置代理。粘了上面那行接入地址的话，这里会被拆出来的值覆盖",
+            ),
+            Field("PROXY", "port", "代理端口", "int", minimum=0, maximum=65535, default=0, restart=False),
+            Field(
+                "PROXY",
+                "scheme",
+                "协议",
+                "str",
+                default="http",
+                restart=False,
+                hint="http / https / socks5。用输入框而不是下拉：各适配器对 socks5 的支持不一致，"
+                "写死一份候选反而会挡掉本来能用的值",
+            ),
+            # 刻意**没有** tunnel_server 这一格：它和顶上那个粘贴框标题一模一样，同一组里
+            # 出现两个「隧道代理接入地址」纯属误导。粘贴框保存时会把端点拆进 host/port 并
+            # 清空 tunnel_server，覆盖了它的全部用法。toml 里手写它仍然生效（优先级更高），
+            # 这种情况粘贴框会照着它回显并提示。
+            #
+            # 下面三项不是地址，是拼进代理 URL 鉴权段的参数（:C / :T / :A，见
+            # ProxyConfig.to_url）。粘贴框只拆"账号:密码@主机:端口"，不碰它们，所以不能省。
+            Field(
+                "PROXY",
+                "channel_name",
+                "隧道通道名",
+                "str",
+                restart=False,
+                hint="拼成 :C<通道名>，服务商支持时才有意义",
+            ),
+            Field("PROXY", "session_ttl", "会话保持时长", "str", restart=False, hint="拼成 :T<时长>，留空表示不指定"),
+            Field(
+                "PROXY",
+                "country_code",
+                "出口国家",
+                "str",
+                restart=False,
+                hint="拼成 :A<国家码>，隧道代理支持时才有意义，例如 US",
+            ),
+            # 配置节是 [DOWNLOADER]，但它管的是"出站要不要走本机的代理环境变量"，
+            # 放在代理这一组才找得到。它跟上面几项不一样：适配器在服务启动时就建好了，
+            # 改完要重启。
+            Field(
+                "DOWNLOADER",
+                "trust_env",
+                "跟随系统代理环境变量",
+                "bool",
+                hint="开了之后出站请求会读本机的 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY。"
+                "随包模板里是关的——免得「在我机器上好好的」变成「在服务器上悄悄走了别的出口」。"
+                "这个勾显示的是「你当前配置文件里的值」，不是模板默认值",
+            ),
+        ),
+    ),
+    (
         "重试",
         (
             Field("DOWNLOADER.retry", "max_attempts", "最大重试次数", "int", minimum=0, maximum=20),
@@ -240,8 +309,11 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         ),
     ),
     (
-        "连接池",
+        "并发与限流",
         (
+            # 连接池和按 host 限流原来是两组，但六项限流里有四项就住在
+            # [DOWNLOADER.concurrency] 里，和连接池同一个节——分开摆等于让人
+            # 在两个折叠块之间来回找同一件事。
             Field(
                 "DOWNLOADER.concurrency",
                 "max_connections",
@@ -263,11 +335,6 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
                 default=20,
                 hint="其中保持复用、不关闭的那部分。同样只对 niquests 生效",
             ),
-        ),
-    ),
-    (
-        "按 host 限流",
-        (
             Field(
                 "DOWNLOADER.concurrency",
                 "per_host_max_concurrent",
@@ -404,29 +471,52 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         ),
     ),
     (
-        "代理",
+        "客户端与压缩",
         (
-            Field("PROXY", "host", "代理主机", "str", hint="留空表示不配置级代理"),
-            Field("PROXY", "port", "代理端口", "int", minimum=0, maximum=65535, default=0),
+            Field("CLIENT", "rpc_max_retries", "RPC 重试次数", "int", minimum=0, maximum=20),
+            Field("CLIENT", "rpc_retry_backoff", "RPC 退避基数（秒）", "float", minimum=0, maximum=60),
             Field(
-                "PROXY",
-                "scheme",
-                "协议",
+                "CLIENT",
+                "compression",
+                "请求压缩",
+                "choice",
+                choices=("auto", "gzip", "none"),
+                hint="自动化脚本压缩后通常只剩几十分之一",
+            ),
+            Field("CLIENT", "compression_threshold", "压缩门槛（字节）", "int", minimum=0, maximum=100 * 1024 * 1024),
+        ),
+    ),
+    (
+        "日志",
+        (
+            Field("LOG", "level", "日志级别", "choice", restart=False, choices=("debug", "info", "warning", "error")),
+            Field("LOG", "output", "输出位置", "str", hint="stdout 或文件路径"),
+            Field(
+                "LOG",
+                "format",
+                "日志格式",
                 "str",
-                default="http",
-                hint="http / https / socks5。用输入框而不是下拉：各适配器对 socks5 的支持不一致，"
-                "写死一份候选反而会挡掉本来能用的值",
+                hint="留空用内置带颜色的格式。写错了不会让服务起不来，会告警后回落内置格式",
             ),
             Field(
-                "PROXY",
-                "tunnel_server",
-                "隧道代理接入地址",
-                "str",
-                hint="用三方隧道代理时填它，填了就不用上面的主机+端口。下面三项是它的参数",
+                "LOG.rotation",
+                "max_size",
+                "单个日志文件上限（MB）",
+                "int",
+                minimum=1,
+                maximum=10000,
+                default=100,
+                hint="只在「输出位置」是文件路径时有意义",
             ),
-            Field("PROXY", "channel_name", "隧道通道名", "str"),
-            Field("PROXY", "session_ttl", "会话保持时长", "str", hint="留空表示不指定"),
-            Field("PROXY", "country_code", "出口国家", "str", hint="隧道代理支持时才有意义，例如 US"),
+            Field(
+                "LOG.rotation",
+                "max_backups",
+                "保留几个历史日志",
+                "int",
+                minimum=0,
+                maximum=1000,
+                default=5,
+            ),
         ),
     ),
     (
@@ -490,36 +580,6 @@ GROUPS: tuple[tuple[str, tuple[Field, ...]], ...] = (
             ),
             Field("CLUSTER", "failure_threshold", "连续失败几次摘除", "int", minimum=1, maximum=100),
             Field("CLUSTER", "recovery_threshold", "连续成功几次恢复", "int", minimum=1, maximum=100),
-        ),
-    ),
-    (
-        "Web 管理端",
-        (
-            Field(
-                "WEB",
-                "theme",
-                "页面主题",
-                "choice",
-                choices=("light", "dark"),
-                default="light",
-                hint="这台机器上打开时的默认值；浏览器里手动点过的选择优先于它",
-            ),
-        ),
-    ),
-    (
-        "客户端与压缩",
-        (
-            Field("CLIENT", "rpc_max_retries", "RPC 重试次数", "int", minimum=0, maximum=20),
-            Field("CLIENT", "rpc_retry_backoff", "RPC 退避基数（秒）", "float", minimum=0, maximum=60),
-            Field(
-                "CLIENT",
-                "compression",
-                "请求压缩",
-                "choice",
-                choices=("auto", "gzip", "none"),
-                hint="自动化脚本压缩后通常只剩几十分之一",
-            ),
-            Field("CLIENT", "compression_threshold", "压缩门槛（字节）", "int", minimum=0, maximum=100 * 1024 * 1024),
         ),
     ),
 )
