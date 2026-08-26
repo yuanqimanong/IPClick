@@ -164,7 +164,18 @@ def init(force: bool, target_dir: Path, port: int | None) -> None:
         env_path.chmod(0o600)
     with os.fdopen(os.open(env_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
         _ = f.write(env_text)
-    click.echo(f"已生成 {env_path}（权限 600，已预填随机 Web 密码）")
+    # 上面那个 0o600 只在 POSIX 上真的生效：Windows 的 os.open 把 mode 当成"是否置只读位"，
+    # ACL 一动没动。照着 POSIX 报"权限 600"，等于跟 Windows 用户说这份密钥文件已经受保护
+    # 了——它没有，而 dotenv 那边的宽权限告警也只在 POSIX 上跑，不会有人来纠正这句话。
+    if os.name == "posix":
+        click.echo(f"已生成 {env_path}（权限 600，已预填随机 Web 密码）")
+    else:
+        click.echo(f"已生成 {env_path}（已预填随机 Web 密码）")
+        click.echo(
+            f"注意：Windows 上没有收紧 {env_path.name} 的权限（600 是 POSIX 的说法）——"
+            "里面是密钥，请自行确认本机其他账户读不到。",
+            err=True,
+        )
 
     gitignore = target_dir / ".gitignore"
     if gitignore.exists():

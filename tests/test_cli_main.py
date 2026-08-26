@@ -222,6 +222,22 @@ def test_init_refuses_ports_the_loader_would_reject(port: str, tmp_path: Path) -
     assert list(tmp_path.iterdir()) == []
 
 
+def test_init_only_claims_600_where_it_actually_set_600(tmp_path: Path) -> None:
+    """Windows 上 os.open 的 mode 只影响只读位，ACL 没动——不能照着 POSIX 报"权限 600"。
+
+    这份文件里是令牌和 Web 密码。跟用户说它已经 600 了，用户就不会再去看权限，
+    而 dotenv 的宽权限告警只在 POSIX 上跑，也不会有人来纠正这句话。
+    """
+    result = CliRunner().invoke(main, ["init", "--dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    if os.name == "posix":
+        assert "权限 600" in result.output
+    else:
+        assert "权限 600" not in result.output
+        assert "没有收紧" in result.output
+
+
 def test_init_says_it_aborted_rather_than_skipped(tmp_path: Path) -> None:
     """措辞要说实话：这里是整体中止，一个文件都不会生成。"""
     (tmp_path / ".env").write_text("", encoding="utf-8")
