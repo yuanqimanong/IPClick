@@ -16,7 +16,7 @@ enum AdapterType {
   // 维护两套等价的 HTTP 适配器不划算。
   HTTPX = 1 [deprecated = true];
   // 已移除：requests 适配器被 niquests 取代（后者 API 相同且支持 HTTP/2、HTTP/3）。
-  // 编号保留不复用——0.2.3 已发布，旧客户端仍可能发来这个值。
+  // 编号保留不复用——这个值已经发布出去过，旧客户端仍可能发来。
   REQUESTS = 2 [deprecated = true];
   DRISSIONPAGE = 3;
   UC = 4; // undetected-chromedriver（未实现）
@@ -254,11 +254,11 @@ service TaskService {
   rpc SendBatch(stream ReqTask) returns (stream TaskResp) {}
 
   // 节点探测：验连通性与集群内部鉴权，不做任何业务动作。
-  // 0.4 新增——对着 0.3 的节点调会收到 UNIMPLEMENTED，调用方据此判断"连上了、
+  // 对着没有这个接口的旧节点调会收到 UNIMPLEMENTED，调用方据此判断"连上了、
   // 鉴权也过了，只是那台还没升级"。
   rpc Ping(PingReq) returns (PingResp) {}
 
-  // 远程管理可选组件。0.5 新增，**默认关闭**（见 ComponentReq 的说明）。
-  // 对着 0.4 及更早的节点调会收到 UNIMPLEMENTED，主控据此提示"那台还没升级"。
+  // 远程管理可选组件，**默认关闭**（见 ComponentReq 的说明）。对着没有这个
+  // 接口的旧节点调会收到 UNIMPLEMENTED，主控据此提示"那台还没升级"。
   rpc Component(ComponentReq) returns (ComponentResp) {}
 }

@@ -44,7 +44,7 @@ def _readable_component_error(error: Any, node_id: str) -> str:
     if code is grpc.StatusCode.PERMISSION_DENIED:
         return details or f"节点 {node_id} 未开启远程组件管理"
     if code is grpc.StatusCode.UNIMPLEMENTED:
-        return f"节点 {node_id} 的版本低于 0.5，没有远程组件管理接口——先把那台升级上来"
+        return f"节点 {node_id} 没有远程组件管理接口（版本太旧）——先把那台升级上来"
     if code is grpc.StatusCode.UNAUTHENTICATED:
         return f"节点 {node_id} 鉴权不通过：两端的 IPCLICK_CLUSTER_SECRET 必须完全一致。{details}"
     if code is grpc.StatusCode.UNAVAILABLE:

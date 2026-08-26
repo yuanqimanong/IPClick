@@ -177,7 +177,7 @@ def _from_rpc_error(node: Node, error: grpc.RpcError, started: float) -> ProbeRe
             reachable=True,
             authenticated=True,
             elapsed_ms=_ms(started),
-            detail="连得上、鉴权也通过，但对方版本低于 0.4（没有 Ping 接口），拿不到它的详细信息",
+            detail="连得上、鉴权也通过，但对方没有 Ping 接口（版本太旧），拿不到它的详细信息",
         )
 
     name = getattr(code, "name", str(code))
