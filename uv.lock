@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.12' and extra == 'extra-7-ipclick-camoufox' and extra == 'extra-7-ipclick-linux' and extra != 'extra-7-ipclick-playwright'",
@@ -888,7 +888,7 @@ requires-dist = [
     { name = "curl-cffi", specifier = ">=0.16.0,<0.17.0" },
     { name = "drissionpage", marker = "extra == 'drissionpage'", specifier = ">=4.1.1,<5.0.0" },
     { name = "fake-useragent", specifier = ">=2.2.0,<3.0.0" },
-    { name = "grpcio", specifier = ">=1.83.0,<2.0.0" },
+    { name = "grpcio", specifier = ">=1.84.0,<2.0.0" },
     { name = "grpcio-health-checking", specifier = ">=1.83.0,<2.0.0" },
     { name = "ipclick", extras = ["camoufox", "patchright"], marker = "extra == 'linux'" },
     { name = "ipclick", extras = ["drissionpage"], marker = "extra == 'win'" },
@@ -906,7 +906,7 @@ provides-extras = ["niquests", "camoufox", "patchright", "drissionpage", "playwr
 [package.metadata.requires-dev]
 dev = [
     { name = "basedpyright", specifier = ">=1.39.9" },
-    { name = "grpcio-tools", specifier = ">=1.83.0,<2.0.0" },
+    { name = "grpcio-tools", specifier = ">=1.84.0,<2.0.0" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
     { name = "ruff", specifier = ">=0.16.1" },
@@ -916,7 +916,7 @@ lint = [
     { name = "basedpyright", specifier = ">=1.39.9" },
     { name = "ruff", specifier = ">=0.16.1" },
 ]
-proto = [{ name = "grpcio-tools", specifier = ">=1.83.0,<2.0.0" }]
+proto = [{ name = "grpcio-tools", specifier = ">=1.84.0,<2.0.0" }]
 release = [{ name = "twine", specifier = ">=6.2.0,<8.0.0" }]
 test = [
     { name = "pytest", specifier = ">=9.1.1" },

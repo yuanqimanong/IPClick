@@ -24,7 +24,7 @@ classifiers = [
 ]
 dependencies = [
     "curl-cffi>=0.16.0,<0.17.0",
-    "grpcio>=1.83.0,<2.0.0",
+    "grpcio>=1.84.0,<2.0.0",
     "grpcio-health-checking>=1.83.0,<2.0.0",
     "protobuf>=7.35.1,<8.0.0",
     "click>=8.4.2,<9.0.0",
@@ -82,7 +82,7 @@ lint = [
     "ruff>=0.16.1",
 ]
 proto = [
-    "grpcio-tools>=1.83.0,<2.0.0",
+    "grpcio-tools>=1.84.0,<2.0.0",
 ]
 release = [
     "twine>=6.2.0,<8.0.0",

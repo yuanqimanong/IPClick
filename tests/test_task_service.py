@@ -242,14 +242,14 @@ def test_stream_body_error_uses_trailer_without_sending_a_second_header(
     service: TaskService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def broken_stream(_adapter: object, _request: task_pb2.ReqTask, _context: object = None):
-        yield StreamHeader(url="https://example.com/final", status_code=200, headers={"x-test": "1"})
+        yield StreamHeader(url="http://127.0.0.1/final", status_code=200, headers={"x-test": "1"})
         yield b"partial"
         raise RuntimeError("connection lost")
 
     monkeypatch.setattr(service, "_open_stream", broken_stream)
     recording, context = _context()
 
-    chunks = list(service.SendStream(task_pb2.ReqTask(uuid="mid-error", url="https://example.com/start"), context))
+    chunks = list(service.SendStream(task_pb2.ReqTask(uuid="mid-error", url="http://127.0.0.1/start"), context))
 
     assert sum(chunk.HasField("header") for chunk in chunks) == 1
     assert b"".join(chunk.chunk for chunk in chunks if chunk.HasField("chunk")) == b"partial"
@@ -373,7 +373,7 @@ def test_stream_retries_stop_when_the_caller_walks_away(settings: Settings, monk
 
     _ = list(
         service.SendStream(
-            task_pb2.ReqTask(url="https://example.com/x", max_retries=3, retry_backoff_seconds=0.0),
+            task_pb2.ReqTask(url="http://127.0.0.1/x", max_retries=3, retry_backoff_seconds=0.0),
             context,
         )
     )
@@ -391,7 +391,7 @@ async def test_async_stream_retries_stop_when_the_caller_walks_away(
     service = AsyncTaskService(settings)
 
     async for _chunk in service.SendStream(
-        task_pb2.ReqTask(url="https://example.com/x", max_retries=3, retry_backoff_seconds=0.0),
+        task_pb2.ReqTask(url="http://127.0.0.1/x", max_retries=3, retry_backoff_seconds=0.0),
         context,
     ):
         pass

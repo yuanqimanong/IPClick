@@ -135,7 +135,7 @@ def test_sync_forwarder_does_not_repeat_non_idempotent_requests(method: int, mon
     recording = RecordingContext()
     try:
         response = service.Send(
-            task_pb2.ReqTask(uuid="unsafe", method=cast(Any, method), url="https://example.com/action"),
+            task_pb2.ReqTask(uuid="unsafe", method=cast(Any, method), url="http://127.0.0.1/action"),
             cast(ServicerContext, cast(object, recording)),
         )
         assert len(calls) == 1
@@ -161,7 +161,7 @@ def test_sync_forwarder_keeps_failover_for_safe_reads(monkeypatch: pytest.Monkey
     monkeypatch.setattr(service, "_forward", forward)
     try:
         response = service.Send(
-            task_pb2.ReqTask(uuid="safe", method=task_pb2.GET, url="https://example.com/read"),
+            task_pb2.ReqTask(uuid="safe", method=task_pb2.GET, url="http://127.0.0.1/read"),
             cast(ServicerContext, cast(object, RecordingContext())),
         )
         assert len(calls) == 2
@@ -192,7 +192,7 @@ async def test_async_forwarder_does_not_repeat_non_idempotent_requests(
     recording = RecordingContext()
     try:
         response = await service.Send(
-            task_pb2.ReqTask(uuid="unsafe-async", method=cast(Any, method), url="https://example.com/action"),
+            task_pb2.ReqTask(uuid="unsafe-async", method=cast(Any, method), url="http://127.0.0.1/action"),
             cast(ServicerContext, cast(object, recording)),
         )
         assert len(calls) == 1
@@ -219,7 +219,7 @@ async def test_async_forwarder_keeps_failover_for_safe_reads(monkeypatch: pytest
     monkeypatch.setattr(service, "_forward", forward)
     try:
         response = await service.Send(
-            task_pb2.ReqTask(uuid="safe-async", method=task_pb2.GET, url="https://example.com/read"),
+            task_pb2.ReqTask(uuid="safe-async", method=task_pb2.GET, url="http://127.0.0.1/read"),
             cast(ServicerContext, cast(object, RecordingContext())),
         )
         assert len(calls) == 2

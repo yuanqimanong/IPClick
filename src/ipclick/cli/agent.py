@@ -448,7 +448,8 @@ def fetch(
         if output is not None:
             note(f"  已写入 {output}")
         else:
-            click.get_binary_stream("stdout").write(response.content)
+            with click.open_file("-", "wb") as stdout:
+                stdout.write(response.content)
 
     if code is not Exit.OK:
         raise SystemExit(int(code))

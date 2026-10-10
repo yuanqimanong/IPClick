@@ -136,6 +136,30 @@ def test_json_command_is_not_polluted_by_invalid_environment_override(monkeypatc
     assert payload["ok"] is True
 
 
+def test_fetch_writes_binary_body_without_closing_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
+    content = b"\x00\xff\r\nbody\x80"
+
+    class FakeDownloader:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def request(self, **kwargs: object) -> DownloadResponse:
+            return DownloadResponse(url=str(kwargs["url"]), status_code=200, content=content)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("ipclick.sdk.Downloader", FakeDownloader)
+    runner = CliRunner()
+
+    with runner.isolation() as (stdout, _stderr, _output):
+        main.main(args=["fetch", "http://127.0.0.1/body"], standalone_mode=False)
+        assert stdout.getvalue() == content
+        assert not stdout.closed
+        stdout.write(b"after-fetch")
+        assert stdout.getvalue() == content + b"after-fetch"
+
+
 def test_fetch_output_file_does_not_repeat_body_in_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     content = b"x" * 100_000
 
