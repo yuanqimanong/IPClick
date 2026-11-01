@@ -23,7 +23,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "curl-cffi>=0.16.0,<0.17.0",
+    "curl-cffi>=0.16.0,<0.18.0",
     "grpcio>=1.84.0,<2.0.0",
     "grpcio-health-checking>=1.83.0,<2.0.0",
     "protobuf>=7.35.1,<8.0.0",
