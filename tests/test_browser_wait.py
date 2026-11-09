@@ -119,6 +119,13 @@ def test_a_complete_addon_directory_is_fine(tmp_path: Path, monkeypatch: pytest.
     assert browser_engines._broken_camoufox_addons() == ""
 
 
+def test_camoufox_with_bundled_addons_needs_no_shared_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = ModuleType("camoufox.addons")
+    monkeypatch.setitem(sys.modules, "camoufox.addons", module)
+
+    assert browser_engines._broken_camoufox_addons() == ""
+
+
 def test_a_missing_addon_directory_is_not_treated_as_broken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """目录整个不存在是另一回事：camoufox 启动时会尝试补下，失败也只是跳过该插件，能起来。
 
