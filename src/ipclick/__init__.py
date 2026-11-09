@@ -35,7 +35,7 @@ try:
     __version__ = importlib.metadata.version("ipclick")
     __author__ = importlib.metadata.metadata("ipclick")["Author"]
 except importlib.metadata.PackageNotFoundError:
-    __version__ = "2.1.1"
+    __version__ = "2.1.2"
     __author__ = "元气码农少女酱"
 
 
