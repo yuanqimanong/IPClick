@@ -2,14 +2,13 @@
 
 ![IPClick Logo](https://raw.githubusercontent.com/yuanqimanong/IPClick/master/.github/logo.png)
 
-> IPClick 名字灵感来源于动画《Link Click》（时光代理人）。正如时光代理人穿梭于不同的时空执行任务，IPClick 帮助您将 HTTP 请求分发到不同的节点高效执行。
+> IPClick 的名字灵感来自《Link Click》（时光代理人）。项目将 HTTP 请求分发到不同节点执行。
 
-IPClick 是一个基于 gRPC 的分布式 HTTP 请求代理。你把请求交给它，它带着浏览器 TLS
-指纹、重试策略、限流与准入规则去发，必要时换一台机器的出口 IP 去发，并把每一次
-执行都记成一条可查的链路。
+IPClick 是一个基于 gRPC 的分布式 HTTP 请求代理。调用方通过 Python SDK、命令行或 Web
+管理端提交请求，服务端负责适配器选择、TLS 指纹伪装、重试、限流和 URL 准入。
+多机部署时，请求可以由不同节点的出口 IP 发出，执行过程会记录为可查询的链路。
 
-> 📚 **完整文档在 [Wiki](https://github.com/yuanqimanong/IPClick/wiki)**。本页只讲"这是什么、怎么跑起来"，
-> 深入用法都在 Wiki 里。
+> 📚 **完整文档在 Wiki**。本页介绍安装、启动和常用入口，详细配置与 API 用法见文档目录。[Wiki](https://github.com/yuanqimanong/IPClick/wiki)
 
 | | |
 |---|---|
@@ -32,22 +31,22 @@ IPClick 是一个基于 gRPC 的分布式 HTTP 请求代理。你把请求交给
 
 ## ✨ 特性
 
-- **多适配器**：默认 `curl_cffi`（带 TLS 指纹伪装），按需加装 `niquests`（HTTP/3）
-  或四个浏览器引擎之一；也可注册自定义适配器
-- **轻量安装**：`pip install ipclick` 只带 curl_cffi，其余走 extras
-- **浏览器渲染**：起真实浏览器执行 JS，camoufox / patchright / playwright /
-  DrissionPage 四选一，默认按平台挑
-- **集群与故障转移**：轮询 / 随机 / 加权均衡、健康探测、自动换节点（仅 GET/HEAD/OPTIONS）；服务端转发与
-  客户端分发两种形态
-- **按 host 限流**：按目标域名限制并发与 QPS，不会把单个站点打爆
+- **多适配器**。默认使用带 TLS 指纹伪装的 `curl_cffi`，可按需安装 `niquests`（HTTP/3）
+  或浏览器引擎，也支持注册自定义适配器
+- **按需安装**。`pip install ipclick` 安装核心依赖，可选适配器通过 extras 安装
+- **浏览器渲染**。通过 camoufox / patchright / playwright / DrissionPage 执行 JS，
+  默认引擎按平台选择
+- **集群与故障转移**。支持轮询、随机、加权均衡和健康探测，以及服务端转发与客户端分发。
+  仅 GET/HEAD/OPTIONS 请求会自动换节点重试
+- **按 host 限流**。按目标域名控制并发与 QPS
 - **流式下载 · 断点续传 · 批量 · 异步客户端**
 - **令牌鉴权 · TLS/mTLS · SSRF 准入 · `grpc.health.v1` 健康检查**
-- **链路记录**：每个请求记一条（谁执行的、重试几次、排队多久），内存环形缓冲 +
-  可选 SQLite，零第三方依赖
-- **Web 管理端**：带登录的界面——总览、实时请求流、就地发请求看源码、配置改完写回
-  `ipclick.toml`、集群节点增删、可选组件装卸。前端零构建链路
-- **AI 可调用**：一组结构化输出、退出码分类的命令，外加随包分发的技能包
-- **完整类型标注**：随包提供 `py.typed`
+- **链路记录**。记录执行节点、重试次数和排队时间，使用内存环形缓冲或可选 SQLite 存储，
+  记录模块使用标准库实现
+- **Web 管理端**。提供登录、总览、实时请求流、请求调试、配置写回、集群节点管理和组件装卸，
+  前端无需构建
+- **AI 可调用**。提供结构化输出、分类退出码和随包分发的技能包
+- **完整类型标注**。随包提供 `py.typed`
 
 ## 📦 安装
 
@@ -57,8 +56,8 @@ pip install "ipclick[niquests]"         # 加 HTTP/2 + HTTP/3
 pip install "ipclick[camoufox]"         # 加浏览器渲染（还需下载浏览器本体）
 ```
 
-**没有 `[all]`**：四个浏览器内核全装是 70+ 个包和上 G 的浏览器本体，绝大多数部署
-只需要其中一个。装哪个、怎么下浏览器本体，见 [安装](https://github.com/yuanqimanong/IPClick/wiki/Installation)。
+可选适配器按用途安装，项目未提供 `[all]`。浏览器引擎还需要单独准备浏览器本体。
+引擎选择与安装步骤见 [安装](https://github.com/yuanqimanong/IPClick/wiki/Installation)。
 
 需要 Python 3.11+。
 
@@ -86,15 +85,14 @@ ipclick run --verbose
 ipclick run --port 9628 --web-port 9531 -w
 ```
 
-默认端口是 **gRPC 9528** 与 **Web 9527**。两者都跑在 HTTP/2 之上但协议不同，
-把客户端指到 Web 端口上会在 gRPC 握手阶段失败，报出的错误还和端口毫无关系——
-所以连不上时 IPClick 会额外附一句端口提示。
+默认端口分别为 **gRPC 9528** 与 **Web 9527**。SDK 和其他节点连接 gRPC 端口，
+浏览器访问 Web 端口。客户端误连 Web 端口时会在 gRPC 握手阶段失败，错误信息中会附带端口提示。
 
-### 吞吐上不去？先加进程，不是加线程
+### 服务端并发与多进程
 
-服务端默认一请求一线程，**GIL 才是吞吐天花板**——调大 `[SERVER].max_workers` 对吞吐没有
-影响。要用满多核就起多个工作进程，靠 SO_REUSEPORT 共享同一个端口，分发由内核做，对调用方
-完全透明（仍然只有一个地址一个端口）：
+服务端默认在线程池中处理请求，`[SERVER].max_workers` 控制单个进程的线程数。
+需要利用多个 CPU 核时，可配置多个工作进程，通过 SO_REUSEPORT 共享监听端口，
+由内核分发连接。客户端仍使用同一个服务地址。
 
 ```toml
 [SERVER]
@@ -104,24 +102,25 @@ max_concurrent_rpcs = 0  # 0 = max_workers × 8。决定"排队能排多长"，
 async_mode = false       # true = grpc.aio 协程模式（实验性，默认关）
 ```
 
-**仅 Unix。** Windows 上没有 `os.fork`，会打一条告警后降级成单进程。Web 管理端只在 0 号
-进程里起，内存按进程数线性增长——每进程各有一份适配器与连接池，开浏览器渲染时尤其要算。
+**多进程模式仅支持 Unix。** Windows 上缺少 `os.fork` 时会告警并降级为单进程。
+Web 管理端只在 0 号进程中启动。每个工作进程各自持有适配器和连接池，配置进程数时需计算
+这部分内存开销，尤其是启用浏览器渲染的节点。
 
-协程和多进程**不是二选一**：前者解决并发模型，后者解决多核，两者叠加才是终态。
+协程模式控制单个进程内的并发方式，多进程用于利用多个 CPU 核，两项可以组合使用。
 
 基准数据、按 host 限流与容量规划见 [性能与容量](https://github.com/yuanqimanong/IPClick/wiki/Performance)。
-初始化配置（推荐）：
+使用以下命令初始化配置。
 
 ```bash
 ipclick init
 ```
 
-一次生成两份文件：`ipclick.toml`（行为配置）和 `.env`（机密）。`.env` 用 **600**
-权限创建、预填一个随机 Web 密码；`.gitignore` 只在已存在时才会被追加一行 `.env`
-——干净的新目录里 `init` 只会打一句提醒，不会替你创建 `.gitignore`，这种情况得自己加。
-文件已存在时拒绝覆盖（要覆盖加 `--force`）。
+该命令生成 `ipclick.toml`（行为配置）和 `.env`（机密），并在 `.env` 中填入随机 Web 密码。
+POSIX 上 `.env` 使用 **600** 权限，Windows 上由目录的 NTFS ACL 控制访问。
+已有 `.gitignore` 会补入缺少的 `.env` 规则。新目录需要自行创建 `.gitignore` 并加入该项。
+已有配置文件会被保留，需要覆盖时使用 `--force`。
 
-也可以只要模板：
+也可以分别导出配置模板。
 
 ```bash
 ipclick -e > ipclick.toml        # 配置模板（-e 等价于 -e toml）
@@ -146,15 +145,14 @@ IPCLICK_PROXY_AUTH_PASSWORD   代理密码
 IPCLICK_CLUSTER_SECRET        集群共享密钥（所有节点一致；每台机器的令牌由它派生）
 ```
 
-**机密写在 `ipclick.toml` 里仍然生效**——受信环境里图省事是合理的。只是启动时会
-点名提醒（`ipclick.toml` 通常要进版本库，机密会跟着进 git、备份、CI 日志）。
-确实想这么放就设 `[SECURITY].allow_secrets_in_config = true` 关掉提醒。
-两边都写时**环境变量优先**。
+机密也可以写入 `ipclick.toml`，启动时会列出提醒，避免凭据随配置进入 Git、备份或 CI 日志。
+确认允许这种配置时，可设 `[SECURITY].allow_secrets_in_config = true` 关闭提醒。
+同一项同时出现在配置文件和环境变量中时，**环境变量优先**。
 
-`ipclick config-info` 会逐项显示每个机密**来自哪里**（环境变量 / 配置文件 / 未配置）
-——配错了地方是最难自己发现的一类问题。
+`ipclick config-info` 会逐项显示机密来源（环境变量 / 配置文件 / 未配置），
+同时列出当前生效的 TLS、鉴权、限流、浏览器引擎和运行模式。
 
-查看当前**实际生效**的配置——TLS、鉴权、限流、浏览器引擎、运行模式一目了然：
+查看生效配置。
 
 ```bash
 ipclick config-info
@@ -188,17 +186,17 @@ with Downloader() as downloader:
         print(f"请求失败: {response.error}")
 ```
 
-`request()` 及各便捷方法不会因为网络问题抛异常——传输失败和 DNS 解析失败都返回
-`status_code == -1` 且 `error` 非空的 `DownloadResponse`。会抛出来的是这几类：
+`request()` 及各便捷方法在传输失败、DNS 解析失败时返回 `status_code == -1` 且 `error`
+非空的 `DownloadResponse`。参数、准入策略或依赖问题会抛出下表中的异常。
 
 | 异常 | 什么时候 |
 |---|---|
 | `ValidationError` | 参数不合法（URL 为空、方法不支持…），**以及重定向超过 10 跳** |
 | `URLNotAllowedError` | 入口 URL **或任何一跳重定向目标**被 `[SECURITY]` 拒绝 |
 | `AdapterError` | 适配器/浏览器没准备好 |
-| `HostLimitTimeout` | 等 per-host 配额超时
+| `HostLimitTimeout` | 等 per-host 配额超时 |
 
-更多用法——代理、流式、断点续传、批量、异步、指定适配器——见
+代理、流式下载、断点续传、批量、异步和指定适配器的用法见
 [SDK 用法](https://github.com/yuanqimanong/IPClick/wiki/SDK-Usage)。
 
 ## 🖥️ Web 管理端
@@ -207,9 +205,9 @@ with Downloader() as downloader:
 ipclick run --web        # 或 -w
 ```
 
-启动时把访问地址、用户名和密码打到控制台。**没配密码就随机生成**（重启失效），而不是给个
-admin/admin 之类的默认值——默认弱口令是这类管理界面被打穿的头号原因。要固定下来用环境变量
-（推荐，密码不该进版本库），或写进 `.env`，或配 `[WEB].username` / `password`：
+启动时会输出访问地址和用户名。未配置密码时会随机生成并打印，重启后失效。
+固定凭据可通过环境变量、`.env` 或 `[WEB].username` / `password` 配置，已配置的密码不会回显。
+推荐将凭据放在环境变量或 `.env` 中。
 
 ```bash
 IPCLICK_WEB_USER=ops IPCLICK_WEB_PASSWORD=... ipclick run -w
@@ -224,25 +222,25 @@ IPCLICK_WEB_USER=ops IPCLICK_WEB_PASSWORD=... ipclick run -w
 | **配置** `/config` | 75 项配置分 10 组（可折叠），写回 `ipclick.toml`（保留注释、留 `.bak`）；隧道代理整串粘贴自动拆分（地址进 toml、凭据进 `.env`）；集群节点增删 |
 | **AI 接入** `/skill` | 技能包全文、安装命令与 `SKILL.md` 下载 |
 
-「试一试」走的是本进程 `TaskService` 的**同一条**代码路径——SSRF 准入、限流、以及开了转发时
-的分发全都照常生效，请求也会像真实请求一样出现在请求流里。
+「试一试」通过本进程的 `TaskService` 执行请求，应用相同的 SSRF 准入、限流和转发规则，
+执行记录也会出现在请求流中。
 
-**不能从界面改的**：`[SECURITY]` 全部、Web 自己的登录凭据、集群共享密钥与各节点 token、
+涉及安全边界的设置需在部署时配置，界面会限制编辑这些项目。
+包括 `[SECURITY]` 全部、Web 登录凭据、集群共享密钥与节点 token、
 `[BROWSER].allow_scripts`、`[BROWSER].executable_path`、`[CLUSTER].allow_remote_install`。
-后三项不是"配置"是"授权"——它们能让调用方在服务端跑任意东西，不该和超时、线程数摆在同一个
-表单里让人顺手划过去。
+后三项分别影响页内脚本执行、本机程序启动和远程装包权限。
 
 > ⚠️ 界面本身是**明文 HTTP**，默认只监听 `127.0.0.1`。要远程访问请用 SSH 隧道，或放在做了
 > TLS 终止的反向代理之后。局域网自用可以 `--web-lan`（等价于 `--web-host 0.0.0.0`），但开
 > 之前先把 `[SECURITY].auth_token` 配上——同网段的人绕过网页直连 gRPC 端口是更省事的那条路。
 
-每个页面具体能干什么、写回配置的机制、前端的 CSP 与会话设计，见
+页面功能、配置写回机制、CSP 和会话设计见
 [Web 管理端](https://github.com/yuanqimanong/IPClick/wiki/Web-Console)。
 
 ## 🤖 命令行（给人，也给 AI）
 
-部署那一组是四条：`init` / `run` / `health` / `config-info`，都是给人看的，**不支持
-`--json`**。另有一组**结构化输出**的命令供脚本和 AI 代理调用，全部支持 `-J/--json`：
+`init` / `run` / `health` / `config-info` 用于部署和诊断，仅提供可读文本输出。
+供脚本和 AI 代理调用的命令支持 `-J/--json`，常用入口如下。
 
 ```bash
 ipclick status  --json              # 服务端在不在、这台机器能用哪些适配器
@@ -253,9 +251,8 @@ ipclick component list --json       # 五个可选组件的安装状态
 ipclick config  show --json         # 生效配置（机密脱敏）
 ```
 
-**输出契约**：加 `--json` 后 **stdout 上有且只有一个 JSON 文档**，成功失败都是；日志与进度
-走 stderr，所以 `ipclick ... --json | jq` 永远安全。每个文档都带 `ok` 和 `exit_code`，与进程
-退出码一致。
+启用 `--json` 后，**stdout 仅输出一个 JSON 文档**，日志和进度写入 stderr，可使用
+`ipclick ... --json | jq` 处理结果。文档包含 `ok` 和 `exit_code`，其中 `exit_code` 与进程退出码一致。
 
 | 退出码 | 含义 | 往哪儿查 |
 |---|---|---|
@@ -266,16 +263,14 @@ ipclick config  show --json         # 生效配置（机密脱敏）
 | 4 | 鉴权失败 | 令牌（`IPCLICK_AUTH_TOKEN`） |
 | 5 | 参数被服务端拒绝，或本地配置不合法 | 调用参数或 `ipclick.toml` |
 
-`status` 为 `-1` **或 `null`** 都表示没拿到 HTTP 响应，所以别拿 `d["status"] == -1` 当判据，
-先读 `exit_code` / `ok`；要区分方向再看 `reached_server`。
+`status` 为 `-1` **或 `null`** 时表示未收到 HTTP 响应。判断执行结果时先读取
+`exit_code` / `ok`，再用 `reached_server` 区分请求是否到达 IPClick 服务端。
 
-`--json` 时 `body` 默认截断到 **65536 个字符**（不是字节——抓中文页面时字节数会大出两三倍），
-并给出 `body_truncated: true`。`--max-body 0` 不截断，`-o <file>` 写文件也不截断。响应不是
-合法 UTF-8（图片、压缩流）时 `body_encoding` 为 `base64`，超过上限的给空串——半截 base64 解
-不出任何东西。
+`--json` 输出的 `body` 默认最多保留 **65536 个字符**，超出时标记 `body_truncated: true`。
+`--max-body 0` 可输出完整内容，`-o <file>` 写文件也保留完整响应体。图片、压缩流等非 UTF-8
+响应使用 `body_encoding` 为 `base64` 的表示，超过上限时返回空串，避免输出无法解码的片段。
 
-给 AI 代理装技能包（一份随 wheel 分发的 Markdown，讲清楚何时该用 IPClick、上面这套输出契约、
-以及几个最容易踩的坑）：
+随 wheel 分发的技能包介绍适用场景、输出格式和调用注意事项。可用以下命令安装到 AI 代理目录。
 
 ```bash
 ipclick skill install        # 写到 .claude/skills/ipclick/SKILL.md
@@ -294,11 +289,10 @@ docker run -d -p 9528:9528 -p 127.0.0.1:9527:9527 --name ipclick ipclick:latest 
   ipclick run -w --web-lan
 ```
 
-镜像基于 **python:3.14-slim**，多阶段构建、非 root 运行，并且**默认自带浏览器渲染
-能力**——patchright 和 chromium 本体都打进去了，拉下来直接 `-a patchright` 就能渲染
-JS 页面，不用在容器里再下一遍。
+镜像基于 **python:3.14-slim**，采用多阶段构建并以非 root 用户运行。
+默认包含 patchright 和 Chromium 本体，使用 `-a patchright` 即可渲染 JS 页面。
 
-不需要渲染就构建精简版，省 1.5 GB：
+纯 HTTP 场景可构建精简版，减少约 1.5 GB 的浏览器文件。
 
 ```bash
 docker build -f docker/Dockerfile --build-arg ENGINE=none -t ipclick:slim .
@@ -309,21 +303,20 @@ docker build -f docker/Dockerfile --build-arg ENGINE=none -t ipclick:slim .
 
 ## 🚧 已知限制
 
-配置文件里出现、但改了不会有效果的项，这里如实列出。
+部署前需了解以下功能边界。
 
 - **服务发现只支持 `static` 与 `dns`**。etcd / Consul 的原生 API 没接（Consul 可以走它的
   DNS 接口）。
-- **分块下载与临时存储**未实现。流式通路已经就绪，这两项可以在其上做，目前还没做。
+- **分块下载与临时存储**未实现。目前可使用流式下载处理大文件。
 - **集群流式只有建流这一步会故障转移**。流建立之后中途断掉不会自动重连——那需要 Range 请求
   才能不重复数据。批量请求整批发给同一个节点，不跨节点拆分。
 - **没有文件上传字段**。要发 multipart 就自己拼好请求体，用 `data=<bytes>` 加上
   `Content-Type: multipart/form-data; boundary=...` 发出去。`files=` 不在协议里，进程内直接
   传给适配器时会抛 `ValidationError`。
 - **查询参数原样传递。** `params={"start": "2024-01-01"}` 发出去就是 `start=2024-01-01`。
-- **两次请求之间不保持会话。** `curl_cffi` / `niquests` 适配器按（代理, 证书校验, 指纹）缓存
-  Session，但**每次请求前都会清空这个 session 的 cookie jar**——服务端没有调用方会话的概念，
-  共用 session 却保留 cookie 等于跨调用方串号。单次请求内部（含重定向链）的 cookie 传递照常
-  由底层库处理。需要保持会话请在请求里显式传 `cookies=`。
+- **两次请求之间不保持 Cookie 会话。** `curl_cffi` / `niquests` 会复用按连接属性缓存的
+  Session，并在每次请求前清空 cookie jar，避免不同调用方共用 Cookie。
+  单次请求内部（含重定向链）的 Cookie 由底层库处理。需要携带会话状态时，请在请求中显式传入 `cookies=`。
 
 ## 🛠️ 开发
 
@@ -335,16 +328,17 @@ uv run ruff format src/ tests/  # 代码格式化
 uv run basedpyright src/ tests/ # 类型检查
 ```
 
-修改 `src/ipclick/dto/proto/task.proto` 后需重新生成代码：
+修改 `src/ipclick/dto/proto/task.proto` 后需重新生成代码。
 
 ```bash
 uv run python src/ipclick/dto/proto/generate.py
 ```
 
-依赖按用途分组（`test` / `lint` / `proto` / `release`，`dev` 是聚合组），
-CI 里每个 job 只装自己那一份。`[camoufox]` 与 `[playwright]` 在
-`[tool.uv].conflicts` 里声明为互斥（camoufox 钉着 `playwright<1.61`），
-所以装可选适配器时要逐个 `--extra` 列出，不能用 `--all-extras`。
+依赖按用途分组（`test` / `lint` / `proto` / `release`，`dev` 是聚合组），CI 按任务安装依赖。
+`[camoufox]` 与 `[playwright]`、`[linux]` 与 `[playwright]` 在 `[tool.uv].conflicts` 中分别声明为互斥。
+当前 Camoufox 0.5.9 要求 `playwright<1.63`，锁文件为 Camoufox 和独立 Playwright extra 分别解析依赖。
+安装可选适配器时，请逐项列出 `--extra`。
+同时选择互斥组合或使用 `--all-extras` 会导致解析失败。
 
 项目结构、门禁清单、提交规范与发布流程见 [开发](https://github.com/yuanqimanong/IPClick/wiki/Development)。
 
